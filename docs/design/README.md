@@ -12,5 +12,7 @@ discard clearly bad ones before thinking about how to build any of it.
   governor that keeps autonomy from becoming a fork bomb.
 - [self-evaluation.md](self-evaluation.md) — pre-flight critic (short loop) + retrospective (long
   loop), the honesty caveat, escalation mode, trust-ramp.
+- [autonomy-and-shutoff.md](autonomy-and-shutoff.md) — dead-man's switch vs. "don't babysit"; the
+  switch keyed on output-health, not human-attention (throttle / kill-switch / courtesy heartbeat).
 
 Open decisions are flagged inline in each note and mirrored in [../../OPEN-QUESTIONS.md](../../OPEN-QUESTIONS.md).
