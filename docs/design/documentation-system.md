@@ -38,7 +38,6 @@ state/
   ledger.jsonl             # append-only: every work-item outcome (incl. outcome: abandoned|deferred
                            #   + finding fingerprint = file+type+line-window), all nights — SINGLE TRUTH
   runs.jsonl               # append-only telemetry: one line per stage invocation — RUNNER writes
-  backlog.md               # self-authored deferred ideas (candidate for removal — see re-review §4)
 runs/<date>/<item-id>/     # ephemeral per-night hand-off (archived after the night)
   finding.json             #   Explore writes
   worknote.md              #   Fix writes
@@ -58,7 +57,7 @@ NIGHTSHIFT.md (optional)           # local "don't touch" rules, robots.txt-style
 
 | Stage | reads | writes |
 |-------|-------|--------|
-| **Select** (Brain) | rulebook · ledger (distilled) · abandoned · backlog | — (picks a repo) |
+| **Select** (Brain) | rulebook · ledger (distilled, incl. `outcome: abandoned\|deferred` rows) | — (picks a repo) |
 | **Explore** | target repo · NIGHTSHIFT.md · "already done here" (derived from ledger) | `finding.json` |
 | **Fix** | `finding.json` · target files | branch + commits · `worknote.md` |
 | **Review** | `finding.json` · `worknote.md` · the diff | `review.md` |
@@ -80,6 +79,10 @@ v1 records but does not auto-act on them (distinct from the deferred §5 value-l
 - **OPEN-QUESTIONS §2 (central vs per-repo memory): resolved → central.** There is one
   `ledger.jsonl`; per-repo views are *derived* from it by filtering, never kept as separate files
   (invariants 1 & 2). Format is JSONL append-only; the semantic/notes tier is **not** in v1.
+- **`backlog.md` is cut for v1 (re-review §4): decided.** It was the semantic tier's last remnant —
+  agent-authored free-prose with no provenance. Deferred ideas are instead `ledger.jsonl` rows with
+  `outcome: deferred` (+ fingerprint), surfaced in a digest section. Same need, no confabulation
+  surface, no hand-maintained parallel file.
 - **`runs/` is ephemeral working state**, archived (not pruned) after the night for audit value;
   it is never a source of truth — `ledger.jsonl` is.
 - **This mirrors the project's own doc philosophy** — `CONTEXT.md` = canonical current state,

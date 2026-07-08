@@ -5,10 +5,14 @@
 
 ## The problem this addresses
 
-We want to lean on modern-LLM intelligence for **maximum autonomy** — but the target could be a
-**production / enterprise server** where the highest caution and strict rules are mandatory. An
-autonomous agent that can act unattended overnight is only acceptable if "be careful" is more than
-a hope.
+We want to lean on modern-LLM intelligence for **maximum autonomy** — but an agent that acts
+unattended overnight is only acceptable if "be careful" is more than a hope. In v1 the habitat is
+**the owner's own repositories** (not a production / enterprise server — that story is explicitly
+deferred, [ADR 0004](../adr/0004-v1-scope-branch-isolated-steward.md)), and the load-bearing safety
+property is not a prompt at all: output can only ever land on isolated `nightshift/*` branches —
+**never a PR, never a merge** — and that confinement is enforced mechanically by the git hook in
+[hook-spec.md](hook-spec.md), not by the agent's goodwill. A bad change is therefore a branch the
+owner deletes, not an incident.
 
 ## Idea: three layers, defence-in-depth
 
@@ -29,19 +33,28 @@ not left to the agent's goodwill. Prompt = intent; enforcement = guarantee.
 The system prompt should ground the agent in *why it exists and what is at stake*, not just tasks:
 
 - **Responsibility:** every repo leaves the night *better or unchanged* — never worse. Every change
-  is human-reviewable in the morning (draft-PR, never a merge).
+  is human-reviewable in the morning as an isolated `nightshift/*` branch — never a PR, never merged.
 - **Motivation:** steady, low-risk improvement. The diligent *Heinzelmännchen* — steady, not heroic.
 - **Avoid:** noise/churn (trivial diffs that cost review time), risky/irreversible changes,
   forbidden zones, work outside the budget.
-- **Stakes & the guiding asymmetry:** *"This may be a production / enterprise server. A bad
-  autonomous change, while nobody is watching, is expensive and destroys trust. The cost of a
-  **missed** improvement is zero; the cost of a bad merge-able change is high. When in doubt: **do
-  nothing, log it, defer to the backlog."*
+- **Stakes & the guiding asymmetry:** *"These are the owner's own repositories, and your output is
+  an isolated branch that is never merged, so a bad change is cheap to throw away. But your work is
+  reviewed by a human in the morning, and their time is not free. The cost of a **missed**
+  improvement is zero; the cost of noise — a trivial or wrong change that costs review time — is
+  real. When in doubt: **do nothing and log why.**"*
 
 That asymmetry is the one sentence that makes autonomy *safe*: the agent is always allowed to do
 **nothing**.
 
 ## `rulebook.md` — what an operator can set (idea-level)
+
+> **Note:** this is the original idea-level wish-list. The ratified v1 rulebook is narrower — a
+> minimal `rulebook.yaml` (allowed repos, per-repo `mode` = `findings-only` | `branch-fix`, and
+> limits) per [ADR 0004](../adr/0004-v1-scope-branch-isolated-steward.md) and
+> [documentation-system.md](documentation-system.md). In particular: output is **branches, not PRs**
+> (so "fix-PR" / "max PRs per night" read as branch modes / `max_branches_per_night`); execution
+> modes and live weight self-adjust are **cut**; and hard prohibitions live in the git hook
+> ([hook-spec.md](hook-spec.md)), not the rulebook.
 
 - Repo whitelist + per-repo mode (review-only vs. fix-PR).
 - Prohibitions: no `main`, no secrets/CI/deps, no deletes, no force-push, "don't touch" globs.

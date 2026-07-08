@@ -45,9 +45,12 @@ tell that the budget window is exhausted — both live in the adapter.
 
 A prior-art survey ([`docs/prior-art.md`](docs/prior-art.md)) found no off-the-shelf fit, but most
 pieces exist. So nightshift builds only its **novel core — cross-repo self-prioritization + the
-ledger (Brain + Memory)** — and borrows the rest: `claude -p`/Ralph-loop for the runtime, a wrapper
-like MartinLoop for the budget/verify gate, oss-autopilot's scoring as the selection template, and
-the existing `nightly-review-pipeline` for the fix flow. See [ADR 0002](docs/adr/0002-build-the-brain-borrow-the-body.md).
+ledger (Brain + Memory)** — and borrows the rest: `claude -p`/Ralph-loop for the runtime,
+oss-autopilot's scoring as the selection template, and the existing `nightly-review-pipeline` for
+the fix flow. See [ADR 0002](docs/adr/0002-build-the-brain-borrow-the-body.md). The budget gate is
+**not** a MartinLoop wrapper (ADR 0002's original plan): [ADR 0004](docs/adr/0004-v1-scope-branch-isolated-steward.md)
+makes it the runner's own `max_runs_per_night` cap + per-run bounds; the verify idea survives only
+as a CI-green check in the Review stage.
 Execution stays on the **first-party CLI** (subscription-safe, not a custom API wrapper) —
 [ADR 0003](docs/adr/0003-subscription-safe-execution.md). The concrete **v1 cut** — branch-isolated
 output, the run pipeline, budget cap, and the force-push hook — is
@@ -72,6 +75,7 @@ open question is whether nightshift *reuses* that pipeline as a tool or supersed
 
 ## Non-goals (current)
 
-- No auto-merge, ever. Humans review the morning-after PRs.
+- No auto-merge, ever. In v1 the output is isolated `nightshift/*` branches, never PRs; humans
+  review those branches in the morning ([ADR 0004](docs/adr/0004-v1-scope-branch-isolated-steward.md)).
 - Not a hosted SaaS; self-hosted, uses your own subscription/key.
 - Not a general task runner — scope is review and fix of code in allowed repos.

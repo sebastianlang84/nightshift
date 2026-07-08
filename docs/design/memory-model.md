@@ -1,5 +1,12 @@
 # Design note — Memory (the ledger)
 
+> **⚠️ Superseded by [documentation-system.md](documentation-system.md) + [ADR 0004](../adr/0004-v1-scope-branch-isolated-steward.md).**
+> The two-tier split (episodic + semantic/working memory), reflect/compaction, and the self-authored
+> backlog below are **cut from v1**. v1 memory is a single central append-only `ledger.jsonl` (per-repo
+> views *derived*, never stored); the "abandoned" set is folded into the ledger as `outcome: abandoned`
+> rows carrying a finding fingerprint (file + issue-type + line-window), not a separate `abandoned.jsonl`.
+> Kept for history.
+
 - Status: **idea-stage, not decided.** Captures the 2026-07-08 discussion for review.
 - No implementation details on purpose. Open decisions are flagged inline.
 

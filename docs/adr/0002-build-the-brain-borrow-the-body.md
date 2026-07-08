@@ -34,3 +34,11 @@ ledger — and borrow the body:**
 - We take on integration risk with 3–4 external pieces (their licenses/maturity must be verified
   before depending on them).
 - The design must keep the borrowed pieces behind seams so any one can be swapped (fits ADR 0001).
+
+## Amendment (2026-07-08) — budget/test gate superseded by ADR 0004
+
+The "Budget + test gate: MartinLoop (or an equivalent wrapper)" line above is **superseded**.
+[ADR 0004](0004-v1-scope-branch-isolated-steward.md) makes the budget gate the runner's own hard
+`max_runs_per_night` cap plus per-run bounds (`--max-turns`, wall-clock, auto-compact off), not a
+MartinLoop wrapper; the `--verify` idea survives only as a CI-green check inside the Review stage.
+The rest of this ADR (build-the-brain / borrow-the-body, and the other borrowed pieces) still holds.

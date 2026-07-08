@@ -1,5 +1,10 @@
 # Design note — Execution modes & the self-chaining governor
 
+> **⚠️ Superseded by [ADR 0004](../adr/0004-v1-scope-branch-isolated-steward.md).** The chain/parallel
+> modes and the agent-proposed `{mode, items[], depth}` plan below are **cut from v1**. The pipeline is
+> instead a fixed sequence of separated single-job runs, and the only self-chaining is the `Fix ⟷ Review`
+> loop, capped at N iterations **by the runner** (not the agent). Kept for history / possible revival.
+
 - Status: **idea-stage, not decided.** Captures the 2026-07-08 discussion for review.
 - No implementation details on purpose.
 

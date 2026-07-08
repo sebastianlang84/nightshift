@@ -1,5 +1,12 @@
 # Design note — Self-evaluation
 
+> **⚠️ Superseded by [ADR 0004](../adr/0004-v1-scope-branch-isolated-steward.md).** The pre-flight
+> critic-as-gate, the retrospective long-loop (reading human verdicts), and the auto trust-ramp below are
+> all **cut from v1**. The value bar is now *soft* — the agent's own justification + confidence, the
+> Review stage, and mechanical smallness limits — acceptable because output is branch-isolated and never
+> merged. The trust-ramp is a **manual** per-repo `mode` knob (`findings-only` → `branch-fix`) in
+> `rulebook.yaml`, not autonomy earned via self-eval. Kept for history.
+
 - Status: **idea-stage, not decided.** Captures the 2026-07-08 discussion for review.
 - No implementation details on purpose.
 

@@ -19,7 +19,8 @@ when a file's SHA changes. Central store vs. per-repo? File format (JSONL vs. sq
 _References: Aeon uses `MEMORY.md` + reflect/flush; nodeglobal/agents uses SQLite; Ralph-loop uses
 the filesystem/git/TODO as the substrate. Pick per format decision above._
 **Elaborated:** [`docs/design/memory-model.md`](docs/design/memory-model.md) — two-tier
-(episodic JSONL + semantic Markdown), self-authored backlog, reflect/compaction.
+(episodic JSONL + semantic Markdown), self-authored backlog, reflect/compaction. *(That two-tier
+design is now superseded for v1 — see the banner on that note and the resolution below.)*
 **Partly resolved** by [`docs/design/documentation-system.md`](docs/design/documentation-system.md):
 v1 is **central**, one append-only `ledger.jsonl`, per-repo views *derived* (not stored); semantic
 tier and reflect/compaction dropped from v1. Still open: staleness rule (finding-hash / file-SHA).
@@ -52,7 +53,8 @@ Biggest risk: "steady improvement" becomes steady noise (trivial diffs that cost
 steward must be allowed to do **nothing** when nothing is worth it (adaptive backoff survives).
 What is the value bar, and how is it enforced?
 **Elaborated:** [`docs/design/self-evaluation.md`](docs/design/self-evaluation.md) — the pre-flight
-critic enforces the value bar before a PR ships (abandon + backlog if below bar).
+critic enforces the value bar before a PR ships (abandon + backlog if below bar). *(Superseded by the
+RESOLVED decision above — the critic-as-gate is cut; the value bar is soft. See that note's banner.)*
 
 ## 6. Morning digest
 **RESOLVED (ADR 0004): derived `digests/<date>.md`, file-only in v1.** Reports shipped branches
@@ -66,8 +68,9 @@ human edits the YAML to graduate it to `branch-fix`. No auto-graduation in v1.
 Start review-only, graduate to fixes as confidence grows. Is this per-repo config, or automatic
 based on ledger outcomes?
 **Elaborated:** [`docs/design/self-evaluation.md`](docs/design/self-evaluation.md) — trust-ramp via
-the retrospective loop (autonomy earned from measured acceptance). Open: may the retrospective
-self-adjust selection weights live, or only propose?
+the retrospective loop (autonomy earned from measured acceptance). *(Superseded by the RESOLVED
+decision above — the retrospective/auto trust-ramp is cut; the ramp is the manual `mode` knob. See
+that note's banner.)*
 
 ## 8. Reuse vs. supersede `nightly-review-pipeline`
 **RESOLVED (ADR 0004): borrow patterns, supersede memory + PR flow.** Borrow worktree isolation, the
