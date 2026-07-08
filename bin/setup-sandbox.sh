@@ -36,8 +36,8 @@ branch_prefix: nightshift/
 limits:
   max_branches_per_night: 2
   max_open_branches: 10
-  max_files_per_change: 5
-  max_lines_per_change: 150
+  max_files_per_change: 15
+  max_lines_per_change: 400
 repos:
   - path: $SB/target
     mode: branch-fix
