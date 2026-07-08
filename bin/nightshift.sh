@@ -243,7 +243,7 @@ write_digest() { # made open status
     echo
     local fcount=0
     [ -f "$LEDGER" ] && fcount=$(jq -s --arg n "$NIGHT" '[.[]|select(.night==$n and .outcome=="finding")]|length' "$LEDGER" 2>/dev/null || echo 0)
-    echo "- agent: \`$NIGHTSHIFT_AGENT\` · budget: ${made}/${MAX_BRANCHES} branches · findings-only: ${fcount} · open (unmerged): ${open}/${MAX_OPEN}"
+    echo "- agent: \`$NIGHTSHIFT_AGENT\` · shipped this run: ${made} · findings-only: ${fcount} · open (unmerged): ${open}/${MAX_OPEN} (cap)"
     if [ -f "$RUNSLOG" ]; then
       runs=$(grep -c "\"night\":\"$NIGHT\"" "$RUNSLOG" || true)
       dur=$(jq -s --arg n "$NIGHT" '[.[]|select(.night==$n)|.duration_s]|add // 0' "$RUNSLOG")
@@ -276,25 +276,26 @@ write_digest() { # made open status
 main() {
   load_rulebook
   write_claude_settings
-  log "agent=$NIGHTSHIFT_AGENT prefix=$BRANCH_PREFIX caps: ${MAX_BRANCHES}/night, ${MAX_OPEN} open"
+  log "agent=$NIGHTSHIFT_AGENT prefix=$BRANCH_PREFIX · cap: max $MAX_OPEN unmerged ${BRANCH_PREFIX} branches"
 
-  local open; open=$(open_branch_count)
-  log "open nightshift branches (unmerged): $open / $MAX_OPEN"
-  if [ "$open" -ge "$MAX_OPEN" ]; then
-    log "FULL STOP — open-branch cap reached; producing nothing."
-    write_digest 0 "$open" backpressure
-    return 0
-  fi
-
-  local made=0 considered=0 findings=0 repo mode id found fp iter verdict wt base b summary
-  # per-NIGHT cap: seed made from branches already shipped tonight (survives multiple invocations)
-  [ -f "$LEDGER" ] && made=$(jq -s --arg n "$NIGHT" '[.[]|select(.night==$n and .outcome=="shipped")]|length' "$LEDGER" 2>/dev/null || echo 0)
-  made=${made:-0}
-  [ "$made" -gt 0 ] && log "already shipped tonight: $made (cap $MAX_BRANCHES)"
+  local made=0 considered=0 findings=0 repo mode id found fp iter verdict wt base b summary open pass=0 progress
+  # No per-night production cap. The ONLY cap is the count of OPEN (unmerged) nightshift/* branches:
+  # work continues while fewer than max_open_branches are unmerged; merging/closing frees slots and
+  # work resumes; when merging stops it fills to the cap and stops. "All night" continuous operation
+  # is bounded by this cap, by running out of new work, and by the subscription 5h window.
+  while true; do
+    [ "$made" -ge "${NIGHTSHIFT_MAX_RUN_BRANCHES:-50}" ] && { log "safety ceiling (${NIGHTSHIFT_MAX_RUN_BRANCHES:-50}) reached — stop"; break; }
+    open=$(open_branch_count)
+    if [ "$open" -ge "$MAX_OPEN" ]; then
+      log "open-branch cap reached ($open/$MAX_OPEN) — stop; merge/close some to free slots"
+      break
+    fi
+    pass=$((pass + 1))
+    progress=0
   while IFS=$'\t' read -r repo mode; do
     [ -n "$repo" ] || continue
-    [ "$made" -ge "$MAX_BRANCHES" ] && { log "nightly branch cap reached ($MAX_BRANCHES) — stop"; break; }
-    [ "$open" -ge "$MAX_OPEN" ] && { log "open-branch cap reached — stop"; break; }
+    open=$(open_branch_count)
+    [ "$open" -ge "$MAX_OPEN" ] && { log "open-branch cap reached ($open/$MAX_OPEN) — stop"; break; }
 
     id="$RUNS_DIR/item-$(date +%s%N)"; mkdir -p "$id"
     echo "$repo" > "$id/repo"
@@ -340,7 +341,7 @@ main() {
     b=""
     if [ "$verdict" = ship ]; then
       b=$(finalize "$repo" "$wt" "$id")
-      made=$((made + 1)); open=$((open + 1))
+      made=$((made + 1)); progress=1
       log "  $(basename "$repo"): shipped -> $b"
     else
       ledger_append "$(basename "$id")" "$repo" "$fp" "" "" "abandoned" "$summary"
@@ -349,9 +350,12 @@ main() {
     remove_worktree "$repo" "$wt"
     [ -n "$b" ] && git -C "$repo" branch -q -D "$b" >/dev/null 2>&1 || true
   done < <(select_order)
+    [ "$progress" -eq 0 ] && { log "pass $pass: no new shippable work — stop"; break; }
+  done
 
+  open=$(open_branch_count)
   write_digest "$made" "$open" ok
-  log "night done: $made shipped, $considered considered."
+  log "night done: $made shipped this run, $considered considered, $open now open (cap $MAX_OPEN)."
 }
 
 main "$@"

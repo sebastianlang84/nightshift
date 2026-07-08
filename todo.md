@@ -3,6 +3,15 @@
 Running list of enhancements to build later. Not design tensions (those live in OPEN-QUESTIONS.md)
 and not the ratified v1 scope (ADR 0004) — just good ideas parked with enough context to act on.
 
+## Schedule management — templates / scripts (create / edit / delete)
+
+Convenience tooling to manage nightshift's schedule(s) efficiently instead of hand-editing timers.
+Small scripts (or templates) to **create / edit / delete** scheduled runs — wrap the systemd-timer
+(or cron) setup that will drive the nightly loop: install/enable/disable/list, sane defaults
+(when to run, adaptive backoff), and a `--dry-run`. Pairs with the eventual scheduler that makes the
+"runs all night" behaviour real (the open-branch cap already handles throughput; the scheduler
+handles *when* and re-invocation between merges).
+
 ## PR / branch review mode — merge-recommendation layer
 
 A separate mode that reviews **all open `nightshift/*` branches (or PRs)** and gives a

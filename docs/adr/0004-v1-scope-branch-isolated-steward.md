@@ -86,13 +86,14 @@ central ledger) and its draft-PR flow (→ branches). No code dependency; it is 
 Decisions taken while working through `docs/design/fable-rereview-2026-07-08.md`. Appended, not
 rewritten, so the evolution stays traceable.
 
-- **Global open-branch cap (backpressure).** A hard global ceiling — `max_open_branches` (default
-  10, a rulebook knob) counted as *unmerged* `nightshift/*` branches across all repos — triggers a
-  full stop: once reached, nightshift produces nothing until the human harvests (merges/deletes)
-  some. This one mechanism closes three re-review findings at once: **§2d** (branch litter is now
-  bounded), **§5** (production self-throttles to zero on neglect — the human's harvesting *is* the
-  feedback signal, with no verdict-recording machinery), and **§3e** (counting *remote* branches to
-  enforce the cap reconciles against reality, not the ledger's stale "pushed" record).
+- **Open-branch cap = the sole throughput cap (backpressure).** `max_open_branches` (default **2**,
+  a rulebook knob) = the max number of *unmerged* `nightshift/*` branches allowed to exist at once,
+  across all repos, counted live from the real remote each iteration. It is **not** a per-night
+  production count: merging/closing a branch frees a slot and work resumes, so continuous review lets
+  it run all night; when the human stops merging it fills to the cap and stops. This one mechanism
+  closes three re-review findings at once: **§2d** (litter bounded), **§5** (production self-throttles
+  to zero on neglect — the human's harvesting *is* the feedback signal), and **§3e** (counting
+  *remote* branches reconciles against reality, not the ledger's stale "pushed" record).
 - **§5 (value measurement) resolved for v1 → do not build it.** With learning / retrospective /
   trust-ramp cut, nothing in v1 consumes a human verdict, so recording one is YAGNI. Value judgment
   is the human's responsibility; if they stop harvesting, the branch cap makes the system idle and
@@ -106,10 +107,12 @@ rewritten, so the evolution stays traceable.
   thin Claude `PreToolUse` hook only blocks disabling that hook (`--no-verify`, `core.hooksPath`
   overrides). Merge becomes impossible (it needs a push to `main`). This turns the load-bearing
   branch-only claim from a promise into a guarantee.
-- **Budget unit = finished branches (§1.1 resolved).** The nightly knob is `max_branches_per_night`
-  (default **2**), counted in shipped improvements, not invocations; internal per-stage `claude -p`
-  calls are bounded separately by the per-run limits. Coexists with the global `max_open_branches`
-  cap (default 10): ≤2 new per night, ≤10 unmerged total.
+- **Budget unit (§1.1) — corrected 2026-07-09.** Earlier this amendment had a per-night production
+  cap (`max_branches_per_night: 2`); that was wrong and is **removed**. There is no per-night
+  production count. Throughput is governed solely by the open-branch cap above (unmerged branches
+  lying around). Internal per-stage `claude -p` calls stay bounded by the per-run limits; a safety
+  ceiling (`NIGHTSHIFT_MAX_RUN_BRANCHES`, default 50) guards against a runaway if the open-count ever
+  misreads. True continuous overnight operation is otherwise bounded by the subscription 5h window.
 - **Operational telemetry (not value-learning).** A new append-only `state/runs.jsonl`, written by
   the **Runner** (see [`documentation-system.md`](../design/documentation-system.md)), records one
   line per stage invocation: stage, model, start, duration, tokens (from the CLI's `--output-format
