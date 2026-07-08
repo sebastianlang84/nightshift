@@ -10,7 +10,7 @@ remembering what it already did, and staying inside configurable rules and a tim
 **Status: early prototype.** The v1 scope is decided ([ADR 0004](docs/adr/0004-v1-scope-branch-isolated-steward.md))
 and a runnable **mock** prototype exercises the full loop end-to-end against a throwaway sandbox — see
 [`docs/design/prototype.md`](docs/design/prototype.md) (`bin/setup-sandbox.sh && bin/nightshift.sh`).
-The `claude -p` adapter is still stubbed.
+The `claude -p` adapter now runs the real Explore/Fix/Review stages (verified against the sandbox).
 
 Start here:
 - [`CONTEXT.md`](CONTEXT.md) — what nightshift is, its architecture, and the canonical vocabulary.

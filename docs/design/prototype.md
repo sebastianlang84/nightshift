@@ -1,13 +1,15 @@
 # Prototype — how to run it
 
-- Status: **runnable mock prototype, 2026-07-08.** Proves the v1 mechanics end-to-end with zero risk
-  to real repos. The `claude -p` adapter is stubbed (experimental, unverified) — mock is the tested path.
+- Status: **runnable prototype, 2026-07-08.** Proves the v1 mechanics end-to-end with zero risk to
+  real repos. Both agent paths are verified against the sandbox: `mock` (deterministic) and `claude`
+  (real Explore/Fix/Review via the first-party CLI).
 
 ## Run it
 
 ```sh
-bin/setup-sandbox.sh      # throwaway target repo + local bare remote + a planted typo, writes rulebook.yaml
-bin/nightshift.sh         # one night, mock agent (NIGHTSHIFT_AGENT=mock is the default)
+bin/setup-sandbox.sh                    # throwaway target repo + local bare remote + a planted typo
+bin/nightshift.sh                       # one night, mock agent (default)
+NIGHTSHIFT_AGENT=claude bin/nightshift.sh   # one night, real claude -p stages
 ```
 
 Then look at `digests/<date>.md`, `state/ledger.jsonl`, `state/runs.jsonl`, and the pushed
@@ -32,8 +34,12 @@ Stages are invoked through `run_agent(stage, workdir, item_dir)`, which dispatch
 
 - `NIGHTSHIFT_AGENT=mock` — deterministic fake stages (fixes a planted typo). The tested path.
 - `NIGHTSHIFT_AGENT=claude` — calls the first-party CLI headless (`claude -p --output-format json`,
-  ADR 0003). **Experimental / unverified this session**; wiring it up reliably (structured stage
-  output, sub-agents for Explore, usage parsing, the PreToolUse guard) is the next milestone.
+  ADR 0003), **verified**: a real run found the planted typo (pinning the line window more precisely
+  than the mock), fixed exactly it, reviewed it independently, and shipped — `main` untouched.
+  The agent only reads/edits; the Runner owns all git. `runs.jsonl` captured real tokens **and cost**
+  (~$0.37 for the trivial fix across 3 Opus calls — telemetry immediately surfaces that a smaller
+  model for Explore/Review is the obvious cost lever). Still to harden: sub-agents for Explore
+  (context control, §3b), the PreToolUse guard wired into settings, and non-sandbox permission mode.
 
 ## Files
 

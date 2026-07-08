@@ -40,13 +40,14 @@ load_rulebook() {
 }
 
 # --------------------------------------------------------------- telemetry ----
-append_run() { # stage agent start dur tokens status item
+append_run() { # stage agent start dur tokens status item cost
   jq -nc \
     --arg night "$NIGHT" --arg item "$7" --arg stage "$1" --arg model "$2" \
-    --argjson start "$3" --argjson dur "$4" --arg tokens "$5" --argjson status "$6" \
+    --argjson start "$3" --argjson dur "$4" --arg tokens "$5" --argjson status "$6" --arg cost "$8" \
     '{night:$night,item:$item,stage:$stage,model:$model,start:$start,
       duration_s:$dur,
       tokens:($tokens|if .=="" then null else (tonumber? // null) end),
+      cost_usd:($cost|if .=="" then null else (tonumber? // null) end),
       exit:$status}' >> "$RUNSLOG"
 }
 
@@ -67,16 +68,17 @@ already_done() { # fingerprint
 
 # --------------------------------------------------------------- run_agent ----
 run_agent() { # stage workdir item_dir
-  local stage="$1" workdir="$2" item_dir="$3" start end status=0 tokens=""
+  local stage="$1" workdir="$2" item_dir="$3" start end status=0 tokens="" cost=""
   start=$(date +%s)
   if [ "$NIGHTSHIFT_AGENT" = mock ]; then
     "mock_$stage" "$workdir" "$item_dir" || status=$?
   else
     claude_run "$stage" "$workdir" "$item_dir" || status=$?
     tokens=$(cat "$item_dir/.tokens_$stage" 2>/dev/null || true)
+    cost=$(cat "$item_dir/.cost_$stage" 2>/dev/null || true)
   fi
   end=$(date +%s)
-  append_run "$stage" "$NIGHTSHIFT_AGENT" "$start" "$((end - start))" "$tokens" "$status" "$(basename "$item_dir")"
+  append_run "$stage" "$NIGHTSHIFT_AGENT" "$start" "$((end - start))" "$tokens" "$status" "$(basename "$item_dir")" "$cost"
   return "$status"
 }
 
@@ -101,30 +103,38 @@ mock_review() { # workdir item_dir
   jq -nc '{verdict:"ship",reason:"Typo fix; single file, reversible, no behaviour change — clears the smallness bar."}' > "$id/review.md"
 }
 
-# ---- claude adapter (EXPERIMENTAL — unverified this session; first-party CLI, ADR 0003) ----
+# ---- claude adapter (first-party CLI headless, ADR 0003) ----
+# The agent only reads/edits files; the Runner owns all git (branch/commit/push).
+# Sandbox default uses --dangerously-skip-permissions (throwaway repo; git-level
+# confinement via hooks/pre-push holds regardless of Claude's permission mode).
 claude_run() { # stage workdir item_dir
   local stage="$1" wd="$2" id="$3" prompt out
+  local flags="${NIGHTSHIFT_CLAUDE_FLAGS:---dangerously-skip-permissions --max-turns 25}"
   prompt="$(cat "$NIGHTSHIFT_HOME/prompts/$stage.md")
 
 ## Context
-Repo working directory: $wd
-Item directory: $id"
+Repo working directory: $wd"
   case "$stage" in
     fix|review) prompt="$prompt
 
 ### finding.json
 $(cat "$id/finding.json")" ;;
   esac
-  [ "$stage" = review ] && prompt="$prompt
+  if [ "$stage" = review ]; then
+    prompt="$prompt
 
-### worknote.md
-$(cat "$id/worknote.md" 2>/dev/null || true)"
-  out="$(cd "$wd" && claude -p "$prompt" --output-format json 2>/dev/null)" || return 1
-  printf '%s' "$out" | jq -r '.result // ""' > "$id/$stage.out"
-  printf '%s' "$out" | jq -r '.usage.output_tokens // .usage.total_tokens // empty' > "$id/.tokens_$stage" 2>/dev/null || true
+### git diff (working tree)
+$(git -C "$wd" diff)"
+  fi
+  # shellcheck disable=SC2086
+  out="$(cd "$wd" && claude -p "$prompt" --output-format json $flags 2>/dev/null)" || return 1
+  printf '%s' "$out" | jq -r '.[-1].result // ""'          > "$id/$stage.out"
+  printf '%s' "$out" | jq -r '.[-1].usage.output_tokens // empty' > "$id/.tokens_$stage" 2>/dev/null || true
+  printf '%s' "$out" | jq -r '.[-1].total_cost_usd // empty'      > "$id/.cost_$stage"   2>/dev/null || true
   case "$stage" in
-    explore) sed -n '/{/,/}/p' "$id/$stage.out" | head -c 4000 > "$id/finding.json" ;;
-    review)  sed -n '/{/,/}/p' "$id/$stage.out" | head -c 2000 > "$id/review.md" ;;
+    explore) python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/finding.json" ;;
+    fix)     cp "$id/$stage.out" "$id/worknote.md" ;;
+    review)  python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/review.md" ;;
   esac
   return 0
 }

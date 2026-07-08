@@ -70,8 +70,8 @@ Reads flow strictly downstream. The human touches exactly two things: the digest
 rulebook (write).
 
 Orthogonal to the stages, the **Runner** wraps every stage invocation and appends one
-`state/runs.jsonl` line — operational telemetry: stage, model, start, duration, tokens (from the
-CLI's `--output-format json` usage where available), exit. The Runner is its single writer; the
+`state/runs.jsonl` line — operational telemetry: stage, model, start, duration, tokens **and cost**
+(from the CLI's `--output-format json` usage/`total_cost_usd`), exit. The Runner is its single writer; the
 agents do not self-report. Statistics are derived from it on demand and summarised in the digest;
 v1 records but does not auto-act on them (distinct from the deferred §5 value-learning).
 

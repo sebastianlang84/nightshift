@@ -3,6 +3,9 @@ in the provided finding.json — and nothing else.
 
 Rules:
 - Keep the diff minimal, single-concern, reversible. Touch no unrelated files.
-- Run no destructive commands. Stay inside this repository's working tree.
-- After editing, write a short rationale (what changed and why it is safe) to
-  `worknote.md` in the item directory.
+- Edit files in the working tree only. Do NOT run git (no add/commit/push/branch)
+  and do NOT create scratch files — the runner handles branching and committing.
+- Run no destructive commands.
+
+In your final message, briefly state what you changed and why it is safe (this
+becomes the worknote).
