@@ -35,9 +35,10 @@ one). Clean split: target repos carry *output*, the control repo carries *record
 ```
 rulebook.yaml              # governance: allowed repos, per-repo mode, limits — HUMAN writes
 state/
-  ledger.jsonl             # append-only: every work-item outcome, all repos, all nights — SINGLE TRUTH
-  abandoned.jsonl          # false positives (repo, target, finding-hash, reason, ts) — anti-retry
-  backlog.md               # self-authored deferred ideas
+  ledger.jsonl             # append-only: every work-item outcome (incl. outcome: abandoned|deferred
+                           #   + finding fingerprint = file+type+line-window), all nights — SINGLE TRUTH
+  runs.jsonl               # append-only telemetry: one line per stage invocation — RUNNER writes
+  backlog.md               # self-authored deferred ideas (candidate for removal — see re-review §4)
 runs/<date>/<item-id>/     # ephemeral per-night hand-off (archived after the night)
   finding.json             #   Explore writes
   worknote.md              #   Fix writes
@@ -61,12 +62,18 @@ NIGHTSHIFT.md (optional)           # local "don't touch" rules, robots.txt-style
 | **Explore** | target repo · NIGHTSHIFT.md · "already done here" (derived from ledger) | `finding.json` |
 | **Fix** | `finding.json` · target files | branch + commits · `worknote.md` |
 | **Review** | `finding.json` · `worknote.md` · the diff | `review.md` |
-| **Finalize** (Brain) | `review.md` | push **or** → `abandoned.jsonl` + `backlog.md`; append `ledger.jsonl` |
+| **Finalize** (Brain) | `review.md` | push **or** append `ledger.jsonl` with `outcome: abandoned\|deferred` + fingerprint |
 | **Digest** (end of night) | tonight's `ledger.jsonl` entries · all `review.md` | `digests/<date>.md` |
 | **Human** (morning) | `digests/<date>.md`, then the branches | `rulebook.yaml` (governance only) |
 
 Reads flow strictly downstream. The human touches exactly two things: the digest (read) and the
 rulebook (write).
+
+Orthogonal to the stages, the **Runner** wraps every stage invocation and appends one
+`state/runs.jsonl` line — operational telemetry: stage, model, start, duration, tokens (from the
+CLI's `--output-format json` usage where available), exit. The Runner is its single writer; the
+agents do not self-report. Statistics are derived from it on demand and summarised in the digest;
+v1 records but does not auto-act on them (distinct from the deferred §5 value-learning).
 
 ## Consequences / resolved questions
 

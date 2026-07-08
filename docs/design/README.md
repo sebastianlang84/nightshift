@@ -16,5 +16,7 @@ discard clearly bad ones before thinking about how to build any of it.
   switch keyed on output-health, not human-attention (throttle / kill-switch / courtesy heartbeat).
 - [documentation-system.md](documentation-system.md) — **accepted (v1).** The one doc/state system
   every run and the human share: four invariants, two physical homes, the read/write matrix.
+- [hook-spec.md](hook-spec.md) — **accepted (v1).** The git-confinement hook (§2a): two layers that
+  make "branch-only" a mechanical guarantee via resolved-ref checking, not command parsing.
 
 Open decisions are flagged inline in each note and mirrored in [../../OPEN-QUESTIONS.md](../../OPEN-QUESTIONS.md).
