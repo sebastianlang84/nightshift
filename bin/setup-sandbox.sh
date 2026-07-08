@@ -34,8 +34,7 @@ git push -q -u origin main
 cat > "$HOME_DIR/rulebook.yaml" <<EOF
 branch_prefix: nightshift/
 limits:
-  max_branches_per_night: 2
-  max_open_branches: 10
+  max_open_branches: 2
   max_files_per_change: 15
   max_lines_per_change: 400
 repos:
