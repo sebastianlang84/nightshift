@@ -54,8 +54,8 @@ def main(path: str) -> None:
     print(f"prefix\t{prefix}")
     print(f"max_branches\t{limits.get('max_branches_per_night', '2')}")
     print(f"max_open\t{limits.get('max_open_branches', '10')}")
-    print(f"max_files\t{limits.get('max_files_per_change', '5')}")
-    print(f"max_lines\t{limits.get('max_lines_per_change', '150')}")
+    print(f"max_files\t{limits.get('max_files_per_change', '15')}")
+    print(f"max_lines\t{limits.get('max_lines_per_change', '400')}")
     for r in repos:
         print(f"repo\t{r.get('path', '')}\t{r.get('mode', 'findings-only')}")
 
