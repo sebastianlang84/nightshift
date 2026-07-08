@@ -3,6 +3,15 @@
 Running list of enhancements to build later. Not design tensions (those live in OPEN-QUESTIONS.md)
 and not the ratified v1 scope (ADR 0004) — just good ideas parked with enough context to act on.
 
+## Scheduler — nightly 03:00 (requested, soon)
+
+**Concrete first target (user, 2026-07-09):** a systemd timer (or cron) that fires **every night at
+03:00 local** and runs nightshift across all rulebook repos, unattended. This is what makes the
+"runs all night" behaviour real (the open-branch cap already governs throughput; the scheduler
+governs *when* + re-invocation). Also discuss then: should nightshift auto-open **draft PRs** for its
+branches instead of leaving bare branches (user noticed branches push but no PR is offered — that is
+intentional in v1, but auto-draft-PR would cut harvest friction; ties into the PR-review-mode idea).
+
 ## Schedule management — templates / scripts (create / edit / delete)
 
 Convenience tooling to manage nightshift's schedule(s) efficiently instead of hand-editing timers.
