@@ -3,6 +3,8 @@
 The design tensions we still need to resolve. Move each to an ADR once decided.
 
 ## 1. Selection — how does the steward choose work? (explore vs. exploit)
+**RESOLVED (ADR 0004): north star = value-per-night**, not coverage. Selector optimises expected
+value; "do nothing" is a success outcome. Signals/scoring detail deferred to build.
 Pure random is wasteful; pure signal-driven (churn, missing tests, TODO/FIXME, open backlog)
 misses new ground. What is the balance, and what signals feed it? The ledger is the anti-repeat
 mechanism. **North star to settle first:** value-per-night (few high-value changes) vs. coverage
@@ -17,10 +19,14 @@ when a file's SHA changes. Central store vs. per-repo? File format (JSONL vs. sq
 _References: Aeon uses `MEMORY.md` + reflect/flush; nodeglobal/agents uses SQLite; Ralph-loop uses
 the filesystem/git/TODO as the substrate. Pick per format decision above._
 **Elaborated:** [`docs/design/memory-model.md`](docs/design/memory-model.md) — two-tier
-(episodic JSONL + semantic Markdown), self-authored backlog, reflect/compaction. Open: central vs
-per-repo notes; SQLite trigger; staleness rule.
+(episodic JSONL + semantic Markdown), self-authored backlog, reflect/compaction.
+**Partly resolved** by [`docs/design/documentation-system.md`](docs/design/documentation-system.md):
+v1 is **central**, one append-only `ledger.jsonl`, per-repo views *derived* (not stored); semantic
+tier and reflect/compaction dropped from v1. Still open: staleness rule (finding-hash / file-SHA).
 
 ## 3. The rulebook — scope and format
+**RESOLVED (ADR 0004): minimal `rulebook.yaml`** — allowed repos, per-repo `mode`
+(`findings-only`|`branch-fix`), limits. Hard prohibitions live in the hook, not here.
 Repo whitelist + per-repo mode (review-only vs. fix-PR), prohibitions (no main, no secrets/CI/deps,
 no deletes), tool allowlist, change-size limits (max lines/files per PR, max PRs/night). Declarative
 (YAML) with human ownership. How much should the agent be trusted to interpret vs. hard-enforced?
@@ -28,6 +34,8 @@ no deletes), tool allowlist, change-size limits (max lines/files per PR, max PRs
 — three layers (constitution / rulebook / hard-enforcement), precedence, the four pillars.
 
 ## 4. Budget model — the real break from a per-task timer
+**RESOLVED (ADR 0004): hard `max_runs_per_night` cap** (small) is the primary control, plus per-run
+bounds + auto-compact off; usage-window observation is a backstop. Supersedes MartinLoop as gate.
 Instead of a timer per task: one outer loop `{pick work item → bounded run → record outcome}` that
 repeats until the time/quota window is spent. Inner runs stay bounded (no drift); the outer loop
 consumes the night. How do we detect "window exhausted" per harness (adapter concern)?
@@ -37,6 +45,9 @@ a metered API client. MartinLoop can supply the per-run budget/verify gate (ADR 
 as single/chain/parallel modes, plus the self-chaining governor (hard spawn caps in the runner).
 
 ## 5. Anti-churn — the value bar
+**RESOLVED (ADR 0004): the value bar is *soft* in v1** — agent justification + confidence, the Review
+stage, and smallness limits — acceptable because output is branch-isolated and never merged (a bad
+change is a branch you delete). No calibrated critic / shadow-nights needed.
 Biggest risk: "steady improvement" becomes steady noise (trivial diffs that cost review time). The
 steward must be allowed to do **nothing** when nothing is worth it (adaptive backoff survives).
 What is the value bar, and how is it enforced?
@@ -44,10 +55,14 @@ What is the value bar, and how is it enforced?
 critic enforces the value bar before a PR ships (abandon + backlog if below bar).
 
 ## 6. Morning digest
+**RESOLVED (ADR 0004): derived `digests/<date>.md`, file-only in v1.** Reports shipped branches
+*and* considered-but-abandoned (the "do-nothing report"); empty nights still get one.
 The human should wake to a **summary of the night**, not 30 raw PRs. What does the digest contain,
 and where does it live?
 
 ## 7. Trust ramp
+**RESOLVED (ADR 0004): manual, via the rulebook `mode` knob** — a repo starts `findings-only`, the
+human edits the YAML to graduate it to `branch-fix`. No auto-graduation in v1.
 Start review-only, graduate to fixes as confidence grows. Is this per-repo config, or automatic
 based on ledger outcomes?
 **Elaborated:** [`docs/design/self-evaluation.md`](docs/design/self-evaluation.md) — trust-ramp via
@@ -55,6 +70,9 @@ the retrospective loop (autonomy earned from measured acceptance). Open: may the
 self-adjust selection weights live, or only propose?
 
 ## 8. Reuse vs. supersede `nightly-review-pipeline`
+**RESOLVED (ADR 0004): borrow patterns, supersede memory + PR flow.** Borrow worktree isolation, the
+`claude -p` orchestration shape, and the review lenses; supersede the per-repo task-file memory (→
+central ledger) and the draft-PR flow (→ branches). No code dependency — it is a skill, not a library.
 Does nightshift call the existing pipeline as its "fix" tool, or absorb/replace it? See CONTEXT.md.
 
 ## 9. Adopt vs. build — RESOLVED (ADR 0002)

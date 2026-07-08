@@ -14,5 +14,7 @@ discard clearly bad ones before thinking about how to build any of it.
   loop), the honesty caveat, escalation mode, trust-ramp.
 - [autonomy-and-shutoff.md](autonomy-and-shutoff.md) — dead-man's switch vs. "don't babysit"; the
   switch keyed on output-health, not human-attention (throttle / kill-switch / courtesy heartbeat).
+- [documentation-system.md](documentation-system.md) — **accepted (v1).** The one doc/state system
+  every run and the human share: four invariants, two physical homes, the read/write matrix.
 
 Open decisions are flagged inline in each note and mirrored in [../../OPEN-QUESTIONS.md](../../OPEN-QUESTIONS.md).

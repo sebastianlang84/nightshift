@@ -18,7 +18,8 @@ An **unattended overnight steward**. Given a set of repositories it is allowed t
 2. works across **multiple** repos and **self-selects** what to review or fix next;
 3. keeps a **persistent memory (ledger)** of what it did, so it does not repeat work;
 4. obeys a **configurable rulebook** (allowed repos, tools, change-size limits, hard "don't touch");
-5. both **reviews** and **fixes** — fixes land as test-gated **draft PRs**, never auto-merged;
+5. both **reviews** and **fixes** — in **v1**, fixes land on isolated `nightshift/*` **branches**,
+   never PRs, never merged ([ADR 0004](docs/adr/0004-v1-scope-branch-isolated-steward.md));
 6. is **budget-aware** — it works until its time/quota window is spent, then checkpoints and stops.
 
 Guiding image: the *Heinzelmännchen* — works at night within its rules, stops when observed / out
@@ -48,7 +49,9 @@ ledger (Brain + Memory)** — and borrows the rest: `claude -p`/Ralph-loop for t
 like MartinLoop for the budget/verify gate, oss-autopilot's scoring as the selection template, and
 the existing `nightly-review-pipeline` for the fix flow. See [ADR 0002](docs/adr/0002-build-the-brain-borrow-the-body.md).
 Execution stays on the **first-party CLI** (subscription-safe, not a custom API wrapper) —
-[ADR 0003](docs/adr/0003-subscription-safe-execution.md).
+[ADR 0003](docs/adr/0003-subscription-safe-execution.md). The concrete **v1 cut** — branch-isolated
+output, the run pipeline, budget cap, and the force-push hook — is
+[ADR 0004](docs/adr/0004-v1-scope-branch-isolated-steward.md).
 
 ## Relationship to `nightly-review-pipeline`
 
