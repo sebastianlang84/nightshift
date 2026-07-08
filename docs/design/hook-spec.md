@@ -51,6 +51,24 @@ checks, no ref parsing:
 The hard work (which ref) is git's job via Layer 1; this layer only stops the agent from switching
 Layer 1 off.
 
+## Implementation (prototype) — how the layers are actually activated
+
+- **Layer 1 for the Runner's own push:** `finalize` pushes with `git -c core.hooksPath="$HOOKS_DIR"`.
+- **Layer 1 for the *agent*:** when launching `claude -p`, the Runner injects the hook via
+  environment — `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=$HOOKS_DIR`
+  — so *every* git the agent runs is confined. **Neither path writes to any repo's config**, so the
+  user's own pushes stay unconstrained. Verified: an agent-context `push origin HEAD:main` is
+  rejected, `nightshift/*` is allowed, and `.git/config` is untouched.
+- **Layer 2:** the Runner writes `state/claude-settings.json` registering `pretooluse-guard.sh` as a
+  `PreToolUse` hook and passes it via `--settings`. Verified (unit): the guard denies `--no-verify`
+  and `core.hooksPath` overrides, allows benign commands.
+
+**Known residual (v1):** the sandbox uses `--dangerously-skip-permissions`, and whether a PreToolUse
+hook fires under that mode is not yet verified in-session. Layer 1 (git-level) holds regardless. For
+real repos, two backstops close the residual: (a) enable **GitHub branch protection** on `main`
+(block direct/force push + deletion) — a server-side guarantee you own; (b) move real-repo runs off
+`--dangerously-skip-permissions` to a hook-respecting permission mode. Tracked as hardening.
+
 ## Out of scope (handled elsewhere)
 
 Non-git shell that is also irreversible — `gh`, `curl`, `npm publish`, `rm -rf` outside the worktree

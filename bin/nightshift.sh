@@ -73,6 +73,14 @@ already_acted() { # fingerprint — only shipped/abandoned/deferred (used by bra
   grep -Eq "\"fingerprint\":\"$1\".*\"outcome\":\"(shipped|abandoned|deferred)\"" "$LEDGER"
 }
 
+# Layer 2 settings for the agent: register the PreToolUse guard so the agent
+# cannot disable the pre-push hook (--no-verify / core.hooksPath override).
+write_claude_settings() {
+  jq -nc --arg cmd "$HOOKS_DIR/pretooluse-guard.sh" \
+    '{hooks:{PreToolUse:[{matcher:"Bash",hooks:[{type:"command",command:$cmd}]}]}}' \
+    > "$STATE_DIR/claude-settings.json"
+}
+
 # --------------------------------------------------------------- run_agent ----
 run_agent() { # stage workdir item_dir
   local stage="$1" workdir="$2" item_dir="$3" start end status=0 tokens="" cost=""
@@ -140,8 +148,13 @@ $(cat "$id/finding.json")" ;;
 ### git diff (working tree)
 $(git -C "$wd" diff)"
   fi
+  # Layer 1 for the agent: inject core.hooksPath via env so EVERY git the agent runs is
+  # confined by hooks/pre-push — no writes to any repo config. Layer 2: the PreToolUse guard
+  # (blocks disabling Layer 1) via --settings. NIGHTSHIFT_BRANCH_PREFIX is already exported.
   # shellcheck disable=SC2086
-  out="$(cd "$wd" && claude -p "$prompt" --output-format json $flags 2>/dev/null)" || return 1
+  out="$(cd "$wd" && \
+    GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="$HOOKS_DIR" \
+    claude -p "$prompt" --output-format json --settings "$STATE_DIR/claude-settings.json" $flags 2>/dev/null)" || return 1
   printf '%s' "$out" | jq -r '.[-1].result // ""'          > "$id/$stage.out"
   printf '%s' "$out" | jq -r '.[-1].usage.output_tokens // empty' > "$id/.tokens_$stage" 2>/dev/null || true
   printf '%s' "$out" | jq -r '.[-1].total_cost_usd // empty'      > "$id/.cost_$stage"   2>/dev/null || true
@@ -262,6 +275,7 @@ write_digest() { # made open status
 # --------------------------------------------------------------------- main ----
 main() {
   load_rulebook
+  write_claude_settings
   log "agent=$NIGHTSHIFT_AGENT prefix=$BRANCH_PREFIX caps: ${MAX_BRANCHES}/night, ${MAX_OPEN} open"
 
   local open; open=$(open_branch_count)
