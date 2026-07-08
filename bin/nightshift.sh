@@ -287,6 +287,10 @@ main() {
   fi
 
   local made=0 considered=0 findings=0 repo mode id found fp iter verdict wt base b summary
+  # per-NIGHT cap: seed made from branches already shipped tonight (survives multiple invocations)
+  [ -f "$LEDGER" ] && made=$(jq -s --arg n "$NIGHT" '[.[]|select(.night==$n and .outcome=="shipped")]|length' "$LEDGER" 2>/dev/null || echo 0)
+  made=${made:-0}
+  [ "$made" -gt 0 ] && log "already shipped tonight: $made (cap $MAX_BRANCHES)"
   while IFS=$'\t' read -r repo mode; do
     [ -n "$repo" ] || continue
     [ "$made" -ge "$MAX_BRANCHES" ] && { log "nightly branch cap reached ($MAX_BRANCHES) — stop"; break; }
