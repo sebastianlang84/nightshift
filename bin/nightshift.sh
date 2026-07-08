@@ -18,7 +18,10 @@ RUNS_DIR="$NIGHTSHIFT_HOME/runs/$NIGHT"
 DIGEST_DIR="$NIGHTSHIFT_HOME/digests"
 LEDGER="$STATE_DIR/ledger.jsonl"
 RUNSLOG="$STATE_DIR/runs.jsonl"
-mkdir -p "$STATE_DIR" "$RUNS_DIR" "$DIGEST_DIR"
+# Worktrees live OUTSIDE the control repo, so nightshift can target its own repo
+# without nesting a worktree inside a working tree.
+WORKTREES_DIR="${NIGHTSHIFT_WORKTREES:-${TMPDIR:-/tmp}/nightshift-worktrees}"
+mkdir -p "$STATE_DIR" "$RUNS_DIR" "$DIGEST_DIR" "$WORKTREES_DIR"
 
 log() { echo "[nightshift] $*" >&2; }
 
@@ -51,19 +54,23 @@ append_run() { # stage agent start dur tokens status item cost
       exit:$status}' >> "$RUNSLOG"
 }
 
-ledger_append() { # item repo fp branch sha outcome
+ledger_append() { # item repo fp branch sha outcome [summary]
   jq -nc \
     --arg night "$NIGHT" --arg item "$1" --arg repo "$2" --arg fp "$3" \
-    --arg branch "$4" --arg sha "$5" --arg outcome "$6" --arg ts "$(date -Iseconds)" \
+    --arg branch "$4" --arg sha "$5" --arg outcome "$6" --arg summary "${7:-}" --arg ts "$(date -Iseconds)" \
     '{night:$night,item:$item,repo:$repo,fingerprint:$fp,
       branch:($branch|if .=="" then null else . end),
       sha:($sha|if .=="" then null else . end),
-      outcome:$outcome,ts:$ts}' >> "$LEDGER"
+      outcome:$outcome,summary:$summary,ts:$ts}' >> "$LEDGER"
 }
 
-already_done() { # fingerprint
+already_done() { # fingerprint — ANY prior ledger entry (used by findings-only, report once)
   [ -f "$LEDGER" ] || return 1
   grep -Fq "\"fingerprint\":\"$1\"" "$LEDGER"
+}
+already_acted() { # fingerprint — only shipped/abandoned/deferred (used by branch-fix)
+  [ -f "$LEDGER" ] || return 1
+  grep -Eq "\"fingerprint\":\"$1\".*\"outcome\":\"(shipped|abandoned|deferred)\"" "$LEDGER"
 }
 
 # --------------------------------------------------------------- run_agent ----
@@ -140,15 +147,15 @@ $(git -C "$wd" diff)"
 }
 
 # --------------------------------------------------------------- selection ----
-select_order() { # emit branch-fix repo paths, most-recently-changed first (cold-start churn)
+select_order() { # emit "path<TAB>mode", most-recently-changed first (cold-start churn)
   local i path mode ts
   for i in "${!REPO_PATHS[@]}"; do
     path="${REPO_PATHS[$i]}"; mode="${REPO_MODES[$i]}"
-    [ "$mode" = "branch-fix" ] || continue
+    case "$mode" in branch-fix|findings-only) ;; *) continue ;; esac
     [ -d "$path/.git" ] || { log "skip $path (not a git repo)"; continue; }
     ts=$(git -C "$path" log -1 --format=%ct 2>/dev/null || echo 0)
-    printf '%s\t%s\n' "$ts" "$path"
-  done | sort -rn | cut -f2
+    printf '%s\t%s\t%s\n' "$ts" "$path" "$mode"
+  done | sort -rn | cut -f2-
 }
 
 open_branch_count() { # unmerged nightshift/* across all repos (reconciles against reality, §3e)
@@ -204,7 +211,7 @@ $(cat "$id/worknote.md")"
   # Layer 1 hook active for THIS push only (-c), never persisted to the repo config.
   git -c core.hooksPath="$HOOKS_DIR" -C "$wt" push -q -u origin "$branch"
   sha=$(git -C "$wt" rev-parse HEAD)
-  ledger_append "$(basename "$id")" "$repo" "$fp" "$branch" "$sha" "shipped"
+  ledger_append "$(basename "$id")" "$repo" "$fp" "$branch" "$sha" "shipped" "$(jq -r '.summary // ""' "$id/finding.json")"
   echo "$branch"
 }
 
@@ -214,7 +221,9 @@ write_digest() { # made open status
   {
     echo "# nightshift digest — $NIGHT"
     echo
-    echo "- agent: \`$NIGHTSHIFT_AGENT\` · budget: ${made}/${MAX_BRANCHES} branches this night · open (unmerged): ${open}/${MAX_OPEN}"
+    local fcount=0
+    [ -f "$LEDGER" ] && fcount=$(jq -s --arg n "$NIGHT" '[.[]|select(.night==$n and .outcome=="finding")]|length' "$LEDGER" 2>/dev/null || echo 0)
+    echo "- agent: \`$NIGHTSHIFT_AGENT\` · budget: ${made}/${MAX_BRANCHES} branches · findings-only: ${fcount} · open (unmerged): ${open}/${MAX_OPEN}"
     if [ -f "$RUNSLOG" ]; then
       runs=$(grep -c "\"night\":\"$NIGHT\"" "$RUNSLOG" || true)
       dur=$(jq -s --arg n "$NIGHT" '[.[]|select(.night==$n)|.duration_s]|add // 0' "$RUNSLOG")
@@ -226,12 +235,17 @@ write_digest() { # made open status
     else
       echo "## Shipped"
       [ -f "$LEDGER" ] && jq -r --arg n "$NIGHT" \
-        'select(.night==$n and .outcome=="shipped") | "- " + .repo + " → `" + .branch + "` — " + .fingerprint' \
+        'select(.night==$n and .outcome=="shipped") | "- " + .repo + " → `" + (.branch // "") + "` — " + (.summary // .fingerprint)' \
+        "$LEDGER" 2>/dev/null || true
+      echo
+      echo "## Findings (findings-only — reported, not touched)"
+      [ -f "$LEDGER" ] && jq -r --arg n "$NIGHT" \
+        'select(.night==$n and .outcome=="finding") | "- " + .repo + " — " + (.summary // .fingerprint) + "  (" + .fingerprint + ")"' \
         "$LEDGER" 2>/dev/null || true
       echo
       echo "## Considered but not shipped"
       [ -f "$LEDGER" ] && jq -r --arg n "$NIGHT" \
-        'select(.night==$n and .outcome!="shipped") | "- " + .repo + " — " + .outcome + " (" + .fingerprint + ")"' \
+        'select(.night==$n and (.outcome=="abandoned" or .outcome=="deferred")) | "- " + .repo + " — " + .outcome + ": " + (.summary // .fingerprint)' \
         "$LEDGER" 2>/dev/null || true
     fi
   } > "$f"
@@ -251,17 +265,15 @@ main() {
     return 0
   fi
 
-  local made=0 considered=0 repo id found fp iter verdict wt base b
-  local -a order=()
-  mapfile -t order < <(select_order)
-
-  for repo in "${order[@]}"; do
+  local made=0 considered=0 findings=0 repo mode id found fp iter verdict wt base b summary
+  while IFS=$'\t' read -r repo mode; do
+    [ -n "$repo" ] || continue
     [ "$made" -ge "$MAX_BRANCHES" ] && { log "nightly branch cap reached ($MAX_BRANCHES) — stop"; break; }
     [ "$open" -ge "$MAX_OPEN" ] && { log "open-branch cap reached — stop"; break; }
 
     id="$RUNS_DIR/item-$(date +%s%N)"; mkdir -p "$id"
     echo "$repo" > "$id/repo"
-    wt="$NIGHTSHIFT_HOME/worktrees/$(basename "$id")"
+    wt="$WORKTREES_DIR/$(basename "$id")"
     base="$(base_ref "$repo")"
     if ! setup_worktree "$repo" "$wt" "$base"; then
       log "  $(basename "$repo"): could not create worktree — skip"; continue
@@ -271,13 +283,25 @@ main() {
     considered=$((considered + 1))
     found=$(jq -r '.found' "$id/finding.json" 2>/dev/null || echo false)
     if [ "$found" != "true" ]; then
-      log "  $(basename "$repo"): nothing worth doing"; remove_worktree "$repo" "$wt"; continue
+      log "  $(basename "$repo") [$mode]: nothing worth doing"; remove_worktree "$repo" "$wt"; continue
     fi
     fp=$(jq -r '.fingerprint' "$id/finding.json")
-    if already_done "$fp"; then
-      log "  $(basename "$repo"): already handled ($fp) — skip"; remove_worktree "$repo" "$wt"; continue
+    summary=$(jq -r '.summary // ""' "$id/finding.json")
+
+    if [ "$mode" = findings-only ]; then
+      if already_done "$fp"; then
+        log "  $(basename "$repo") [findings-only]: already reported ($fp) — skip"; remove_worktree "$repo" "$wt"; continue
+      fi
+      ledger_append "$(basename "$id")" "$repo" "$fp" "" "" "finding" "$summary"
+      findings=$((findings + 1))
+      log "  $(basename "$repo") [findings-only]: $summary"
+      remove_worktree "$repo" "$wt"; continue
     fi
 
+    # branch-fix
+    if already_acted "$fp"; then
+      log "  $(basename "$repo"): already handled ($fp) — skip"; remove_worktree "$repo" "$wt"; continue
+    fi
     iter=0; verdict="revise"
     while [ "$iter" -lt 3 ]; do
       iter=$((iter + 1))
@@ -294,12 +318,12 @@ main() {
       made=$((made + 1)); open=$((open + 1))
       log "  $(basename "$repo"): shipped -> $b"
     else
-      ledger_append "$(basename "$id")" "$repo" "$fp" "" "" "abandoned"
+      ledger_append "$(basename "$id")" "$repo" "$fp" "" "" "abandoned" "$summary"
       log "  $(basename "$repo"): abandoned ($fp)"
     fi
     remove_worktree "$repo" "$wt"
     [ -n "$b" ] && git -C "$repo" branch -q -D "$b" >/dev/null 2>&1 || true
-  done
+  done < <(select_order)
 
   write_digest "$made" "$open" ok
   log "night done: $made shipped, $considered considered."

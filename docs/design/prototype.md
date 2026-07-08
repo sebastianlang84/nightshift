@@ -12,6 +12,11 @@ bin/nightshift.sh                       # one night, mock agent (default)
 NIGHTSHIFT_AGENT=claude bin/nightshift.sh   # one night, real claude -p stages
 ```
 
+Per-repo `mode` (rulebook.yaml): **`branch-fix`** does the full loop and pushes a `nightshift/*`
+branch; **`findings-only`** runs Explore only and just reports (no fix, no branch) — the safe
+trust-ramp entry, and the first mode to point at a real repo. Worktrees are created *outside* the
+control repo (default `${TMPDIR}/nightshift-worktrees`) so nightshift can even target its own repo.
+
 Then look at `digests/<date>.md`, `state/ledger.jsonl`, `state/runs.jsonl`, and the pushed
 `nightshift/*` branch in the sandbox remote.
 
@@ -54,6 +59,7 @@ Stages are invoked through `run_agent(stage, workdir, item_dir)`, which dispatch
 | `hooks/pre-push` | Layer 1 git-confinement (resolved-ref check) |
 | `hooks/pretooluse-guard.sh` | Layer 2 anti-bypass (Claude PreToolUse; for the claude path) |
 | `lib/parse_rulebook.py` | minimal rulebook YAML-subset parser |
+| `lib/extract_json.py` | pulls the JSON artifact out of a stage model's output (claude path) |
 | `prompts/{explore,fix,review}.md` | stage prompts (for the claude path) |
 | `rulebook.example.yaml` | the governance template |
 
