@@ -20,6 +20,10 @@ Then look at `digests/<date>.md`, `state/ledger.jsonl`, `state/runs.jsonl`, and 
 - **The outer loop:** select repo (cold-start = most-recent-commit churn) → Explore → Fix⟷Review
   (capped) → Finalize (push a `nightshift/*` branch) → append ledger + telemetry → digest.
 - **Branch isolation:** the fix lands on `nightshift/*`; `main` is untouched.
+- **Worktree isolation:** each item runs in a throwaway `git worktree`, never the repo's live
+  checkout — so nightshift never touches your branch/state, and any misstep (incl. non-git shell,
+  §2b) is confined to a dir deleted afterwards. The confinement hook is activated per-push via
+  `-c core.hooksPath` — **zero writes** to the target repo's config (your own pushes stay unconstrained).
 - **The git-confinement hook (§2a, `hook-spec.md`):** `hooks/pre-push` rejects pushes to `main`,
   `+main` (force), `:branch` (delete), and tags — while allowing `nightshift/*`. It checks git's
   *resolved* refs, so the bypass spellings are caught.

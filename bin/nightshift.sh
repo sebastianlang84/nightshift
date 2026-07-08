@@ -167,23 +167,43 @@ open_branch_count() { # unmerged nightshift/* across all repos (reconciles again
   echo "$total"
 }
 
+# ---------------------------------------------------------------- worktree ----
+# Every work item runs in a throwaway, isolated git worktree — never the repo's
+# live checkout. So nightshift never touches your branch/state, and any misstep
+# (incl. non-git shell, §2b) is confined to a dir we delete afterwards.
+base_ref() { # repo -> best base ref to branch from
+  local repo="$1" r
+  for r in ORIGIN_HEAD origin/main origin/master main master; do
+    if [ "$r" = ORIGIN_HEAD ]; then
+      r=$(git -C "$repo" symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null | sed 's#refs/remotes/##') || true
+      [ -z "$r" ] && continue
+    fi
+    git -C "$repo" rev-parse -q --verify "$r" >/dev/null 2>&1 && { echo "$r"; return 0; }
+  done
+  echo HEAD
+}
+setup_worktree() { git -C "$1" worktree add -q --detach "$2" "$3"; }   # repo wt base
+remove_worktree() {                                                    # repo wt
+  git -C "$1" worktree remove --force "$2" 2>/dev/null || true
+  git -C "$1" worktree prune 2>/dev/null || true
+}
+
 # ---------------------------------------------------------------- finalize ----
-finalize() { # repo item_dir  -> echoes branch name
-  local repo="$1" id="$2" fp type slug branch sha
+finalize() { # repo worktree item_dir -> echoes branch name
+  local repo="$1" wt="$2" id="$3" fp type slug branch sha
   fp=$(jq -r '.fingerprint' "$id/finding.json")
   type=$(jq -r '.type' "$id/finding.json")
   slug="$(printf '%s-%s' "$type" "$(basename "$repo")" | tr '[:upper:] /' '[:lower:]--' | cut -c1-40)"
   branch="${BRANCH_PREFIX}${slug}-$(date +%Y%m%d-%H%M%S)"
-  git -C "$repo" config core.hooksPath "$HOOKS_DIR"   # ensure Layer 1 is active
-  git -C "$repo" checkout -q -b "$branch"
-  git -C "$repo" add -A
-  git -C "$repo" -c user.name=nightshift -c user.email=nightshift@localhost \
+  git -C "$wt" checkout -q -b "$branch"
+  git -C "$wt" add -A
+  git -C "$wt" -c user.name=nightshift -c user.email=nightshift@localhost \
       commit -q -m "nightshift: $(jq -r '.summary' "$id/finding.json")
 
 $(cat "$id/worknote.md")"
-  git -C "$repo" push -q -u origin "$branch"
-  sha=$(git -C "$repo" rev-parse HEAD)
-  git -C "$repo" checkout -q main
+  # Layer 1 hook active for THIS push only (-c), never persisted to the repo config.
+  git -c core.hooksPath="$HOOKS_DIR" -C "$wt" push -q -u origin "$branch"
+  sha=$(git -C "$wt" rev-parse HEAD)
   ledger_append "$(basename "$id")" "$repo" "$fp" "$branch" "$sha" "shipped"
   echo "$branch"
 }
@@ -231,7 +251,7 @@ main() {
     return 0
   fi
 
-  local made=0 considered=0 repo id found fp iter verdict
+  local made=0 considered=0 repo id found fp iter verdict wt base b
   local -a order=()
   mapfile -t order < <(select_order)
 
@@ -241,35 +261,44 @@ main() {
 
     id="$RUNS_DIR/item-$(date +%s%N)"; mkdir -p "$id"
     echo "$repo" > "$id/repo"
-    run_agent explore "$repo" "$id" || true
+    wt="$NIGHTSHIFT_HOME/worktrees/$(basename "$id")"
+    base="$(base_ref "$repo")"
+    if ! setup_worktree "$repo" "$wt" "$base"; then
+      log "  $(basename "$repo"): could not create worktree — skip"; continue
+    fi
+
+    run_agent explore "$wt" "$id" || true
     considered=$((considered + 1))
-
     found=$(jq -r '.found' "$id/finding.json" 2>/dev/null || echo false)
-    if [ "$found" != "true" ]; then log "  $(basename "$repo"): nothing worth doing"; continue; fi
-
+    if [ "$found" != "true" ]; then
+      log "  $(basename "$repo"): nothing worth doing"; remove_worktree "$repo" "$wt"; continue
+    fi
     fp=$(jq -r '.fingerprint' "$id/finding.json")
-    if already_done "$fp"; then log "  $(basename "$repo"): already handled ($fp) — skip"; continue; fi
+    if already_done "$fp"; then
+      log "  $(basename "$repo"): already handled ($fp) — skip"; remove_worktree "$repo" "$wt"; continue
+    fi
 
     iter=0; verdict="revise"
     while [ "$iter" -lt 3 ]; do
       iter=$((iter + 1))
-      run_agent fix "$repo" "$id" || true
-      run_agent review "$repo" "$id" || true
+      run_agent fix "$wt" "$id" || true
+      run_agent review "$wt" "$id" || true
       verdict=$(jq -r '.verdict' "$id/review.md" 2>/dev/null || echo abandon)
       [ "$verdict" = ship ] && break
       [ "$verdict" = abandon ] && break
     done
 
+    b=""
     if [ "$verdict" = ship ]; then
-      local b; b=$(finalize "$repo" "$id")
+      b=$(finalize "$repo" "$wt" "$id")
       made=$((made + 1)); open=$((open + 1))
       log "  $(basename "$repo"): shipped -> $b"
     else
-      git -C "$repo" checkout -- . 2>/dev/null || true
-      git -C "$repo" clean -fdq 2>/dev/null || true
       ledger_append "$(basename "$id")" "$repo" "$fp" "" "" "abandoned"
       log "  $(basename "$repo"): abandoned ($fp)"
     fi
+    remove_worktree "$repo" "$wt"
+    [ -n "$b" ] && git -C "$repo" branch -q -D "$b" >/dev/null 2>&1 || true
   done
 
   write_digest "$made" "$open" ok
