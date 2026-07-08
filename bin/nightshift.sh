@@ -154,7 +154,7 @@ $(git -C "$wd" diff)"
   # shellcheck disable=SC2086
   out="$(cd "$wd" && \
     GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="$HOOKS_DIR" \
-    claude -p "$prompt" --output-format json --settings "$STATE_DIR/claude-settings.json" $flags 2>/dev/null)" || return 1
+    claude -p "$prompt" --output-format json --settings "$STATE_DIR/claude-settings.json" $flags </dev/null 2>/dev/null)" || return 1
   printf '%s' "$out" | jq -r '.[-1].result // ""'          > "$id/$stage.out"
   printf '%s' "$out" | jq -r '.[-1].usage.output_tokens // empty' > "$id/.tokens_$stage" 2>/dev/null || true
   printf '%s' "$out" | jq -r '.[-1].total_cost_usd // empty'      > "$id/.cost_$stage"   2>/dev/null || true
