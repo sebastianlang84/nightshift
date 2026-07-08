@@ -7,7 +7,10 @@ remembering what it already did, and staying inside configurable rules and a tim
 > Like the *Heinzelmännchen*: it does the work at night, within its rules, and stops when the
 > budget runs out.
 
-**Status: design phase — this repo is currently docs-only. There is no runnable code yet.**
+**Status: early prototype.** The v1 scope is decided ([ADR 0004](docs/adr/0004-v1-scope-branch-isolated-steward.md))
+and a runnable **mock** prototype exercises the full loop end-to-end against a throwaway sandbox — see
+[`docs/design/prototype.md`](docs/design/prototype.md) (`bin/setup-sandbox.sh && bin/nightshift.sh`).
+The `claude -p` adapter is still stubbed.
 
 Start here:
 - [`CONTEXT.md`](CONTEXT.md) — what nightshift is, its architecture, and the canonical vocabulary.

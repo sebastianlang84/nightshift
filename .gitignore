@@ -1,0 +1,6 @@
+# nightshift runtime state — never committed to the control repo in the prototype
+/state/
+/runs/
+/digests/
+/sandbox/
+rulebook.yaml

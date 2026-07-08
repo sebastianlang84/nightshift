@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# nightshift git-confinement hook — Layer 1 (hook-spec.md, re-review §2a).
+#
+# git feeds us the ALREADY-RESOLVED refs on stdin, one per line:
+#   <local ref> <local sha> <remote ref> <remote sha>
+# so we never parse the command string. Every bypass spelling (+main, :branch,
+# --all, --mirror, HEAD:main, config-driven push) has already been resolved by
+# git into the ref list below — we just check the result.
+set -euo pipefail
+
+prefix="refs/heads/${NIGHTSHIFT_BRANCH_PREFIX:-nightshift/}"
+zero="0000000000000000000000000000000000000000"
+
+reject() {
+  echo "nightshift pre-push: REJECTED — $1" >&2
+  exit 1
+}
+
+while read -r _local_ref local_sha remote_ref _remote_sha; do
+  [ -z "${remote_ref:-}" ] && continue
+  case "$remote_ref" in
+    refs/tags/*) reject "tag push not allowed ($remote_ref) — nightshift makes branches, not releases" ;;
+  esac
+  # A delete presents an all-zero LOCAL sha.
+  if [ "$local_sha" = "$zero" ]; then
+    reject "ref delete not allowed ($remote_ref)"
+  fi
+  case "$remote_ref" in
+    "$prefix"*) : ;;  # inside the allowed branch namespace — OK
+    *) reject "push outside ${prefix}* not allowed ($remote_ref) — no main, no merge" ;;
+  esac
+done
+
+exit 0

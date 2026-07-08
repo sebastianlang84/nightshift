@@ -1,0 +1,17 @@
+# nightshift rulebook — human-owned governance (copy to rulebook.yaml and edit).
+# Hard prohibitions (no force-push, no deletes, branch-only) live in the hook,
+# NOT here (hook-spec.md). This file is soft governance + knobs.
+
+branch_prefix: nightshift/
+
+limits:
+  max_branches_per_night: 2      # finished branches per night, then stop
+  max_open_branches: 10          # global backpressure: unmerged nightshift/* across all repos
+  max_files_per_change: 5
+  max_lines_per_change: 150
+
+repos:
+  - path: /absolute/path/to/your/repo
+    mode: branch-fix             # or: findings-only  (the manual trust-ramp knob)
+  # - path: /absolute/path/to/another
+  #   mode: findings-only
