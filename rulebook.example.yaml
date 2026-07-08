@@ -7,11 +7,11 @@ branch_prefix: nightshift/
 limits:
   max_branches_per_night: 2      # finished branches per night, then stop
   max_open_branches: 10          # global backpressure: unmerged nightshift/* across all repos
-  max_files_per_change: 5
-  max_lines_per_change: 150
+  max_files_per_change: 15       # SOFT — guidance to the agent, not a hard reject
+  max_lines_per_change: 400      # SOFT — a bigger change is fine if it's one coherent improvement
 
 repos:
   - path: /absolute/path/to/your/repo
-    mode: branch-fix             # or: findings-only  (the manual trust-ramp knob)
+    mode: findings-only          # start here; graduate to branch-fix by editing this (the trust-ramp)
   # - path: /absolute/path/to/another
-  #   mode: findings-only
+  #   mode: branch-fix           # full loop: Explore -> Fix<->Review -> push a nightshift/* branch

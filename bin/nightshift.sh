@@ -122,6 +122,13 @@ claude_run() { # stage workdir item_dir
 ## Context
 Repo working directory: $wd"
   case "$stage" in
+    explore|fix) prompt="$prompt
+
+## Change-size guidance (soft — not a hard cap)
+Prefer a change under ${MAX_FILES:-15} files and ${MAX_LINES:-400} lines. Larger is acceptable only
+if it is genuinely ONE coherent, reviewable improvement — never bundle unrelated changes." ;;
+  esac
+  case "$stage" in
     fix|review) prompt="$prompt
 
 ### finding.json
