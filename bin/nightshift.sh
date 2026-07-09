@@ -115,6 +115,20 @@ write_claude_settings() {
     > "$STATE_DIR/claude-settings.json"
 }
 
+# codemap (optional structural index) — an MCP tool, so it adds navigation power WITHOUT reopening
+# Bash. Auto-gated per repo: only offered where the repo is already indexed. The agent works in a
+# throwaway worktree (no index) and queries the STABLE real repo via repoPath; unindexed or codemap
+# not installed -> the agent just uses Read/Grep/Glob. Activation is a human step: `codemap index
+# --approve --repo <path>` once.
+write_codemap_mcp() {
+  printf '%s\n' '{"mcpServers":{"codemap":{"type":"stdio","command":"codemap-mcp","args":[],"env":{}}}}' \
+    > "$STATE_DIR/codemap-mcp.json"
+}
+codemap_indexed() { # repo -> success if an approved, non-empty index exists
+  command -v codemap >/dev/null 2>&1 || return 1
+  codemap status --repo "$1" --json 2>/dev/null | jq -e '.indexed==true' >/dev/null 2>&1
+}
+
 # --------------------------------------------------------------- run_agent ----
 run_agent() { # stage workdir item_dir
   local stage="$1" workdir="$2" item_dir="$3" start end status=0 tokens="" cost=""
@@ -193,13 +207,27 @@ $(cat "$id/finding.json")" ;;
 ### git diff (working tree)
 $(git -C "$wd" diff)"
   fi
+  # codemap structural index — only when the Runner flagged THIS repo as indexed, and only for the
+  # navigation stages (explore/review). It is an MCP tool, so it needs no Bash. The worktree has no
+  # index, so the agent must query the stable real repo via repoPath (injected below).
+  local cm_flags=""
+  if [ -n "${NIGHTSHIFT_CODEMAP_REPO:-}" ] && { [ "$stage" = explore ] || [ "$stage" = review ]; }; then
+    tools="$tools,mcp__codemap__codemap_search,mcp__codemap__codemap_context"
+    cm_flags="--mcp-config $STATE_DIR/codemap-mcp.json"
+    prompt="$prompt
+
+## Structural index (codemap)
+A codemap index of this repo is available. Prefer codemap_search / codemap_context to locate relevant
+code instead of reading files blindly. Your cwd is a throwaway worktree with NO index — ALWAYS pass
+repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
+  fi
   # Layer 1 for the agent: inject core.hooksPath via env so EVERY git the agent runs is
   # confined by hooks/pre-push — no writes to any repo config. Layer 2: the PreToolUse guard
   # (blocks disabling Layer 1) via --settings. NIGHTSHIFT_BRANCH_PREFIX is already exported.
   # shellcheck disable=SC2086
   out="$(cd "$wd" && \
     GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="$HOOKS_DIR" \
-    claude -p "$prompt" --output-format json --settings "$STATE_DIR/claude-settings.json" --tools "$tools" $flags </dev/null 2>/dev/null)" || return 1
+    claude -p "$prompt" --output-format json --settings "$STATE_DIR/claude-settings.json" --tools "$tools" $cm_flags $flags </dev/null 2>/dev/null)" || return 1
   # `claude -p --output-format json` is NOT a stable shape. Sometimes it is a single
   # result object ({result,usage,total_cost_usd}); sometimes a JSON ARRAY of events with
   # the result object as one element (observed with claude 2.1.197, e.g. when a
@@ -367,6 +395,7 @@ write_digest() { # made open status
 main() {
   load_rulebook
   write_claude_settings
+  write_codemap_mcp
   log "agent=$NIGHTSHIFT_AGENT prefix=$BRANCH_PREFIX · cap: max $MAX_OPEN unmerged ${BRANCH_PREFIX} branches · run ceiling $MAX_RUN_BRANCHES · fix iters $MAX_FIX_ITER"
 
   local made=0 considered=0 findings=0 repo mode id found fp fnj iter verdict wt base b summary open pass=0 progress stop_reason=ok
@@ -395,6 +424,9 @@ main() {
     if ! setup_worktree "$repo" "$wt" "$base"; then
       log "  $(basename "$repo"): could not create worktree — skip"; continue
     fi
+    # Offer codemap to the read-only stages only where this repo is actually indexed.
+    if codemap_indexed "$repo"; then export NIGHTSHIFT_CODEMAP_REPO="$repo"
+    else export NIGHTSHIFT_CODEMAP_REPO=""; fi
 
     run_agent explore "$wt" "$id" || true
     considered=$((considered + 1))

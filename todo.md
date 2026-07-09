@@ -24,6 +24,22 @@ Open follow-ups on the scheduler (not blocking):
   commits, back off after empty runs. nightshift's open-branch cap already self-throttles, so this is
   a cost optimisation, not a correctness need.
 
+## codemap structural index — wired, auto-gated per repo (2026-07-10)
+
+**Shipped (dormant until you index).** explore/review can use `codemap_search`/`codemap_context` (an
+MCP tool — no Bash needed, fits the capability model) to navigate structure instead of reading files
+blindly. Auto-gated by the Runner: `codemap_indexed()` checks `codemap status --repo <path>` and only
+offers the tools where that repo is actually indexed. The agent runs in a throwaway worktree (no
+index), so the prompt tells it to query the STABLE real repo via `repoPath`. Unindexed / codemap
+absent → plain Read/Grep/Glob, zero change. Verified: MCP tool is callable in the locked-down
+subprocess (`--tools` + `--dangerously-skip-permissions`); regression e2e on an unindexed repo behaves
+exactly as before.
+
+**Activation (human, per repo):** `codemap index --approve --repo <path>` once. Marginal on small
+repos; pays off on large ones (market-digest, 291 files) where blind file-reading is weakest AND
+explore cost is highest (~$4.60/run observed) — codemap should cut both. Follow-up: index refresh
+cadence (advisory staleness is fine — the agent reads real file contents; the index is only nav).
+
 ## Craft / best-practice review — always on (2026-07-10)
 
 **Shipped.** explore + review now cover **craft**, not just correctness: code smells, dead/unused
