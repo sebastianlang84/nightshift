@@ -9,6 +9,10 @@ limits:
   # across all repos. NOT a per-night count. Merge/close a branch and a slot frees up immediately, so
   # if you review continuously it runs all night; if you stop, it fills to this many and stops.
   max_open_branches: 2
+  max_branches_per_run: 50       # HARD safety ceiling per single run (runaway backstop, NOT policy —
+                                 # backpressure above is the real governor). Env override:
+                                 # NIGHTSHIFT_MAX_RUN_BRANCHES wins only if this is unset.
+  max_fix_iterations: 3          # HARD cap on Fix<->Review round-trips per finding before abandon
   max_files_per_change: 15       # SOFT — guidance to the agent, not a hard reject
   max_lines_per_change: 400      # SOFT — a bigger change is fine if it's one coherent improvement
 

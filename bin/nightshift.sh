@@ -32,17 +32,21 @@ log() { echo "[nightshift] $*" >&2; }
 # ---------------------------------------------------------------- rulebook ----
 declare -a REPO_PATHS=() REPO_MODES=()
 load_rulebook() {
-  local tag a b
+  local tag a b rb_run_branches=""
   while IFS=$'\t' read -r tag a b; do
     case "$tag" in
-      prefix)       BRANCH_PREFIX="$a" ;;
-      max_branches) MAX_BRANCHES="$a" ;;
-      max_open)     MAX_OPEN="$a" ;;
-      max_files)    MAX_FILES="$a" ;;
-      max_lines)    MAX_LINES="$a" ;;
-      repo)         REPO_PATHS+=("$a"); REPO_MODES+=("$b") ;;
+      prefix)               BRANCH_PREFIX="$a" ;;
+      max_open)             MAX_OPEN="$a" ;;
+      max_branches_per_run) rb_run_branches="$a" ;;
+      max_fix_iterations)   MAX_FIX_ITER="$a" ;;
+      max_files)            MAX_FILES="$a" ;;
+      max_lines)            MAX_LINES="$a" ;;
+      repo)                 REPO_PATHS+=("$a"); REPO_MODES+=("$b") ;;
     esac
   done < <(python3 "$NIGHTSHIFT_HOME/lib/parse_rulebook.py" "$RULEBOOK")
+  # Per-run safety ceiling: the rulebook wins; NIGHTSHIFT_MAX_RUN_BRANCHES stays as an
+  # ops override for when it is not set there; 50 is the last-resort default.
+  MAX_RUN_BRANCHES="${rb_run_branches:-${NIGHTSHIFT_MAX_RUN_BRANCHES:-50}}"
   export NIGHTSHIFT_BRANCH_PREFIX="$BRANCH_PREFIX"
 }
 
@@ -317,7 +321,7 @@ write_digest() { # made open status
 main() {
   load_rulebook
   write_claude_settings
-  log "agent=$NIGHTSHIFT_AGENT prefix=$BRANCH_PREFIX · cap: max $MAX_OPEN unmerged ${BRANCH_PREFIX} branches"
+  log "agent=$NIGHTSHIFT_AGENT prefix=$BRANCH_PREFIX · cap: max $MAX_OPEN unmerged ${BRANCH_PREFIX} branches · run ceiling $MAX_RUN_BRANCHES · fix iters $MAX_FIX_ITER"
 
   local made=0 considered=0 findings=0 repo mode id found fp iter verdict wt base b summary open pass=0 progress stop_reason=ok
   # No per-night production cap. The ONLY cap is the count of OPEN (unmerged) nightshift/* branches:
@@ -325,7 +329,7 @@ main() {
   # work resumes; when merging stops it fills to the cap and stops. "All night" continuous operation
   # is bounded by this cap, by running out of new work, and by the subscription 5h window.
   while true; do
-    [ "$made" -ge "${NIGHTSHIFT_MAX_RUN_BRANCHES:-50}" ] && { log "safety ceiling (${NIGHTSHIFT_MAX_RUN_BRANCHES:-50}) reached — stop"; break; }
+    [ "$made" -ge "$MAX_RUN_BRANCHES" ] && { log "safety ceiling ($MAX_RUN_BRANCHES) reached — stop"; break; }
     open=$(open_branch_count)
     if [ "$open" -ge "$MAX_OPEN" ]; then
       log "open-branch cap reached ($open/$MAX_OPEN) — stop; merge/close some to free slots"
@@ -370,7 +374,7 @@ main() {
       log "  $(basename "$repo"): already handled ($fp) — skip"; remove_worktree "$repo" "$wt"; continue
     fi
     iter=0; verdict="revise"
-    while [ "$iter" -lt 3 ]; do
+    while [ "$iter" -lt "$MAX_FIX_ITER" ]; do
       iter=$((iter + 1))
       run_agent fix "$wt" "$id" || true
       run_agent review "$wt" "$id" || true
