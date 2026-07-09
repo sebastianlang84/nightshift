@@ -60,8 +60,10 @@ Layer 1 off.
   user's own pushes stay unconstrained. Verified: an agent-context `push origin HEAD:main` is
   rejected, `nightshift/*` is allowed, and `.git/config` is untouched.
 - **Layer 2:** the Runner writes `state/claude-settings.json` registering `pretooluse-guard.sh` as a
-  `PreToolUse` hook and passes it via `--settings`. Verified (unit): the guard denies `--no-verify`
-  and `core.hooksPath` overrides, allows benign commands.
+  `PreToolUse` hook and passes it via `--settings`. The guard denies `--no-verify`, `core.hooksPath`
+  overrides, **and** any `GIT_CONFIG_*` env manipulation (`GIT_CONFIG_COUNT`/`KEY`/`VALUE`/`GLOBAL`/
+  `SYSTEM`) — otherwise an agent could disable Layer 1 by overriding the very env that injects it
+  (e.g. `GIT_CONFIG_COUNT=0 git push …`) without ever naming `core.hooksPath`. Benign commands pass.
 
 **Known residual (v1):** the sandbox uses `--dangerously-skip-permissions`, and whether a PreToolUse
 hook fires under that mode is not yet verified in-session. Layer 1 (git-level) holds regardless. For

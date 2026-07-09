@@ -23,6 +23,12 @@ case "$cmd" in
   *--no-verify*)             deny "git --no-verify would bypass the pre-push confinement hook" ;;
   *core.hooksPath*)          deny "overriding core.hooksPath would disable the pre-push confinement hook" ;;
   *"git config"*hooksPath*)  deny "changing hooksPath would disable the pre-push confinement hook" ;;
+  # Layer 1 is injected via GIT_CONFIG_* env (nightshift.sh); a command that sets any
+  # of these can override/disable it (e.g. GIT_CONFIG_COUNT=0) without naming hooksPath.
+  # The Runner's own injection is process env, never an agent command — so denying the
+  # string in a command is safe.
+  *GIT_CONFIG_COUNT*|*GIT_CONFIG_KEY*|*GIT_CONFIG_VALUE*|*GIT_CONFIG_GLOBAL*|*GIT_CONFIG_SYSTEM*)
+                             deny "setting GIT_CONFIG_* would override the injected core.hooksPath (Layer 1 confinement)" ;;
 esac
 
 exit 0
