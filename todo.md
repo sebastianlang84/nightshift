@@ -58,8 +58,12 @@ hardened it into a policy:
   human knows *this one needs tests before merge*. `proof`/`verifiability` now recorded in the ledger.
 - Fixed the latent bug where review.md referenced a `worknote` the Runner never injected (the rewrite
   drops it — not seeing the producer's self-justification is the point: kills anchoring).
-- **codemap role clarified:** `repoPath` indexes the REAL repo (no fix) → stale for "still unused
-  after the edit"; verification uses Grep/Read over cwd (the worktree). codemap = locate, not verify.
+- **codemap role clarified:** its `repoPath` index is the REAL repo (no fix), so it's stale for "is
+  the symbol still present after the edit" (use cwd Grep/Read for that). BUT for the reference hunt
+  ("who references this name") it IS a valid verification aid — callers are unaffected by the fix, and
+  its FTS surfaces symbol AND string references a `name(` grep misses. review.md uses it as the broad
+  net; the "constructed / external name → unproven" clause still bounds it (no in-repo index proves a
+  negative for runtime-constructed or out-of-repo references).
 
 Verified: live static e2e (`verifiability:static` → `proof:verified`, no stamp) + unproven-path
 plumbing (digest + PR title stamped `[unverified]`).

@@ -8,10 +8,14 @@ no team memory, no history you can trust. Judge the artifact as it stands.
 
 Run the finding's verification recipe yourself — do not take the fix stage's word
 for it. Establish the claim by the cheapest SUFFICIENT evidence:
-- Removal / "unused" claims: search the WHOLE current tree for every reference,
-  including non-code surfaces — config, CI, docs, and STRING references (reflection,
-  registries keyed by name, CLI dispatch, entry points). If the symbol could be
-  reached dynamically and you cannot rule it out, the claim is NOT proven.
+- Removal / "unused" claims: hunt for EVERY reference to the name, not just its call
+  syntax. If codemap is available, use codemap_search on the name — it surfaces symbol
+  AND string references (registry entries, config keys) that a `name(` grep misses, and
+  the callers it finds are unaffected by the fix so a slightly stale index is fine here.
+  Also grep the bare name across non-code surfaces (config, CI, docs). But a clean search
+  only proves "not referenced by any literal name in this repo": if the name could be
+  CONSTRUCTED at runtime (e.g. "handler_" + x) or referenced from OUTSIDE the repo (a DB,
+  env var, another service, deploy config), you cannot rule out dynamic use — NOT proven.
 - "Comment/doc contradicts code", "unreachable branch", "duplicate key", "shadowed
   name": read the current code and decide truth directly.
 - Convention / craft claims: the claim is "this violates a standard THIS repo
