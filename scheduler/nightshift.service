@@ -1,0 +1,16 @@
+[Unit]
+Description=nightshift — unattended overnight code-review-and-fix steward
+Documentation=https://github.com/sebastianlang84/nightshift
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# __NIGHTSHIFT_HOME__ is substituted by bin/schedule.sh at install time.
+ExecStart=__NIGHTSHIFT_HOME__/bin/nightshift-cron.sh
+# Unattended agent runs can be long; the open-branch cap bounds throughput, but a
+# hard wall-clock ceiling guards against a hang (roughly the subscription window).
+TimeoutStartSec=5h
+# Be a polite neighbour on a workstation.
+Nice=10
+IOSchedulingClass=idle

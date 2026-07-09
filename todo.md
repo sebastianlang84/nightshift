@@ -3,25 +3,26 @@
 Running list of enhancements to build later. Not design tensions (those live in OPEN-QUESTIONS.md)
 and not the ratified v1 scope (ADR 0004) — just good ideas parked with enough context to act on.
 
-## Scheduler — nightly 03:00 (requested, soon)
+## Scheduler — nightly 03:00 — DONE (2026-07-09)
 
-**Concrete first target (user, 2026-07-09):** a systemd timer (or cron) that fires **every night at
-03:00 local** and runs nightshift across all rulebook repos, unattended. This is what makes the
-"runs all night" behaviour real (the open-branch cap already governs throughput; the scheduler
-governs *when* + re-invocation).
+**Shipped.** A systemd *user* timer fires `bin/nightshift-cron.sh` every night at 03:00 local
+(`scheduler/nightshift.{service,timer}`, `Persistent=true` so a missed night runs at next wake,
+`RandomizedDelaySec=120`). The launcher adds the three unattended-run essentials: a single-instance
+`flock`, an explicit PATH (systemd's minimal env can't see `~/.local/bin/{claude,gh}`), and a
+timestamped log under `~/.local/state/nightshift/logs/` (plus journald). Enabled + linger on; first
+live fire Fri 2026-07-10 03:00. Manage with `bin/schedule.sh {install|enable|disable|status|logs|
+dry-run|uninstall}` — this also subsumes the old "schedule management templates/scripts" item.
 
-_Resolved 2026-07-09:_ auto-PR is **done** — the Runner now opens a **normal (non-draft) PR** per
-shipped branch (`gh pr create`, `NIGHTSHIFT_OPEN_PR=1` default; ADR 0004 amendment). Chosen over
-draft so CI runs overnight and the morning triage sees a green/red check with the merge button live.
+_Also resolved 2026-07-09:_ auto-PR — the Runner now opens a **normal (non-draft) PR** per shipped
+branch (`gh pr create`, `NIGHTSHIFT_OPEN_PR=1` default; ADR 0004 amendment). Chosen over draft so CI
+runs overnight and the morning triage sees a green/red check with the merge button live.
 
-## Schedule management — templates / scripts (create / edit / delete)
-
-Convenience tooling to manage nightshift's schedule(s) efficiently instead of hand-editing timers.
-Small scripts (or templates) to **create / edit / delete** scheduled runs — wrap the systemd-timer
-(or cron) setup that will drive the nightly loop: install/enable/disable/list, sane defaults
-(when to run, adaptive backoff), and a `--dry-run`. Pairs with the eventual scheduler that makes the
-"runs all night" behaviour real (the open-branch cap already handles throughput; the scheduler
-handles *when* and re-invocation between merges).
+Open follow-ups on the scheduler (not blocking):
+- **Sleep/suspend:** if the workstation suspends overnight the 03:00 fire is missed; `Persistent=true`
+  catches it at next wake, but a true "wake to run" needs an RTC wake alarm — revisit if it matters.
+- **Adaptive cadence / backoff** (from the nightly-review-pipeline skill): skip repos with no new
+  commits, back off after empty runs. nightshift's open-branch cap already self-throttles, so this is
+  a cost optimisation, not a correctness need.
 
 ## PR / branch review mode — merge-recommendation layer
 

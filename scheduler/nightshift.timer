@@ -1,0 +1,13 @@
+[Unit]
+Description=Run nightshift nightly at 03:00 local
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+# If the machine was off or asleep at 03:00, run at the next opportunity instead
+# of silently skipping the night.
+Persistent=true
+# Small jitter — harmless here, good hygiene if more timers are ever added.
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target
