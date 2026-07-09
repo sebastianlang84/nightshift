@@ -319,7 +319,7 @@ main() {
   write_claude_settings
   log "agent=$NIGHTSHIFT_AGENT prefix=$BRANCH_PREFIX · cap: max $MAX_OPEN unmerged ${BRANCH_PREFIX} branches"
 
-  local made=0 considered=0 findings=0 repo mode id found fp iter verdict wt base b summary open pass=0 progress
+  local made=0 considered=0 findings=0 repo mode id found fp iter verdict wt base b summary open pass=0 progress stop_reason=ok
   # No per-night production cap. The ONLY cap is the count of OPEN (unmerged) nightshift/* branches:
   # work continues while fewer than max_open_branches are unmerged; merging/closing frees slots and
   # work resumes; when merging stops it fills to the cap and stops. "All night" continuous operation
@@ -329,14 +329,14 @@ main() {
     open=$(open_branch_count)
     if [ "$open" -ge "$MAX_OPEN" ]; then
       log "open-branch cap reached ($open/$MAX_OPEN) — stop; merge/close some to free slots"
-      break
+      stop_reason=backpressure; break
     fi
     pass=$((pass + 1))
     progress=0
   while IFS=$'\t' read -r repo mode; do
     [ -n "$repo" ] || continue
     open=$(open_branch_count)
-    [ "$open" -ge "$MAX_OPEN" ] && { log "open-branch cap reached ($open/$MAX_OPEN) — stop"; break; }
+    [ "$open" -ge "$MAX_OPEN" ] && { log "open-branch cap reached ($open/$MAX_OPEN) — stop"; stop_reason=backpressure; break; }
 
     id="$RUNS_DIR/item-$(date +%s%N)"; mkdir -p "$id"
     echo "$repo" > "$id/repo"
@@ -395,7 +395,7 @@ main() {
   done
 
   open=$(open_branch_count)
-  write_digest "$made" "$open" ok
+  write_digest "$made" "$open" "$stop_reason"
   log "night done: $made shipped this run, $considered considered, $open now open (cap $MAX_OPEN)."
 }
 
