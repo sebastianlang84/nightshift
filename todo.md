@@ -91,12 +91,21 @@ several repos/night could run to tens of dollars.
 
 The claude production path is now proven end-to-end (findings-only on partflow, accurate finding, zero
 remote writes). Before enabling the live nightly timer on a real repo:
-- **Verify Layer 2 under `--dangerously-skip-permissions`** — whether the PreToolUse guard fires in that
-  mode is unconfirmed (hook-spec.md "Known residual"). Layer 1 (git-level) held in testing. Either run an
-  adversarial test (agent instructed to attempt `git push origin HEAD:main`, observe the guard) or rely on
-  Layer 1 + server-side branch restrictions and document that choice.
-- **Server-side branch restrictions** on each target repo/host (Bitbucket branch permissions / GitHub
-  branch protection) — the backstop that does not depend on agent behaviour. Per-repo, per-host.
+- **Verify Layer 2 under `--dangerously-skip-permissions`** — DONE (2026-07-09). Adversarial test:
+  registered `hooks/pretooluse-guard.sh` as a PreToolUse hook exactly as the Runner does, launched
+  `claude 2.1.197` with the production env+flags, had it attempt `git ... commit --no-verify ...`. The
+  guard **fired** — verbatim deny "nightshift: git --no-verify would bypass the pre-push confinement
+  hook"; a control command ran, the `--no-verify` one did not. So Layer 1 (git hook) + Layer 2 (guard)
+  both hold in the unattended mode. Residual closed.
+- **Server-side branch restrictions** — now defense-in-depth, not the sole backstop (Layer 2 proven).
+  Still worth adding GitHub branch protection on `main` (with `enforce_admins`, else the agent's own
+  admin creds bypass it) per target repo. Per-repo, per-host.
 - **Graduate a repo to `branch-fix`** only with explicit human OK — it is the first real `nightshift/*`
-  push to a shared remote.
-- **Enable the scheduler** (`schedule.sh install && enable` + linger) once the above are green.
+  push to a shared remote. (The 4 live repos are already branch-fix in rulebook.yaml — human-approved.)
+- **Enable the scheduler** — DONE; timer armed, first live fire Fri 2026-07-10 03:00.
+
+_Also 2026-07-09:_ caught + fixed a latent parser bug — `claude -p --output-format json` returns an
+ARRAY on 2.1.197 (result object as an element, when a rate_limit_event is present), but the Runner
+parsed object-only (`.result`) → every explore would have reported `found:false` (silent no-op, no
+branches). Now normalises both shapes (commit f0e1898); proven with a real-claude e2e that found+fixed
+4 README typos and pushed a `nightshift/*` branch, with zero live-state pollution (commit e833979).
