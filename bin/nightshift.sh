@@ -30,10 +30,10 @@ mkdir -p "$STATE_DIR" "$RUNS_DIR" "$DIGEST_DIR" "$WORKTREES_DIR"
 log() { echo "[nightshift] $*" >&2; }
 
 # ---------------------------------------------------------------- rulebook ----
-declare -a REPO_PATHS=() REPO_MODES=()
+declare -a REPO_PATHS=() REPO_MODES=() REPO_BASES=()
 load_rulebook() {
-  local tag a b rb_run_branches=""
-  while IFS=$'\t' read -r tag a b; do
+  local tag a b c rb_run_branches=""
+  while IFS=$'\t' read -r tag a b c; do
     case "$tag" in
       prefix)               BRANCH_PREFIX="$a" ;;
       max_open)             MAX_OPEN="$a" ;;
@@ -41,7 +41,7 @@ load_rulebook() {
       max_fix_iterations)   MAX_FIX_ITER="$a" ;;
       max_files)            MAX_FILES="$a" ;;
       max_lines)            MAX_LINES="$a" ;;
-      repo)                 REPO_PATHS+=("$a"); REPO_MODES+=("$b") ;;
+      repo)                 REPO_PATHS+=("$a"); REPO_MODES+=("$b"); REPO_BASES+=("$c") ;;
     esac
   done < <(python3 "$NIGHTSHIFT_HOME/lib/parse_rulebook.py" "$RULEBOOK")
   # Per-run safety ceiling: the rulebook wins; NIGHTSHIFT_MAX_RUN_BRANCHES stays as an
@@ -203,14 +203,14 @@ $(git -C "$wd" diff)"
 }
 
 # --------------------------------------------------------------- selection ----
-select_order() { # emit "path<TAB>mode", most-recently-changed first (cold-start churn)
-  local i path mode ts
+select_order() { # emit "path<TAB>mode<TAB>base", most-recently-changed first (cold-start churn)
+  local i path mode base ts
   for i in "${!REPO_PATHS[@]}"; do
-    path="${REPO_PATHS[$i]}"; mode="${REPO_MODES[$i]}"
+    path="${REPO_PATHS[$i]}"; mode="${REPO_MODES[$i]}"; base="${REPO_BASES[$i]:-}"
     case "$mode" in branch-fix|findings-only) ;; *) continue ;; esac
     [ -d "$path/.git" ] || { log "skip $path (not a git repo)"; continue; }
     ts=$(git -C "$path" log -1 --format=%ct 2>/dev/null || echo 0)
-    printf '%s\t%s\t%s\n' "$ts" "$path" "$mode"
+    printf '%s\t%s\t%s\t%s\n' "$ts" "$path" "$mode" "$base"
   done | sort -rn | cut -f2-
 }
 
@@ -244,6 +244,15 @@ base_ref() { # repo -> best base ref to branch from
     git -C "$repo" rev-parse -q --verify "$r" >/dev/null 2>&1 && { echo "$r"; return 0; }
   done
   echo HEAD
+}
+resolve_base() { # repo cfgbase -> ref to branch from (rulebook `base:` wins, else auto-detect)
+  local repo="$1" cfg="$2"
+  if [ -n "$cfg" ]; then
+    if git -C "$repo" rev-parse -q --verify "origin/$cfg" >/dev/null 2>&1; then echo "origin/$cfg"; return 0; fi
+    if git -C "$repo" rev-parse -q --verify "$cfg"        >/dev/null 2>&1; then echo "$cfg";        return 0; fi
+    log "  $(basename "$repo"): configured base '$cfg' not found — auto-detecting"
+  fi
+  base_ref "$repo"
 }
 setup_worktree() { git -C "$1" worktree add -q --detach "$2" "$3"; }   # repo wt base
 remove_worktree() {                                                    # repo wt
@@ -358,7 +367,7 @@ main() {
     fi
     pass=$((pass + 1))
     progress=0
-  while IFS=$'\t' read -r repo mode; do
+  while IFS=$'\t' read -r repo mode cfgbase; do
     [ -n "$repo" ] || continue
     open=$(open_branch_count)
     [ "$open" -ge "$MAX_OPEN" ] && { log "open-branch cap reached ($open/$MAX_OPEN) — stop"; stop_reason=backpressure; break; }
@@ -366,7 +375,7 @@ main() {
     id="$RUNS_DIR/item-$(date +%s%N)"; mkdir -p "$id"
     echo "$repo" > "$id/repo"
     wt="$WORKTREES_DIR/$(basename "$id")"
-    base="$(base_ref "$repo")"
+    base="$(resolve_base "$repo" "$cfgbase")"
     if ! setup_worktree "$repo" "$wt" "$base"; then
       log "  $(basename "$repo"): could not create worktree — skip"; continue
     fi

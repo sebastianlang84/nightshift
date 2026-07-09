@@ -61,7 +61,8 @@ def main(path: str) -> None:
     print(f"max_files\t{limits.get('max_files_per_change', '15')}")
     print(f"max_lines\t{limits.get('max_lines_per_change', '400')}")
     for r in repos:
-        print(f"repo\t{r.get('path', '')}\t{r.get('mode', 'findings-only')}")
+        # base is optional: empty means "auto-detect" (base_ref) in the Runner.
+        print(f"repo\t{r.get('path', '')}\t{r.get('mode', 'findings-only')}\t{r.get('base', '')}")
 
 
 if __name__ == "__main__":

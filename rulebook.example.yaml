@@ -19,5 +19,8 @@ limits:
 repos:
   - path: /absolute/path/to/your/repo
     mode: findings-only          # start here; graduate to branch-fix by editing this (the trust-ramp)
-  # - path: /absolute/path/to/another
+  # - path: /absolute/path/to/gitflow-repo
   #   mode: branch-fix           # full loop: Explore -> Fix<->Review -> push a nightshift/* branch
+  #   base: develop              # OPTIONAL branch to work from. Empty = auto-detect (origin/HEAD ->
+  #                              # main/master). Set to `develop` for gitflow repos so fixes branch
+  #                              # off the integration branch, not production `main`.
