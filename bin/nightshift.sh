@@ -187,13 +187,16 @@ $(git -C "$wd" diff)"
   out="$(cd "$wd" && \
     GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="$HOOKS_DIR" \
     claude -p "$prompt" --output-format json --settings "$STATE_DIR/claude-settings.json" $flags </dev/null 2>/dev/null)" || return 1
-  # `claude -p --output-format json` prints a SINGLE result object — .result/.usage/
-  # .total_cost_usd are top-level (docs: code.claude.com/docs/en/headless). An earlier
-  # `.[-1]` (array-index) errored on the object, yielding an empty result → the extract
-  # fallback made every explore report found:false, so claude mode silently did nothing.
-  printf '%s' "$out" | jq -r '.result // ""'               > "$id/$stage.out"
-  printf '%s' "$out" | jq -r '.usage.output_tokens // empty' > "$id/.tokens_$stage" 2>/dev/null || true
-  printf '%s' "$out" | jq -r '.total_cost_usd // empty'      > "$id/.cost_$stage"   2>/dev/null || true
+  # `claude -p --output-format json` is NOT a stable shape. Sometimes it is a single
+  # result object ({result,usage,total_cost_usd}); sometimes a JSON ARRAY of events with
+  # the result object as one element (observed with claude 2.1.197, e.g. when a
+  # rate_limit_event is present). A parser that assumes one shape silently yields an empty
+  # result on the other — every explore then reports found:false and claude mode does
+  # nothing. So normalise both: pick the result object whether top-level is it or an array.
+  local pick='if type=="array" then (map(select(.type=="result"))|last) else . end'
+  printf '%s' "$out" | jq -r "$pick"' | (.result // "")'                > "$id/$stage.out"
+  printf '%s' "$out" | jq -r "$pick"' | (.usage.output_tokens // empty)' > "$id/.tokens_$stage" 2>/dev/null || true
+  printf '%s' "$out" | jq -r "$pick"' | (.total_cost_usd // empty)'      > "$id/.cost_$stage"   2>/dev/null || true
   case "$stage" in
     explore) python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/finding.json" ;;
     fix)     cp "$id/$stage.out" "$id/worknote.md" ;;
