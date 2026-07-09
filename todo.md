@@ -24,6 +24,17 @@ Open follow-ups on the scheduler (not blocking):
   commits, back off after empty runs. nightshift's open-branch cap already self-throttles, so this is
   a cost optimisation, not a correctness need.
 
+## Craft / best-practice review — always on (2026-07-10)
+
+**Shipped.** explore + review now cover **craft**, not just correctness: code smells, dead/unused
+code, poor naming, needless complexity, inconsistency with the surrounding style. Grounded in the
+repo's OWN standard (linter/formatter config, CONVENTIONS.md, CONTRIBUTING, surrounding code) — not
+generic dogma — and held to the same smallness/reversibility/single-concern bar (no sweeping refactors,
+no subjective restyle = churn). Finding types widened to
+`bug|typo|doc|cleanup|smell|naming|convention|complexity`. Prompt-only change (explore.md, review.md);
+always on. Verified with a claude e2e that found + fixed a pure-craft issue (unused `import os`, no
+typo/bug present), shipped a correct 1-line diff.
+
 ## PR / branch review mode — merge-recommendation layer
 
 A separate mode that reviews **all open `nightshift/*` branches (or PRs)** and gives a
