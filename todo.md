@@ -75,6 +75,27 @@ no subjective restyle = churn). Finding types widened to
 always on. Verified with a claude e2e that found + fixed a pure-craft issue (unused `import os`, no
 typo/bug present), shipped a correct 1-line diff.
 
+## NEXT: verdict / harvest recording — the first human feedback loop
+
+**This is the designated next build (Fable's ordering, 2026-07-10).** Today the ledger records
+`shipped` and then goes deaf: it never learns whether the human **merged, closed, or deleted** the
+branch/PR. That human verdict is the only real ground-truth signal in the whole system — and per Fable
+it is worth more than any additional machine reviewer, because each same-vendor reviewer decorrelates
+less than the last while the human verdict decorrelates completely. It is also the instrument that
+finally *validates or refutes* craft-always-on: if craft PRs are mostly closed/deleted, craft mode is
+a churn generator; if merged, it earns its keep.
+
+Build sketch (do BEFORE any second-reviewer / merge-recommendation layer below):
+- A harvest step (run at start of each night, and/or a `bin/harvest` command) that, for every ledger
+  row with `outcome:"shipped"` and an open branch/PR, reconciles against reality: is the branch merged
+  (`git branch --merged`, or the PR state via `gh pr view --json state,mergedAt`)? closed unmerged?
+  deleted? still open? Write the result back as a `verdict` (merged | closed | deleted | open) + a
+  timestamp — append a new ledger event rather than mutating the shipped row (keep it append-only).
+- Surface it: a small stats line in the digest (merge rate, and merge rate split by `verifiability` /
+  `proof` and by finding `type`) so the churn question is answered by data, not opinion.
+- This is also what feeds the open-branch backpressure a truer signal (a closed/deleted branch frees a
+  slot just like a merge). Builds on the review=verify work above (proof / verifiability per row).
+
 ## PR / branch review mode — merge-recommendation layer
 
 A separate mode that reviews **all open `nightshift/*` branches (or PRs)** and gives a
