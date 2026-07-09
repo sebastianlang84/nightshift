@@ -39,6 +39,31 @@ Verified: MCP tool callable in the locked-down subprocess (`--tools` + `--danger
 full e2e where nightshift auto-indexed a sandbox and shipped a fix. Biggest payoff on large repos
 (market-digest, 291 files) where blind reading is weakest and explore cost highest.
 
+## Review = verify the claim, not judge the diff (2026-07-10)
+
+**Shipped.** Reframed the pipeline around Sebastian's point (a review verifies a proposition against
+truth — "is 2x = 4x/2" needs no diff/history) and the cold, first-contact reality (nightshift meets
+most repos for the first time, with no privileged access to intent or history). Fable (cross-model)
+hardened it into a policy:
+- **explore** emits every finding as a FALSIFIABLE `claim` + a `verify` recipe + a `verifiability`
+  class (`static` | `convention` | `runtime`); `confidence` redefined as "how completely provable
+  statically", not vibes. Prefers correctness over craft. Craft is only raised if it cites THIS repo's
+  own standard (else it's generic dogma → dropped).
+- **review** runs the verification recipe against the RESULTING worktree (cwd = post-fix code; Grep is
+  truth), and separates `proof: verified` from `proof: unproven`. Key guard: absence of a grep hit is
+  not proof of absence when dynamic/string references (reflection, registries, CLI dispatch, entry
+  points) are possible — so a clean grep is not blind trust. Unfalsifiable taste → abandon.
+- **runtime findings** can't be statically proven (no Bash/execution) → ship only if safe-when-wrong,
+  as `proof: unproven`, and the Runner stamps **[unverified]** on the PR title + digest so the morning
+  human knows *this one needs tests before merge*. `proof`/`verifiability` now recorded in the ledger.
+- Fixed the latent bug where review.md referenced a `worknote` the Runner never injected (the rewrite
+  drops it — not seeing the producer's self-justification is the point: kills anchoring).
+- **codemap role clarified:** `repoPath` indexes the REAL repo (no fix) → stale for "still unused
+  after the edit"; verification uses Grep/Read over cwd (the worktree). codemap = locate, not verify.
+
+Verified: live static e2e (`verifiability:static` → `proof:verified`, no stamp) + unproven-path
+plumbing (digest + PR title stamped `[unverified]`).
+
 ## Craft / best-practice review — always on (2026-07-10)
 
 **Shipped.** explore + review now cover **craft**, not just correctness: code smells, dead/unused

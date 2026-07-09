@@ -64,14 +64,17 @@ append_run() { # stage agent start dur tokens status item cost
       exit:$status}' >> "$RUNSLOG"
 }
 
-ledger_append() { # item repo fp branch sha outcome [summary] [pr_url]
+ledger_append() { # item repo fp branch sha outcome [summary] [pr_url] [proof] [verifiability]
   jq -nc \
     --arg night "$NIGHT" --arg item "$1" --arg repo "$2" --arg fp "$3" \
-    --arg branch "$4" --arg sha "$5" --arg outcome "$6" --arg summary "${7:-}" --arg pr "${8:-}" --arg ts "$(date -Iseconds)" \
+    --arg branch "$4" --arg sha "$5" --arg outcome "$6" --arg summary "${7:-}" --arg pr "${8:-}" \
+    --arg proof "${9:-}" --arg verif "${10:-}" --arg ts "$(date -Iseconds)" \
     '{night:$night,item:$item,repo:$repo,fingerprint:$fp,
       branch:($branch|if .=="" then null else . end),
       sha:($sha|if .=="" then null else . end),
       pr_url:($pr|if .=="" then null else . end),
+      proof:($proof|if .=="" then null else . end),
+      verifiability:($verif|if .=="" then null else . end),
       outcome:$outcome,summary:$summary,ts:$ts}' >> "$LEDGER"
 }
 
@@ -316,13 +319,17 @@ open_pr() { # repo wt branch item_dir -> echoes PR url ("" if none)
   esac
   command -v gh >/dev/null 2>&1 || { log "  gh not found — branch pushed, no PR"; return 0; }
   base="$(base_ref "$repo")"; base="${base#origin/}"; [ "$base" = HEAD ] && base=main
-  { jq -r '.summary // "improvement"' "$id/finding.json"
+  # A runtime/behavioral finding the reviewer could not statically prove ships flagged, so the
+  # morning human knows this one needs tests before merge and the verified ones do not.
+  local mark=""
+  [ "$(jq -r '.proof // ""' "$id/review.md" 2>/dev/null)" = unproven ] && mark="[unverified] "
+  { echo "${mark}$(jq -r '.summary // "improvement"' "$id/finding.json")"
     echo; echo '---'
     echo '_Opened by nightshift — review at leisure; the merge is yours._'; echo
     cat "$id/worknote.md" 2>/dev/null || true
   } > "$id/pr-body.md"
   url="$( (cd "$wt" && gh pr create --base "$base" --head "$branch" \
-            --title "nightshift: $(jq -r '.summary // "improvement"' "$id/finding.json")" \
+            --title "${mark}nightshift: $(jq -r '.summary // "improvement"' "$id/finding.json")" \
             --body-file "$id/pr-body.md" 2>/dev/null) )" \
     || { log "  gh pr create failed — branch pushed, no PR"; return 0; }
   log "  PR opened: $url"
@@ -345,8 +352,11 @@ $(cat "$id/worknote.md")"
   # Layer 1 hook active for THIS push only (-c), never persisted to the repo config.
   git -c core.hooksPath="$HOOKS_DIR" -C "$wt" push -q -u origin "$branch"
   sha=$(git -C "$wt" rev-parse HEAD)
-  local pr_url; pr_url=$(open_pr "$repo" "$wt" "$branch" "$id")
-  ledger_append "$(basename "$id")" "$repo" "$fp" "$branch" "$sha" "shipped" "$(jq -r '.summary // ""' "$id/finding.json")" "$pr_url"
+  local pr_url proof verif
+  pr_url=$(open_pr "$repo" "$wt" "$branch" "$id")
+  proof=$(jq -r '.proof // ""' "$id/review.md" 2>/dev/null || true)
+  verif=$(jq -r '.verifiability // ""' "$id/finding.json" 2>/dev/null || true)
+  ledger_append "$(basename "$id")" "$repo" "$fp" "$branch" "$sha" "shipped" "$(jq -r '.summary // ""' "$id/finding.json")" "$pr_url" "$proof" "$verif"
   echo "$branch"
 }
 
@@ -370,7 +380,7 @@ write_digest() { # made open status
     else
       echo "## Shipped"
       [ -f "$LEDGER" ] && jq -r --arg n "$NIGHT" \
-        'select(.night==$n and .outcome=="shipped") | "- " + .repo + " → `" + (.branch // "") + "` — " + (.summary // .fingerprint) + (if .pr_url then "  ([open PR](" + .pr_url + "))" else "" end)' \
+        'select(.night==$n and .outcome=="shipped") | "- " + (if .proof=="unproven" then "**[unverified]** " else "" end) + .repo + " → `" + (.branch // "") + "` — " + (.summary // .fingerprint) + (if .pr_url then "  ([open PR](" + .pr_url + "))" else "" end)' \
         "$LEDGER" 2>/dev/null || true
       echo
       echo "## Findings (findings-only — reported, not touched)"
