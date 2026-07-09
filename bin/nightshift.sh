@@ -73,11 +73,28 @@ ledger_append() { # item repo fp branch sha outcome [summary] [pr_url]
       outcome:$outcome,summary:$summary,ts:$ts}' >> "$LEDGER"
 }
 
+# Robust identity for a finding. The agent (claude mode) may omit `fingerprint`
+# despite the prompt; a missing field reads back as the literal "null" via jq -r
+# and would then poison dedup (every fingerprint-less finding collapses onto one
+# key). Use the model's value when present, else synthesise from file:type:line_window,
+# else echo "" so the caller can drop an unusable finding.
+finding_fingerprint() { # finding.json -> fingerprint or ""
+  jq -r '
+    (.fingerprint // "") as $fp
+    | if ($fp|type)=="string" and ($fp|length)>0 and $fp!="null" then $fp
+      else [(.file // ""),(.type // ""),(.line_window // "")]
+           | map(select(. != "" and . != null))
+           | if length>0 then join(":") else "" end
+      end' "$1" 2>/dev/null || true
+}
+
 already_done() { # fingerprint — ANY prior ledger entry (used by findings-only, report once)
+  [ -n "$1" ] && [ "$1" != null ] || return 1   # never dedup on an unusable key
   [ -f "$LEDGER" ] || return 1
   grep -Fq "\"fingerprint\":\"$1\"" "$LEDGER"
 }
 already_acted() { # fingerprint — only shipped/abandoned/deferred (used by branch-fix)
+  [ -n "$1" ] && [ "$1" != null ] || return 1   # never dedup on an unusable key
   [ -f "$LEDGER" ] || return 1
   # jq match, not a grep regex: fingerprints contain '.'/'/'/':' that would be
   # interpreted as regex metacharacters and could match a *different* fingerprint.
@@ -263,7 +280,7 @@ open_pr() { # repo wt branch item_dir -> echoes PR url ("" if none)
 finalize() { # repo worktree item_dir -> echoes branch name
   local repo="$1" wt="$2" id="$3" fp type slug branch sha
   fp=$(jq -r '.fingerprint' "$id/finding.json")
-  type=$(jq -r '.type' "$id/finding.json")
+  type=$(jq -r '.type // "change"' "$id/finding.json")   # default so the branch slug never reads "null"
   slug="$(printf '%s-%s' "$type" "$(basename "$repo")" | tr '[:upper:] /' '[:lower:]--' | cut -c1-40)"
   branch="${BRANCH_PREFIX}${slug}-$(date +%Y%m%d-%H%M%S)"
   git -C "$wt" checkout -q -b "$branch"
@@ -323,7 +340,7 @@ main() {
   write_claude_settings
   log "agent=$NIGHTSHIFT_AGENT prefix=$BRANCH_PREFIX · cap: max $MAX_OPEN unmerged ${BRANCH_PREFIX} branches · run ceiling $MAX_RUN_BRANCHES · fix iters $MAX_FIX_ITER"
 
-  local made=0 considered=0 findings=0 repo mode id found fp iter verdict wt base b summary open pass=0 progress stop_reason=ok
+  local made=0 considered=0 findings=0 repo mode id found fp fnj iter verdict wt base b summary open pass=0 progress stop_reason=ok
   # No per-night production cap. The ONLY cap is the count of OPEN (unmerged) nightshift/* branches:
   # work continues while fewer than max_open_branches are unmerged; merging/closing frees slots and
   # work resumes; when merging stops it fills to the cap and stops. "All night" continuous operation
@@ -356,7 +373,12 @@ main() {
     if [ "$found" != "true" ]; then
       log "  $(basename "$repo") [$mode]: nothing worth doing"; remove_worktree "$repo" "$wt"; continue
     fi
-    fp=$(jq -r '.fingerprint' "$id/finding.json")
+    fp=$(finding_fingerprint "$id/finding.json")
+    if [ -z "$fp" ]; then
+      log "  $(basename "$repo") [$mode]: finding without a usable fingerprint — skip"; remove_worktree "$repo" "$wt"; continue
+    fi
+    # Persist the resolved fingerprint so finalize/ledger read the same identity.
+    fnj=$(jq --arg fp "$fp" '.fingerprint=$fp' "$id/finding.json") && printf '%s' "$fnj" > "$id/finding.json"
     summary=$(jq -r '.summary // ""' "$id/finding.json")
 
     if [ "$mode" = findings-only ]; then
