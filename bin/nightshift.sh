@@ -159,6 +159,17 @@ mock_review() { # workdir item_dir
 claude_run() { # stage workdir item_dir
   local stage="$1" wd="$2" id="$3" prompt out
   local flags="${NIGHTSHIFT_CLAUDE_FLAGS:---dangerously-skip-permissions --max-turns 25}"
+  # Per-stage CAPABILITY profile: enforce each stage's rules by which tools EXIST, not by
+  # asking the prompt nicely (same philosophy as the git-confinement hook). explore/review
+  # are read-only by nature -> only Read/Grep/Glob, no Write/Edit/Bash. fix edits the working
+  # tree -> Write/Edit, but still NO Bash, which capability-enforces fix.md's "do NOT run git,
+  # no destructive commands". Verified: with these sets claude cannot write outside its granted
+  # tools even under --dangerously-skip-permissions (adversarial test, 2026-07-09).
+  local tools
+  case "$stage" in
+    fix) tools="${NIGHTSHIFT_FIX_TOOLS:-Read,Grep,Glob,Write,Edit}" ;;
+    *)   tools="${NIGHTSHIFT_READONLY_TOOLS:-Read,Grep,Glob}" ;;
+  esac
   prompt="$(cat "$NIGHTSHIFT_HOME/prompts/$stage.md")
 
 ## Context
@@ -188,7 +199,7 @@ $(git -C "$wd" diff)"
   # shellcheck disable=SC2086
   out="$(cd "$wd" && \
     GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="$HOOKS_DIR" \
-    claude -p "$prompt" --output-format json --settings "$STATE_DIR/claude-settings.json" $flags </dev/null 2>/dev/null)" || return 1
+    claude -p "$prompt" --output-format json --settings "$STATE_DIR/claude-settings.json" --tools "$tools" $flags </dev/null 2>/dev/null)" || return 1
   # `claude -p --output-format json` is NOT a stable shape. Sometimes it is a single
   # result object ({result,usage,total_cost_usd}); sometimes a JSON ARRAY of events with
   # the result object as one element (observed with claude 2.1.197, e.g. when a
