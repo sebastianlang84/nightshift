@@ -16,10 +16,12 @@ NIGHTSHIFT_OPEN_PR="${NIGHTSHIFT_OPEN_PR:-1}"
 RULEBOOK="${RULEBOOK:-$NIGHTSHIFT_HOME/rulebook.yaml}"
 [ -f "$RULEBOOK" ] || RULEBOOK="$NIGHTSHIFT_HOME/rulebook.example.yaml"
 HOOKS_DIR="$NIGHTSHIFT_HOME/hooks"
-STATE_DIR="$NIGHTSHIFT_HOME/state"
+# State/runs/digests default under NIGHTSHIFT_HOME but are env-overridable so a test
+# run (e.g. an isolated claude e2e) writes nowhere near the live ledger/digest.
+STATE_DIR="${NIGHTSHIFT_STATE_DIR:-$NIGHTSHIFT_HOME/state}"
 NIGHT="$(date +%Y-%m-%d)"
-RUNS_DIR="$NIGHTSHIFT_HOME/runs/$NIGHT"
-DIGEST_DIR="$NIGHTSHIFT_HOME/digests"
+RUNS_DIR="${NIGHTSHIFT_RUNS_DIR:-$NIGHTSHIFT_HOME/runs}/$NIGHT"
+DIGEST_DIR="${NIGHTSHIFT_DIGEST_DIR:-$NIGHTSHIFT_HOME/digests}"
 LEDGER="$STATE_DIR/ledger.jsonl"
 RUNSLOG="$STATE_DIR/runs.jsonl"
 # Worktrees live OUTSIDE the control repo, so nightshift can target its own repo
