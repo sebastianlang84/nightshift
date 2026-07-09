@@ -124,10 +124,6 @@ write_codemap_mcp() {
   printf '%s\n' '{"mcpServers":{"codemap":{"type":"stdio","command":"codemap-mcp","args":[],"env":{}}}}' \
     > "$STATE_DIR/codemap-mcp.json"
 }
-codemap_indexed() { # repo -> success if an approved, non-empty index exists
-  command -v codemap >/dev/null 2>&1 || return 1
-  codemap status --repo "$1" --json 2>/dev/null | jq -e '.indexed==true' >/dev/null 2>&1
-}
 
 # --------------------------------------------------------------- run_agent ----
 run_agent() { # stage workdir item_dir
@@ -424,9 +420,19 @@ main() {
     if ! setup_worktree "$repo" "$wt" "$base"; then
       log "  $(basename "$repo"): could not create worktree — skip"; continue
     fi
-    # Offer codemap to the read-only stages only where this repo is actually indexed.
-    if codemap_indexed "$repo"; then export NIGHTSHIFT_CODEMAP_REPO="$repo"
-    else export NIGHTSHIFT_CODEMAP_REPO=""; fi
+    # codemap: nightshift keeps the structural index current ITSELF — never a manual step. Indexing is
+    # local + incremental (seconds), so just do it every run before explore; the index is always
+    # current. --approve makes first-time automatic: the rulebook is already the human's consent
+    # surface (you listed these repos). Absent binary or a failure -> plain Read/Grep/Glob.
+    # Kill switch: NIGHTSHIFT_CODEMAP=0.
+    export NIGHTSHIFT_CODEMAP_REPO=""
+    if [ "${NIGHTSHIFT_CODEMAP:-1}" = 1 ] && command -v codemap >/dev/null 2>&1; then
+      if codemap index --approve --repo "$repo" >/dev/null 2>&1; then
+        export NIGHTSHIFT_CODEMAP_REPO="$repo"
+      else
+        log "  $(basename "$repo"): codemap index failed — continuing without it"
+      fi
+    fi
 
     run_agent explore "$wt" "$id" || true
     considered=$((considered + 1))
