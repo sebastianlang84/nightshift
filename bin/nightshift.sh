@@ -75,7 +75,13 @@ already_done() { # fingerprint — ANY prior ledger entry (used by findings-only
 }
 already_acted() { # fingerprint — only shipped/abandoned/deferred (used by branch-fix)
   [ -f "$LEDGER" ] || return 1
-  grep -Eq "\"fingerprint\":\"$1\".*\"outcome\":\"(shipped|abandoned|deferred)\"" "$LEDGER"
+  # jq match, not a grep regex: fingerprints contain '.'/'/'/':' that would be
+  # interpreted as regex metacharacters and could match a *different* fingerprint.
+  # Slurp + any() so the verdict is order-independent (a non-matching *last* line
+  # must not flip jq -e's exit status).
+  jq -se --arg fp "$1" \
+    'any(.[]; .fingerprint==$fp and (.outcome=="shipped" or .outcome=="abandoned" or .outcome=="deferred"))' \
+    "$LEDGER" >/dev/null 2>&1
 }
 
 # Layer 2 settings for the agent: register the PreToolUse guard so the agent
