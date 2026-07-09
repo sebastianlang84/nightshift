@@ -8,9 +8,11 @@ and not the ratified v1 scope (ADR 0004) — just good ideas parked with enough 
 **Concrete first target (user, 2026-07-09):** a systemd timer (or cron) that fires **every night at
 03:00 local** and runs nightshift across all rulebook repos, unattended. This is what makes the
 "runs all night" behaviour real (the open-branch cap already governs throughput; the scheduler
-governs *when* + re-invocation). Also discuss then: should nightshift auto-open **draft PRs** for its
-branches instead of leaving bare branches (user noticed branches push but no PR is offered — that is
-intentional in v1, but auto-draft-PR would cut harvest friction; ties into the PR-review-mode idea).
+governs *when* + re-invocation).
+
+_Resolved 2026-07-09:_ auto-PR is **done** — the Runner now opens a **normal (non-draft) PR** per
+shipped branch (`gh pr create`, `NIGHTSHIFT_OPEN_PR=1` default; ADR 0004 amendment). Chosen over
+draft so CI runs overnight and the morning triage sees a green/red check with the merge button live.
 
 ## Schedule management — templates / scripts (create / edit / delete)
 

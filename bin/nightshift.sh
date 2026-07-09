@@ -9,6 +9,10 @@ set -euo pipefail
 
 NIGHTSHIFT_HOME="${NIGHTSHIFT_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 NIGHTSHIFT_AGENT="${NIGHTSHIFT_AGENT:-mock}"
+# After pushing a nightshift/* branch, open a normal PR for it on GitHub (1=on).
+# A PR is a GitHub-API object, not a push to main — the pre-push hook is untouched
+# and the merge stays the human's click. Set 0 to go back to bare branches.
+NIGHTSHIFT_OPEN_PR="${NIGHTSHIFT_OPEN_PR:-1}"
 RULEBOOK="${RULEBOOK:-$NIGHTSHIFT_HOME/rulebook.yaml}"
 [ -f "$RULEBOOK" ] || RULEBOOK="$NIGHTSHIFT_HOME/rulebook.example.yaml"
 HOOKS_DIR="$NIGHTSHIFT_HOME/hooks"
@@ -54,13 +58,14 @@ append_run() { # stage agent start dur tokens status item cost
       exit:$status}' >> "$RUNSLOG"
 }
 
-ledger_append() { # item repo fp branch sha outcome [summary]
+ledger_append() { # item repo fp branch sha outcome [summary] [pr_url]
   jq -nc \
     --arg night "$NIGHT" --arg item "$1" --arg repo "$2" --arg fp "$3" \
-    --arg branch "$4" --arg sha "$5" --arg outcome "$6" --arg summary "${7:-}" --arg ts "$(date -Iseconds)" \
+    --arg branch "$4" --arg sha "$5" --arg outcome "$6" --arg summary "${7:-}" --arg pr "${8:-}" --arg ts "$(date -Iseconds)" \
     '{night:$night,item:$item,repo:$repo,fingerprint:$fp,
       branch:($branch|if .=="" then null else . end),
       sha:($sha|if .=="" then null else . end),
+      pr_url:($pr|if .=="" then null else . end),
       outcome:$outcome,summary:$summary,ts:$ts}' >> "$LEDGER"
 }
 
@@ -215,6 +220,35 @@ remove_worktree() {                                                    # repo wt
   git -C "$1" worktree prune 2>/dev/null || true
 }
 
+# --------------------------------------------------------------------- pr ----
+# Open a normal (non-draft) PR for a freshly pushed nightshift/* branch. A PR is a
+# GitHub-API object, NOT a push to main — the pre-push hook is untouched and the
+# merge stays the human's click. Best-effort: PR off, no GitHub remote (e.g. a
+# local bare remote / sandbox), missing gh, or a gh failure all just skip the PR;
+# the branch is already pushed either way. Echoes the PR url ("" if none). All
+# progress/errors go to stderr so stdout stays clean for the caller.
+open_pr() { # repo wt branch item_dir -> echoes PR url ("" if none)
+  local repo="$1" wt="$2" branch="$3" id="$4" base url
+  [ "$NIGHTSHIFT_OPEN_PR" = 1 ] || return 0
+  case "$(git -C "$repo" remote get-url origin 2>/dev/null || true)" in
+    *github.com*) ;;
+    *) log "  no GitHub remote — branch pushed, PR skipped"; return 0 ;;
+  esac
+  command -v gh >/dev/null 2>&1 || { log "  gh not found — branch pushed, no PR"; return 0; }
+  base="$(base_ref "$repo")"; base="${base#origin/}"; [ "$base" = HEAD ] && base=main
+  { jq -r '.summary // "improvement"' "$id/finding.json"
+    echo; echo '---'
+    echo '_Opened by nightshift — review at leisure; the merge is yours._'; echo
+    cat "$id/worknote.md" 2>/dev/null || true
+  } > "$id/pr-body.md"
+  url="$( (cd "$wt" && gh pr create --base "$base" --head "$branch" \
+            --title "nightshift: $(jq -r '.summary // "improvement"' "$id/finding.json")" \
+            --body-file "$id/pr-body.md" 2>/dev/null) )" \
+    || { log "  gh pr create failed — branch pushed, no PR"; return 0; }
+  log "  PR opened: $url"
+  printf '%s' "$url"
+}
+
 # ---------------------------------------------------------------- finalize ----
 finalize() { # repo worktree item_dir -> echoes branch name
   local repo="$1" wt="$2" id="$3" fp type slug branch sha
@@ -231,7 +265,8 @@ $(cat "$id/worknote.md")"
   # Layer 1 hook active for THIS push only (-c), never persisted to the repo config.
   git -c core.hooksPath="$HOOKS_DIR" -C "$wt" push -q -u origin "$branch"
   sha=$(git -C "$wt" rev-parse HEAD)
-  ledger_append "$(basename "$id")" "$repo" "$fp" "$branch" "$sha" "shipped" "$(jq -r '.summary // ""' "$id/finding.json")"
+  local pr_url; pr_url=$(open_pr "$repo" "$wt" "$branch" "$id")
+  ledger_append "$(basename "$id")" "$repo" "$fp" "$branch" "$sha" "shipped" "$(jq -r '.summary // ""' "$id/finding.json")" "$pr_url"
   echo "$branch"
 }
 
@@ -255,7 +290,7 @@ write_digest() { # made open status
     else
       echo "## Shipped"
       [ -f "$LEDGER" ] && jq -r --arg n "$NIGHT" \
-        'select(.night==$n and .outcome=="shipped") | "- " + .repo + " → `" + (.branch // "") + "` — " + (.summary // .fingerprint)' \
+        'select(.night==$n and .outcome=="shipped") | "- " + .repo + " → `" + (.branch // "") + "` — " + (.summary // .fingerprint) + (if .pr_url then "  ([open PR](" + .pr_url + "))" else "" end)' \
         "$LEDGER" 2>/dev/null || true
       echo
       echo "## Findings (findings-only — reported, not touched)"

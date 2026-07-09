@@ -133,6 +133,18 @@ rewritten, so the evolution stays traceable.
   picks by recent git activity (most-recently-changed repo/files) with round-robin across repos as
   the tiebreak. Good enough to prototype; refine with real signal later.
 
+- **Output — normal PRs, opened by the Runner (2026-07-09).** The original decision "branches only,
+  never PRs" is **superseded**: after `finalize` pushes a `nightshift/*` branch, the Runner opens a
+  **normal (non-draft) PR** for it (`gh pr create`, `NIGHTSHIFT_OPEN_PR=1` default). Rationale: a PR
+  is a GitHub-API object, **not** a push to `main` — the `pre-push` hook and the branch-only guarantee
+  are untouched, and the merge stays the human's click. Normal (not draft) so CI runs overnight and
+  the morning triage sees a green/red check with the merge button already live. The **Runner** owns
+  the `gh` call; the agent never touches it (stays in the git cage). Best-effort and non-fatal: PR
+  disabled, no GitHub remote (e.g. the local-bare sandbox), missing `gh`, or a `gh` failure all just
+  skip the PR — the branch is already pushed. The PR url is recorded in the ledger row and linked in
+  the digest. This partially reactivates the deferred "PRs" item (Consequences) while keeping every
+  safety property intact.
+
 Still open (non-blocking for the prototype): the non-git shell scope (§2b); mechanical NIGHTSHIFT.md
 enforcement at Finalize (§3d); the `findings-only` landing path (§2e); and the doc-corpus sweep of
 statements this ADR overruled (§1.2, §1.4, §1.6, §1.8, §3f) — tracked as a separate cleanup task.
