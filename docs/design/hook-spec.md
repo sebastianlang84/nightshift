@@ -65,14 +65,21 @@ Layer 1 off.
   `SYSTEM`) — otherwise an agent could disable Layer 1 by overriding the very env that injects it
   (e.g. `GIT_CONFIG_COUNT=0 git push …`) without ever naming `core.hooksPath`. Benign commands pass.
 
-**Known residual (v1):** the sandbox uses `--dangerously-skip-permissions`, and whether a PreToolUse
-hook fires under that mode is not yet verified in-session. Layer 1 (git-level) holds regardless. For
-real repos, two backstops close the residual: (a) enable **GitHub branch protection** on `main`
-(block direct/force push + deletion) — a server-side guarantee you own; (b) move real-repo runs off
-`--dangerously-skip-permissions` to a hook-respecting permission mode. Tracked as hardening.
+**Residual — now verified (2026-07-09):** the sandbox uses `--dangerously-skip-permissions`, and the
+open question was whether a PreToolUse hook fires under that mode. **It does** — an adversarial test
+registered the guard exactly as the Runner does, launched `claude 2.1.197` with the production env +
+flags, and had it attempt a `--no-verify` push; the guard denied it verbatim (`nightshift: git
+--no-verify would bypass the pre-push confinement hook`) while a control command ran. So Layer 1 + 2
+both hold in unattended mode. Optional defense-in-depth remains: **GitHub branch protection** on `main`
+(with `enforce_admins`, else the agent's own admin creds bypass it) as a server-side backstop.
 
-## Out of scope (handled elsewhere)
+## Out of scope for §2a — narrowed by capability profiles
 
-Non-git shell that is also irreversible — `gh`, `curl`, `npm publish`, `rm -rf` outside the worktree
-— is **not** covered here. That is re-review §2b (shell/worktree isolation), a separate decision. §2a
-confines git only.
+§2a confines **git** only. Non-git irreversible shell — `gh`, `curl`, `npm publish`, `rm -rf` outside
+the worktree — is re-review §2b (shell/worktree isolation). But the per-stage **capability profiles**
+(`claude_run`, ADR-tracked) now narrow it mechanically: explore/review run with `--tools
+"Read,Grep,Glob"` (no Bash at all) and fix with `Read,Grep,Glob,Write,Edit` (Write/Edit but **no
+Bash**). With no Bash tool in any stage, the agent cannot invoke `rm`/`curl`/`gh`/`git` regardless of
+prompt — the same "capability, not convention" principle as the hook. Verified: a claude run granted
+only read tools could not create a file even under `--dangerously-skip-permissions`. Full OS-level
+sandboxing (read-only FS / no network) stays the strongest tier if ever needed.
