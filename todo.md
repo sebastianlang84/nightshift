@@ -68,6 +68,33 @@ hardened it into a policy:
 Verified: live static e2e (`verifiability:static` → `proof:verified`, no stamp) + unproven-path
 plumbing (digest + PR title stamped `[unverified]`).
 
+## Fable Nacht-1-Re-Review — Härtung geshippt (2026-07-10)
+
+Nach dem ersten echten Timer-Lauf (03:00) ließ Sebastian **Fable** (cross-model) die Nachtarbeit
+bewerten: beide offenen PRs (valuelens #1 invertierter Kommentar, market-digest #2 toter Validator)
+unabhängig gegengeprüft → **beide korrekt, gemergt**. Fable fand kein falsches Ergebnis, aber echte
+Prozess-Schwächen. Drei davon sofort eingearbeitet (Prompt-/Runner-only, kein Verhaltensrisiko):
+
+- **`static-given-deps` als neue Verifiability-Klasse.** Fables schärfster Fund: PR #2 war als
+  `proof:verified / static` gestempelt, aber der Dreh- und Angelpunkt („Pydantic v2 läuft Literal vor
+  after-Validator") ist eine **Fremdbibliotheks-Semantik, durch keinen Repo-Grep beweisbar** — richtig
+  aus Glück, nicht aus Beweis. Jetzt: explore stuft solche Claims als `static-given-deps` ein, nennt die
+  Lib + wo die Version gepinnt ist; review MUSS die Semantik an der gepinnten Dependency bestätigen
+  (installierte Package-Source / versionierte Docs lesen), sonst `proof:unproven` (+ `[unverified]`).
+  (explore.md, review.md)
+- **Root-Cause-Widening.** Ledger 2+3 waren dieselbe Ursache (5/150-Drift), auf zwei Files/Branches/
+  Merges zersplittert. Jetzt: explore rahmt eine wiederkehrende Inkonsistenz als EINE Finding über alle
+  Vorkommen (alle Orte in `verify`), review prüft, dass der Fix jeden Zwilling erwischt hat (sonst
+  `revise`) — bounded durch das Change-Budget. (explore.md, review.md)
+- **Evidence-Chain reist mit dem PR.** `open_pr` hängt jetzt Claim + Verifiability/Proof + Verify-Recipe
+  + das, was der Reviewer tatsächlich fand, an den PR-Body → Morgen-Merge = 30-Sekunden-Audit statt
+  Neu-Herleitung, und ein Rubber-Stamp-Review wird sichtbar statt versteckt. (bin/nightshift.sh open_pr)
+
+Verifiziert: `bash -n` + PR-Body-Rendering-Smoke (voller static-given-deps-Fall zeigt die Verification-
+Sektion, Fallback-Typo ohne Felder lässt sie sauber weg). Nicht separat e2e — Prompt-/Body-Wording auf
+der bewiesenen Pipeline. Zwei Fable-Punkte bleiben offen: siehe NEXT (Harvest) + der Ledger-Schema-
+Versions-Punkt dort.
+
 ## Craft / best-practice review — always on (2026-07-10)
 
 **Shipped.** explore + review now cover **craft**, not just correctness: code smells, dead/unused
@@ -81,13 +108,24 @@ typo/bug present), shipped a correct 1-line diff.
 
 ## NEXT: verdict / harvest recording — the first human feedback loop
 
-**This is the designated next build (Fable's ordering, 2026-07-10).** Today the ledger records
-`shipped` and then goes deaf: it never learns whether the human **merged, closed, or deleted** the
-branch/PR. That human verdict is the only real ground-truth signal in the whole system — and per Fable
-it is worth more than any additional machine reviewer, because each same-vendor reviewer decorrelates
-less than the last while the human verdict decorrelates completely. It is also the instrument that
-finally *validates or refutes* craft-always-on: if craft PRs are mostly closed/deleted, craft mode is
-a churn generator; if merged, it earns its keep.
+**This is the designated next build (Fable's ordering, 2026-07-10; Fable re-confirmed it dominates on
+the night-1 review).** Today the ledger records `shipped` and then goes deaf: it never learns whether
+the human **merged, closed, or deleted** the branch/PR. That human verdict is the only real ground-truth
+signal in the whole system — and per Fable it is worth more than any additional machine reviewer,
+because each same-vendor reviewer decorrelates less than the last while the human verdict decorrelates
+completely. It is also the instrument that finally *validates or refutes* craft-always-on: if craft PRs
+are mostly closed/deleted, craft mode is a churn generator; if merged, it earns its keep.
+
+**Night-1 already demonstrated the gap twice:** (a) the finding-only entry (missing `extract_json.py` in
+the docs table) is now actually FIXED in `docs/design/prototype.md`, but the ledger still reads
+`outcome:finding` — it can't see its own resolution. (b) On 2026-07-10 the two open PRs (valuelens #1,
+market-digest #2) were human-merged after a Fable review — the ledger doesn't record that verdict either.
+Both are exactly the signal this build captures.
+
+**Also fold in (Fable):** ledger schema drift. The proof/verifiability fields landed *between* the two
+live nights, so early rows lack them (PR #1 unstamped, PR #2 stamped) — not nondeterminism, schema
+evolution. Add a `schema_version` to ledger rows (and/or a one-time backfill) so a harvest/stats consumer
+can tell "field absent because old schema" from "field genuinely empty."
 
 Build sketch (do BEFORE any second-reviewer / merge-recommendation layer below):
 - A harvest step (run at start of each night, and/or a `bin/harvest` command) that, for every ledger
@@ -99,6 +137,25 @@ Build sketch (do BEFORE any second-reviewer / merge-recommendation layer below):
   `proof` and by finding `type`) so the churn question is answered by data, not opinion.
 - This is also what feeds the open-branch backpressure a truer signal (a closed/deleted branch frees a
   slot just like a merge). Builds on the review=verify work above (proof / verifiability per row).
+
+## Scheduler-Koexistenz mit market-digest — geprüft, unkritisch (2026-07-10)
+
+**Verdikt: kein echtes Issue, kein Blocker.** Geprüft, weil auf dieser Maschine neben nightshift die
+market-digest-Timer laufen. Zeitlicher Überlapp existiert (`market-digest-tm-investing-fetch` feuert
+stündlich `00..08,10..23:00` → auch **03:00:00**; `nightshift` feuert 03:00 +Jitter → real 03:00:15;
+also dieselbe Minute). Aber die Berührungspunkte sind harmlos:
+- **Datei/Git/Working-Tree: keine Kollision.** market-digest steht zwar in nightshifts rulebook, aber
+  der tm-investing-Fetch schreibt nur nach `~/.local/state/market-digest` + `~/ai_stack_data/...`,
+  NICHT ins Git-Working-Tree von `~/dev/market-digest`. Und nightshift arbeitet in einer Wegwerf-Worktree
+  auf festem SHA — davon unberührt. Beide haben eigene `flock`s auf eigenen Lock-Dirs.
+- **Geteiltes Claude-Konto: einzige reale Berührung, mild.** tm-investing ruft `claude` CLI auf
+  (`TM_LLM_BACKEND=claude_cli`, Sonnet-5, Timeout 900s), nightshift ruft `claude` (Opus) zur selben
+  Minute → beide ziehen aus demselben Abo-Rate-Limit. Worst case: nightshifts Explore wird langsamer
+  oder kassiert ein `rate_limit_event` — **genau den Fall fängt der Parser seit f0e1898 ab** (Array-Shape).
+  Kein Korrektheitsbruch. Zwei parallele CLI-Sessions sind fürs Abo normal; teils getrennte Modell-Kapazität.
+
+Optionale billige Versicherung (nicht nötig): nightshift auf `OnCalendar=03:05` schieben, falls das
+Morgen-Log Verlangsamung/Rate-Limits um 03:00 zeigt. 03:00 ist nicht sakrosankt. Erst bei Befund.
 
 ## PR / branch review mode — merge-recommendation layer
 

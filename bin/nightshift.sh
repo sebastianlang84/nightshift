@@ -323,10 +323,25 @@ open_pr() { # repo wt branch item_dir -> echoes PR url ("" if none)
   # morning human knows this one needs tests before merge and the verified ones do not.
   local mark=""
   [ "$(jq -r '.proof // ""' "$id/review.md" 2>/dev/null)" = unproven ] && mark="[unverified] "
+  # The verification chain travels WITH the PR so the morning merge is a 30-second audit,
+  # not a re-derivation — and so a rubber-stamp review is visible rather than hidden.
+  local claim verify verif proof evidence
+  claim=$(jq -r '.claim // ""'         "$id/finding.json" 2>/dev/null || true)
+  verify=$(jq -r '.verify // ""'       "$id/finding.json" 2>/dev/null || true)
+  verif=$(jq -r '.verifiability // ""' "$id/finding.json" 2>/dev/null || true)
+  proof=$(jq -r '.proof // ""'         "$id/review.md"    2>/dev/null || true)
+  evidence=$(jq -r '.evidence // ""'   "$id/review.md"    2>/dev/null || true)
   { echo "${mark}$(jq -r '.summary // "improvement"' "$id/finding.json")"
     echo; echo '---'
     echo '_Opened by nightshift — review at leisure; the merge is yours._'; echo
     cat "$id/worknote.md" 2>/dev/null || true
+    if [ -n "$claim$evidence" ]; then
+      echo; echo '### Verification'
+      [ -n "$claim" ]    && { echo; echo "**Claim:** $claim"; }
+      { [ -n "$verif" ] || [ -n "$proof" ]; } && echo "**Class:** \`${verif:-?}\` · **Proof:** \`${proof:-?}\`"
+      [ -n "$verify" ]   && { echo; echo "**How to verify:** $verify"; }
+      [ -n "$evidence" ] && { echo; echo "**What the reviewer found:** $evidence"; }
+    fi
   } > "$id/pr-body.md"
   url="$( (cd "$wt" && gh pr create --base "$base" --head "$branch" \
             --title "${mark}nightshift: $(jq -r '.summary // "improvement"' "$id/finding.json")" \

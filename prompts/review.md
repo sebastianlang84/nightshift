@@ -18,6 +18,19 @@ for it. Establish the claim by the cheapest SUFFICIENT evidence:
   env var, another service, deploy config), you cannot rule out dynamic use — NOT proven.
 - "Comment/doc contradicts code", "unreachable branch", "duplicate key", "shadowed
   name": read the current code and decide truth directly.
+- Library-semantics claims (verifiability "static-given-deps"): the claim's linchpin is
+  a third-party library's behavior ("Pydantic runs Literal before after-validators",
+  "this decorator is a no-op when X"), which NO grep of this repo can settle. Do not
+  bless it from memory. CONFIRM it against the pinned dependency: read the installed
+  package source (site-packages / vendored) or its version-matched docs, and check the
+  pin (requirements/lockfile/pyproject). Confirmed from the dep -> proof "verified".
+  Cannot confirm (dep not readable, version ambiguous, behavior unclear) -> proof
+  "unproven": the change may still ship, but flagged UNVERIFIED — a belief about a
+  library API you could not check is not a proof.
+- Repeated-inconsistency claims (the finding covers several occurrences of one root
+  cause): the fix must have touched EVERY occurrence the claim named. Grep the codebase
+  for the stale value/pattern again — if a twin still remains unfixed, the change is
+  incomplete -> "revise".
 - Convention / craft claims: the claim is "this violates a standard THIS repo
   already follows." Verify it by CITING that standard from current state — a linter
   config, or three+ sibling files doing it the other way. No citable in-repo

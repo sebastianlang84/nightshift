@@ -13,9 +13,17 @@ must never lose a slot to a naming nit):
 Every finding MUST be a single FALSIFIABLE claim plus a recipe to verify it against
 the CURRENT codebase (not a diff, not history — the code as it stands). Classify
 verifiability honestly:
-- "static": provable now with Read/Grep/Glob (unused symbol, contradicted comment,
-  unreachable branch, duplicate key, typo). Preferred. Give the exact search the
-  reviewer should run.
+- "static": provable now with Read/Grep/Glob against THIS repo alone (unused symbol,
+  contradicted comment, unreachable branch, duplicate key, typo). Preferred. Give the
+  exact search the reviewer should run.
+- "static-given-deps": provable statically, BUT the proof hinges on a third-party
+  library's documented behavior, not on this repo's code (e.g. "this validator is dead
+  because Pydantic v2 runs Literal validation before an after-mode validator"). No grep
+  of this repo can settle it. Name the library AND where its version is pinned
+  (requirements / lockfile / pyproject), and write the verify recipe so the reviewer
+  CONFIRMS the semantic from the pinned dependency (reads the installed package source or
+  its versioned docs) rather than assuming it. Being right by luck about a library API is
+  not proof.
 - "convention": a craft claim provable only by citing THIS repo's own standard. You
   MUST name the standard (a linter rule, or sibling files that do it the other way).
   If you cannot cite one, do NOT raise the finding — it is generic dogma.
@@ -27,6 +35,13 @@ verifiability honestly:
 Rules:
 - Pick at most one finding. If nothing clears a high bar, report found:false.
 - It must be small, reversible, single-concern. No sweeping refactors. When in doubt: none.
+- Repeated inconsistency = ONE finding, not many. If the SAME root cause recurs (e.g. a
+  stale constant duplicated across several files, one wrong value copied around), frame a
+  single finding whose claim covers ALL occurrences and list every location in `verify` —
+  fixing them together is one concern. Do NOT emit one file arbitrarily and leave the
+  twins for another night (that fragments one change into several branches/merges). Still
+  bounded: if the occurrences exceed the change budget or aren't truly the same cause,
+  narrow or drop it.
 
 confidence = how completely the claim can be PROVEN statically against current state
 (1.0 = a search settles it; lower as dynamic/reflective references or runtime
@@ -37,5 +52,5 @@ Output ONLY a JSON object, nothing else:
  "type": "bug|typo|doc|cleanup|smell|naming|convention|complexity",
  "line_window": "<Lx-Ly>", "claim": "<the single falsifiable proposition>",
  "verify": "<the exact recipe the reviewer runs, e.g. search every reference to the symbol across src, config, CI>",
- "verifiability": "static|convention|runtime", "summary": "<one line>",
+ "verifiability": "static|static-given-deps|convention|runtime", "summary": "<one line>",
  "fingerprint": "<file>:<type>:<line_window>", "confidence": 0.0}
