@@ -134,6 +134,31 @@ unmerged (superseded by 1ea086d), not merged as memory had it.
   fingerprinted finding was fixed. Fine for now — cheap and explicit beats a fragile re-check.
 - Feed the open-branch backpressure from verdicts (a dropped branch frees a slot just like a merge).
 
+## Finding dedup across runs — fingerprint is phrasing-dependent (2026-07-10)
+
+**Observed, real:** a run re-discovered an issue that was already recorded as an open
+`finding` on a prior night, and this time *shipped* it as a fresh branch — a duplicate.
+Concrete case: the partflow "LLM model defaults diverge" issue was logged as a `finding`
+on 2026-07-10 15:39 (`item-1783690650591702366`), then re-found and pushed on the 22:30
+run as `nightshift/smell-partflow-20260710-223406` (`item-1783715429891218294`) — a
+different item id AND a different fingerprint, so nothing suppressed it. It was dropped by
+hand as redundant.
+
+**Root cause:** the fingerprint is derived partly from the finding's wording, so the same
+underlying defect described differently across runs produces a *different* fingerprint →
+the existing-work suppression never matches. Prior findings are also not fed into the next
+run's "already known" set at all.
+
+**Direction (not yet built):**
+- Feed open `finding` rows (and open `shipped` branches) into explore as a "already
+  surfaced, do not re-report" list, matched on a location-anchored key (repo + file +
+  symbol/line-range) rather than on the prose fingerprint alone.
+- Or make the fingerprint location-anchored instead of wording-anchored so it is stable
+  across re-phrasings of the same defect.
+- Relates to the harvest follow-ups above (auto-resolve a fixed finding; verdict-driven
+  backpressure) — same missing link: findings currently have no lifecycle feedback into
+  later runs.
+
 ## Scheduler-Koexistenz mit market-digest — geprüft, unkritisch (2026-07-10)
 
 **Verdikt: kein echtes Issue, kein Blocker.** Geprüft, weil auf dieser Maschine neben nightshift die
