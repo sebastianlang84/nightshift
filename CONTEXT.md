@@ -51,7 +51,8 @@ ledger (Brain + Memory)** — and borrows the rest: `claude -p`/Ralph-loop for t
 oss-autopilot's scoring as the selection template, and the existing `nightly-review-pipeline` for
 the fix flow. See [ADR 0002](docs/adr/0002-build-the-brain-borrow-the-body.md). The budget gate is
 **not** a MartinLoop wrapper (ADR 0002's original plan): [ADR 0004](docs/adr/0004-v1-scope-branch-isolated-steward.md)
-makes it the runner's own `max_runs_per_night` cap + per-run bounds; the verify idea survives only
+makes it the runner's own `max_open_branches` open-branch backpressure cap + per-run bounds
+([ADR 0005](docs/adr/0005-configurable-limits-in-rulebook.md)); the verify idea survives only
 as a CI-green check in the Review stage.
 Execution stays on the **first-party CLI** (subscription-safe, not a custom API wrapper) —
 [ADR 0003](docs/adr/0003-subscription-safe-execution.md). The concrete **v1 cut** — branch-isolated
