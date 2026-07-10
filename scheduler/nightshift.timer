@@ -1,10 +1,10 @@
 [Unit]
-Description=Run nightshift nightly at 03:00 local
+Description=Run nightshift daily at 18:20 local (daytime test cadence)
 
 [Timer]
-OnCalendar=*-*-* 03:00:00
-# If the machine was off or asleep at 03:00, run at the next opportunity instead
-# of silently skipping the night.
+OnCalendar=*-*-* 18:20:00
+# If the machine was off or asleep at the trigger, run at the next opportunity
+# instead of silently skipping.
 Persistent=true
 # Small jitter — harmless here, good hygiene if more timers are ever added.
 RandomizedDelaySec=120
