@@ -177,6 +177,40 @@ run with an **independent, empty context** (not the thread that produced the cha
 - Could reconcile with the ledger: record the recommendation + (later) the human's actual verdict —
   the first place a real merge/verdict signal could re-enter the system (re-review §5).
 
+## Capability escalation — can the agent widen its own tools? (2026-07-10)
+
+Question raised: could the agent rewrite its config so a read-only profile gains Write tools? Should the
+config be root-owned?
+
+**Analysis (verified against the runner 2026-07-10):**
+- The `--tools` allowlist is a **CLI argument** the Runner builds fresh per launch, hardcoded per stage
+  (`claude_run` case: fix -> Read,Grep,Glob,Write,Edit; else -> Read,Grep,Glob). It is NOT read from any
+  config file. `claude-settings.json` only wires the PreToolUse Bash guard and grants ZERO tools.
+- So **read-only stages cannot self-escalate**: there is no tools-granting config to edit, and they have
+  no Write/Edit/Bash primitive at all (empirically confirmed under `--dangerously-skip-permissions`). The
+  premise fails twice. Root-owning config is unnecessary for read-only.
+- **Real residual = the FIX stage.** It has Write/Edit (no Bash). Write/Edit take absolute paths and are
+  NOT path-confined to the worktree (the guard matches only `Bash`), and the agent runs as the same uid
+  that owns `bin/nightshift.sh` + `hooks/*` + `state/`. So a fix agent could overwrite the Runner or the
+  hook scripts on disk to weaken a FUTURE run (not its own — args are fixed at exec): e.g. add Bash to the
+  fix profile, or blank `hooks/pre-push`. Both confinement layers are Write-reachable this way.
+
+**Options (proportionate first):**
+- **Path-confine Write/Edit like Bash** — a PreToolUse guard that rejects Write/Edit to any path outside
+  the current worktree (`$wd`). Same mechanism as the existing Bash guard, extended. Turns "fix can write
+  anywhere" into "fix writes only its throwaway worktree." This is the right-sized fix and it also stops
+  fix from touching `~/.bashrc`, target-repo non-git files, etc.
+- **Root-own the control files** (`bin/nightshift.sh`, `hooks/`, `claude-settings.json`; mode 0644) as
+  quick defense-in-depth — blocks the specific runner/hook-tamper vector. Caveats: `state/` must stay
+  user-writable (runtime writes); `git pull` updates then need sudo; and it is a speed bump, not a jail
+  (fix can still write any other wasti-owned file). Do NOT root-own the whole tree.
+- **Full containment** (robust): run the fix agent as a dedicated unprivileged user or in bwrap/container
+  with control files mounted read-only and `$HOME` isolated. Heaviest; revisit if fix-mode graduates
+  beyond trusted local repos.
+- Note the git-push confinement (Layer 1 pre-push hook + Layer 2 guard) is unaffected for the CURRENT
+  run; the concern is strictly a fix agent editing those files to weaken the NEXT run. The path-confine
+  guard closes exactly that.
+
 ## Deployment topology — the tool vs. the repos it tends (2026-07-09)
 
 nightshift-the-tool lives in ONE git repo (github.com/sebastianlang84/nightshift), but is meant to
@@ -184,9 +218,12 @@ run on **several machines**, each tending that machine's **local** repos — whi
 hosts (GitHub, Bitbucket e.g. `~/partflow`, GitLab, or bare/local). The control repo's host has
 nothing to do with the target repos' hosts.
 
-**Already handled (verified 2026-07-09):**
+**Already handled (verified 2026-07-09; re-verified 2026-07-10):**
 - Everything machine-specific is git-ignored — `rulebook.yaml`, `state/` (ledger/runs), `digests/`,
   `worktrees/`, `sandbox/`. So `git pull` to update the tool never clobbers local config/state.
+  Re-checked 2026-07-10: `.gitignore` lists `/state/ /runs/ /digests/ /sandbox/ /worktrees/ rulebook.yaml`,
+  `git ls-files state/` is empty (ledger untracked), `git check-ignore` confirms all — so the same-repo,
+  many-machines checkout is safe: each install's ledger/rulebook stays local and un-versioned.
 - `NIGHTSHIFT_HOME` is self-derived from the script path — no hardcoded location; clone anywhere.
 - The core loop is host-agnostic (pure git over SSH: fetch/branch/push `nightshift/*`). The pre-push
   confinement is pure git and works against any remote.
