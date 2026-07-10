@@ -34,17 +34,31 @@ value that contradicts the component's own documented name or purpose. When unsu
 `surface` over guessing a direction.
 
 The runner routes `disposition: surface` into the findings path even in `branch-fix` repos: it is
-recorded as a `finding` ledger event (a human-owned TODO), deduped by fingerprint like any finding,
-and never enters the Fix↔Review loop. `fix` keeps the existing behaviour.
+recorded as a `finding` ledger event (a human-owned TODO) and never enters the Fix↔Review loop.
+`fix` keeps the existing behaviour.
+
+A surfaced divergence **latches**: `already_surfaced()` (a prior `finding` on the fingerprint)
+blocks BOTH re-surfacing AND the auto-fix path on later runs. This matters because disposition is a
+per-run model judgment: without the latch, a run that flips the same fingerprint to `fix` would ship
+the wrong-direction change while the TODO is still open. The latch keys on `finding` only — an
+earlier `abandoned`/`shipped` must not masquerade as "already surfaced" and suppress a legitimate
+TODO.
 
 ## Consequences
 
 - A wrong-direction auto-fix that blesses a throwaway value is replaced by a flagged TODO the human
-  resolves in the authoritative direction.
+  resolves in the authoritative direction; once surfaced it stays human-owned until cleared.
 - `branch-fix` repos gain a third outcome (surface) alongside ship/abandon; the morning digest
-  "Findings" section is no longer exclusive to `findings-only` repos (heading updated accordingly).
-- The judgment still lives in the model. If EXPLORE misclassifies a `surface` case as `fix`, the
-  Fix↔Review `abandon` verdict remains the backstop (dropping it, without a TODO). This is accepted
-  for v1; a stronger backstop can move the check into REVIEW later.
+  "Findings" section is no longer exclusive to `findings-only` repos (heading + stat label updated).
+- The judgment still lives in the model, layered: EXPLORE decides `surface` before a diff exists
+  (primary), and REVIEW is a hinted backstop — an `intent-ambiguous:` divergence that slipped through
+  as `fix` gets `abandon`ed rather than blessed, and (since the latch keys on `finding`, not
+  `abandoned`) it can re-surface as a TODO on a later run. A stronger backstop — REVIEW writing the
+  `finding` directly instead of relying on a subsequent EXPLORE pass — is deferred.
+- An unrecognized `disposition` value fails closed (surfaced, not auto-fixed).
+- Known v1 debt: a surfaced finding occupies the repo's single EXPLORE slot until a human clears it
+  (EXPLORE keeps re-selecting the most salient divergence), so an unresolved TODO can starve other
+  findings in that repo. Tracked in `todo.md`; the fix is feeding already-surfaced fingerprints into
+  EXPLORE as "already reported, find something else".
 - Related root-cause hygiene: never commit a temporary operational value into a canonical config
   file — use a local, uncommitted override so the repo never misrepresents its own intent.

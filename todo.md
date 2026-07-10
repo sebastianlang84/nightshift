@@ -159,6 +159,35 @@ run's "already known" set at all.
   backpressure) — same missing link: findings currently have no lifecycle feedback into
   later runs.
 
+**Raised in cost by ADR 0006 (surface disposition):** a `surface` finding now latches
+(`already_surfaced` blocks re-surfacing AND auto-fix until a human clears it). Good for
+correctness, but EXPLORE picks ONE finding per repo per pass and keeps re-selecting the
+most salient divergence — so an unresolved surfaced TODO **starves** every other finding
+in that repo until cleared, and the digest only lists it on the night it was raised
+(`.night==$n` filter). The "already surfaced, find something else" feed above is now the
+fix for a repo-wide outage, not just a duplicate report. Also: the surfaced-finding TODO
+should be carried forward in later digests while unresolved.
+
+## Fable Nacht-2-Review follow-ups (2026-07-11)
+
+From the independent Fable review of ADR 0006 / the surface-disposition commit. Landed
+in the same follow-up: dedup latch (findings 1+2), REVIEW intent-ambiguous backstop hint
+(3), fail-closed disposition parse (7), digest stat label (8), ADR accuracy. Still open:
+- **schedule.sh does not surface an active local drop-in (Fable #4).** `install`/`enable`/
+  `status` say nothing when `~/.config/systemd/user/nightshift.timer.d/*.conf` overrides
+  the committed cadence, so `enable` can silently start an 18:20 timer under a unit whose
+  Description says 03:00; `uninstall` leaves the drop-in dir orphaned to resurrect later.
+  Fix: detect the drop-in and print "NOTE: local override active — effective OnCalendar
+  differs from committed unit"; have `uninstall` remove/warn about the dir.
+- **No deterministic test coverage of the surface branch (Fable #9).** `mock_explore` has
+  no path emitting `disposition:"surface"`, so the mock agent never exercises surface
+  routing (dedup latch, ledger kind, worktree removal, digest). Add a mock trigger
+  mirroring the `teh` typo trigger.
+- **Cross-file divergence fingerprint instability (Fable #10).** A divergence spanning two
+  files anchors to whichever `file` EXPLORE names + a drifting line window → duplicate
+  TODOs; surfaced findings are long-lived so they hit this more. Subsumed by the
+  location-anchored fingerprint direction above.
+
 ## Scheduler-Koexistenz mit market-digest — geprüft, unkritisch (2026-07-10)
 
 **Verdikt: kein echtes Issue, kein Blocker.** Geprüft, weil auf dieser Maschine neben nightshift die

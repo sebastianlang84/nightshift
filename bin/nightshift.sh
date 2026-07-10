@@ -111,6 +111,16 @@ already_acted() { # fingerprint — only shipped/abandoned/deferred (used by bra
     'any(.[]; .fingerprint==$fp and (.outcome=="shipped" or .outcome=="abandoned" or .outcome=="deferred"))' \
     "$LEDGER" >/dev/null 2>&1
 }
+already_surfaced() { # fingerprint — a prior human-owned finding exists (a TODO is open)
+  [ -n "$1" ] && [ "$1" != null ] || return 1   # never dedup on an unusable key
+  [ -f "$LEDGER" ] || return 1
+  # Only `finding` outcomes count: a surfaced divergence LATCHES until a human clears it,
+  # so it neither re-surfaces nor gets silently auto-fixed on a later run — and an earlier
+  # `abandoned`/`shipped` must NOT masquerade as "already surfaced" and suppress the TODO.
+  jq -se --arg fp "$1" \
+    'any(.[]; .fingerprint==$fp and .outcome=="finding")' \
+    "$LEDGER" >/dev/null 2>&1
+}
 
 # Layer 2 settings for the agent: register the PreToolUse guard so the agent
 # cannot disable the pre-push hook (--no-verify / core.hooksPath override).
@@ -385,7 +395,7 @@ write_digest() { # made open status
     echo
     local fcount=0
     [ -f "$LEDGER" ] && fcount=$(jq -s --arg n "$NIGHT" '[.[]|select(.night==$n and .outcome=="finding")]|length' "$LEDGER" 2>/dev/null || echo 0)
-    echo "- agent: \`$NIGHTSHIFT_AGENT\` · shipped this run: ${made} · findings-only: ${fcount} · open (unmerged): ${open}/${MAX_OPEN} (cap)"
+    echo "- agent: \`$NIGHTSHIFT_AGENT\` · shipped this run: ${made} · surfaced (findings): ${fcount} · open (unmerged): ${open}/${MAX_OPEN} (cap)"
     if [ -f "$RUNSLOG" ]; then
       runs=$(grep -c "\"night\":\"$NIGHT\"" "$RUNSLOG" || true)
       dur=$(jq -s --arg n "$NIGHT" '[.[]|select(.night==$n)|.duration_s]|add // 0' "$RUNSLOG")
@@ -511,11 +521,19 @@ main() {
     # authoritative (a value labelled temporary/test, a fix that deletes a stated rationale,
     # a "truth" that contradicts the component's own purpose). It ships as a human-owned
     # finding (TODO), never an auto-fix — surfacing beats blessing a throwaway value.
+    # Fail closed: an unrecognized disposition surfaces (asks a human) rather than auto-fixing.
     disp=$(jq -r '.disposition // "fix"' "$id/finding.json" 2>/dev/null || echo fix)
+    case "$disp" in
+      fix|surface) ;;
+      *) log "  $(basename "$repo"): unrecognized disposition '$disp' — surfacing instead of auto-fixing"; disp=surface ;;
+    esac
+    # A surfaced divergence LATCHES: once a human owns it as a TODO, a later run must neither
+    # re-surface it nor quietly auto-fix it (model nondeterminism could flip disposition to
+    # `fix` and ship the wrong-direction change while the TODO is still open).
+    if already_surfaced "$fp"; then
+      log "  $(basename "$repo"): previously surfaced — human-owned, not touching ($fp)"; remove_worktree "$repo" "$wt"; continue
+    fi
     if [ "$disp" = surface ]; then
-      if already_done "$fp"; then
-        log "  $(basename "$repo") [branch-fix]: already surfaced ($fp) — skip"; remove_worktree "$repo" "$wt"; continue
-      fi
       ledger_append "$(basename "$id")" "$repo" "$fp" "" "" "finding" "$summary"
       findings=$((findings + 1))
       log "  $(basename "$repo") [branch-fix]: surfaced, not auto-fixed: $summary"

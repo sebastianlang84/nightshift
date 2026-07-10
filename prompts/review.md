@@ -17,7 +17,14 @@ for it. Establish the claim by the cheapest SUFFICIENT evidence:
   CONSTRUCTED at runtime (e.g. "handler_" + x) or referenced from OUTSIDE the repo (a DB,
   env var, another service, deploy config), you cannot rule out dynamic use — NOT proven.
 - "Comment/doc contradicts code", "unreachable branch", "duplicate key", "shadowed
-  name": read the current code and decide truth directly.
+  name": read the current code and decide truth directly. BUT if deciding "truth" means
+  choosing which of two conflicting values is authoritative and the repo does not settle
+  that — one side is labelled temporary/test/WIP/placeholder, or the fix deletes/inverts a
+  stated rationale, or the "authoritative" side contradicts the component's own name or
+  purpose — do NOT bless a direction: verdict "abandon" with a reason beginning
+  `intent-ambiguous:`. This is the backstop for a divergence EXPLORE should have marked
+  `disposition:surface`; abandoning here lets it re-surface as a human-owned TODO next run
+  rather than shipping the wrong-direction fix.
 - Library-semantics claims (verifiability "static-given-deps"): the claim's linchpin is
   a third-party library's behavior ("Pydantic runs Literal before after-validators",
   "this decorator is a no-op when X"), which NO grep of this repo can settle. Do not
