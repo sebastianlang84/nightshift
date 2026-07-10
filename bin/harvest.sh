@@ -19,6 +19,9 @@
 #
 # It is APPEND-ONLY and idempotent: a verdict event is written only when the state
 # CHANGED since the last recorded verdict, so re-running nightly does not spam.
+# Human verdicts are ground truth: reconcile only DERIVES merged|open|dropped, so it
+# never overwrites a resolved/wontfix or a manually recorded terminal verdict with a
+# machine value (only an objective merge — sha contained in base — can supersede them).
 # Findings (branch=null) have no sha to test — give them a verdict by hand:
 #     harvest.sh verdict <item|branch|fingerprint> <merged|dropped|resolved|wontfix|open> [reason]
 #
@@ -72,22 +75,28 @@ base_for_repo() {
   resolve_base "$path" ""
 }
 
-# last recorded verdict for a branch (empty if none)
-last_verdict() { # branch
-  jq -rs --arg b "$1" '[.[]|select(.outcome=="verdict" and .branch==$b)]|last|.verdict // ""' \
-    "$LEDGER" 2>/dev/null || true
+# last recorded verdict for a branch as "verdict<TAB>source" (empty fields if none).
+# source distinguishes a human 'manual' verdict from a machine reconcile so the loop
+# can refuse to clobber a human decision.
+last_verdict_meta() { # branch
+  jq -rs --arg b "$1" \
+    '([.[]|select(.outcome=="verdict" and .branch==$b)]|last) as $v
+     | "\($v.verdict // "")\t\($v.source // "")"' \
+    "$LEDGER" 2>/dev/null || printf '\t\n'
 }
 
-append_verdict() { # item repo fingerprint branch sha verdict reason
+append_verdict() { # item repo fingerprint branch sha verdict reason [source]
   jq -nc \
     --arg item "$1" --arg repo "$2" --arg fp "$3" --arg branch "$4" --arg sha "$5" \
-    --arg verdict "$6" --arg reason "${7:-}" --arg ts "$(date -Iseconds)" \
+    --arg verdict "$6" --arg reason "${7:-}" --arg source "${8:-}" \
+    --arg ts "$(date -Iseconds)" \
     --arg night "$(date +%F)" --argjson sv "$SCHEMA_VERSION" \
     '{night:$night,item:$item,repo:$repo,fingerprint:$fp,
       branch:($branch|if .=="" then null else . end),
       sha:($sha|if .=="" then null else . end),
       outcome:"verdict",verdict:$verdict,
       reason:($reason|if .=="" then null else . end),
+      source:($source|if .=="" then null else . end),
       ts:$ts,schema_version:$sv}' >> "$LEDGER"
 }
 
@@ -122,7 +131,7 @@ manual_verdict() { # selector verdict [reason]
   item=$(jq -r '.item' <<<"$row"); repo=$(jq -r '.repo' <<<"$row")
   fp=$(jq -r '.fingerprint' <<<"$row"); branch=$(jq -r '.branch // ""' <<<"$row")
   sha=$(jq -r '.sha // ""' <<<"$row")
-  append_verdict "$item" "$repo" "$fp" "$branch" "$sha" "$verdict" "$reason"
+  append_verdict "$item" "$repo" "$fp" "$branch" "$sha" "$verdict" "$reason" manual
   printf 'recorded verdict: %s = %s%s\n' "$sel" "$verdict" "${reason:+ ($reason)}"
 }
 
@@ -149,8 +158,22 @@ while IFS=$'\t' read -r item repo fp branch sha; do
   fi
   base=$(base_for_repo "$repo")
   now=$(reconcile "$repo" "$base" "$branch" "$sha")
-  was=$(last_verdict "$branch")
+  IFS=$'\t' read -r was was_src < <(last_verdict_meta "$branch") || true
   mark=""
+  # Human decisions are ground truth. reconcile derives only merged|open|dropped, so it
+  # must never overwrite a verdict it cannot itself produce (resolved/wontfix are
+  # human-only) nor a manually recorded terminal verdict — that clobber flipped a manual
+  # 'dropped' back to 'open' on the next run. Sole exception: an objective merge (sha in
+  # base) outranks any prior label.
+  held=0
+  case "$was" in
+    resolved|wontfix) held=1 ;;
+    merged|dropped)   [ "$was_src" = manual ] && held=1 ;;
+  esac
+  if [ "$held" -eq 1 ] && [ "$now" != merged ]; then
+    printf '%-28s %-46s %-8s -> %-8s %s\n' "$(basename "$repo")" "$branch" "${was:-—}" "$was" "(held: human verdict)"
+    continue
+  fi
   # 'open' is the implicit default — only terminal verdicts are recorded, so an
   # as-yet-undecided branch never writes a row and nightly re-runs stay quiet.
   if [ "$now" != "$was" ] && ! { [ "$now" = open ] && [ -z "$was" ]; }; then

@@ -134,6 +134,19 @@ unmerged (superseded by 1ea086d), not merged as memory had it.
   fingerprinted finding was fixed. Fine for now — cheap and explicit beats a fragile re-check.
 - Feed the open-branch backpressure from verdicts (a dropped branch frees a slot just like a merge).
 
+## DONE (2026-07-11): harvest preserves human verdicts (clobber-gap closed)
+
+**Fixed (ADR 0007):** `reconcile()` derives only `merged|open|dropped`, and the loop
+overwrote whenever the derived value differed from the last recorded one — so a manual
+`dropped` (recorded before the ref was deleted) got flipped back to `open` on the next
+run, and a `resolved`/`wontfix` on a shipped branch would be clobbered too. This produced
+the duplicate/churned verdict rows seen on the dashboard for
+`nightshift/smell-partflow-20260710-223406` (`dropped(manual)` → `open` → `dropped`) and
+erased the human's reason. Now manual verdicts are stamped `source:"manual"` and the loop
+**holds** any human-owned terminal verdict (`resolved`/`wontfix` always; `merged`/`dropped`
+when manual) — except an objective merge (sha in base) still wins. `source` is additive +
+nullable; schema_version stays 2.
+
 ## Finding dedup across runs — fingerprint is phrasing-dependent (2026-07-10)
 
 **Observed, real:** a run re-discovered an issue that was already recorded as an open
