@@ -1,8 +1,16 @@
 [Unit]
-Description=Run nightshift daily at 18:20 local (daytime test cadence)
+Description=Run nightshift nightly at 03:00 local
 
 [Timer]
-OnCalendar=*-*-* 18:20:00
+# Canonical production cadence. Do NOT edit this committed value to test at another
+# time — a throwaway value committed here reads as the design intent to every reader
+# (humans and nightshift itself). Instead drop an uncommitted, machine-local override:
+#   ~/.config/systemd/user/nightshift.timer.d/override.conf
+#     [Timer]
+#     OnCalendar=
+#     OnCalendar=*-*-* 18:20:00
+# then `systemctl --user daemon-reload`. Delete that file to return to 03:00.
+OnCalendar=*-*-* 03:00:00
 # If the machine was off or asleep at the trigger, run at the next opportunity
 # instead of silently skipping.
 Persistent=true
