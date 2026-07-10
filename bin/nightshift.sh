@@ -391,6 +391,21 @@ write_digest() { # made open status
       dur=$(jq -s --arg n "$NIGHT" '[.[]|select(.night==$n)|.duration_s]|add // 0' "$RUNSLOG")
       echo "- runs tonight: ${runs} stage-invocations, ${dur}s total"
     fi
+    # Harvest scoreboard (all-time, from bin/harvest verdict events): the human
+    # feedback loop made visible. A branch with no terminal verdict counts as open.
+    [ -f "$LEDGER" ] && jq -rs '
+      ([.[]|select(.outcome=="verdict" and .branch!=null)]
+        | group_by(.branch) | map(sort_by(.ts)|last) | map(select(.verdict=="merged" or .verdict=="dropped"))
+        | INDEX(.branch)) as $v
+      | [.[]|select(.outcome=="shipped" and .branch!=null)|.branch] | unique as $ship
+      | ($ship|map(select($v[.].verdict=="merged"))|length) as $m
+      | ($ship|map(select($v[.].verdict=="dropped"))|length) as $d
+      | ($ship|length) as $n
+      | ($n-$m-$d) as $open
+      | if $n==0 then empty else
+          "- harvest (all-time): shipped \($n) · merged \($m) · dropped \($d) · open \($open)"
+          + (if ($m+$d)>0 then " · merge-rate \((100*$m/($m+$d))|floor)%" else "" end)
+        end' "$LEDGER" 2>/dev/null || true
     echo
     if [ "$status" = "backpressure" ]; then
       echo "**FULL STOP — open-branch cap reached.** Harvest (merge/delete) some \`${BRANCH_PREFIX}\` branches to resume."
@@ -419,6 +434,12 @@ main() {
   load_rulebook
   write_claude_settings
   write_codemap_mcp
+  # Harvest first: reconcile prior shipped branches against git reality (merged/
+  # dropped) so the morning digest scoreboard is current. Non-fatal — a harvest
+  # hiccup must never block the night's work.
+  if [ -x "$NIGHTSHIFT_HOME/bin/harvest.sh" ]; then
+    "$NIGHTSHIFT_HOME/bin/harvest.sh" >/dev/null 2>&1 || log "harvest: skipped (non-fatal)"
+  fi
   log "agent=$NIGHTSHIFT_AGENT prefix=$BRANCH_PREFIX · cap: max $MAX_OPEN unmerged ${BRANCH_PREFIX} branches · run ceiling $MAX_RUN_BRANCHES · fix iters $MAX_FIX_ITER"
 
   local made=0 considered=0 findings=0 repo mode id found fp fnj iter verdict wt base b summary open pass=0 progress stop_reason=ok

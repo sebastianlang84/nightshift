@@ -110,37 +110,29 @@ no subjective restyle = churn). Finding types widened to
 always on. Verified with a claude e2e that found + fixed a pure-craft issue (unused `import os`, no
 typo/bug present), shipped a correct 1-line diff.
 
-## NEXT: verdict / harvest recording — the first human feedback loop
+## DONE (2026-07-10): verdict / harvest recording — the first human feedback loop
 
-**This is the designated next build (Fable's ordering, 2026-07-10; Fable re-confirmed it dominates on
-the night-1 review).** Today the ledger records `shipped` and then goes deaf: it never learns whether
-the human **merged, closed, or deleted** the branch/PR. That human verdict is the only real ground-truth
-signal in the whole system — and per Fable it is worth more than any additional machine reviewer,
-because each same-vendor reviewer decorrelates less than the last while the human verdict decorrelates
-completely. It is also the instrument that finally *validates or refutes* craft-always-on: if craft PRs
-are mostly closed/deleted, craft mode is a churn generator; if merged, it earns its keep.
+**Built: `bin/harvest.sh`** (Fable's #1-ordered build). Reconciles every shipped-branch ledger row
+against git reality and appends an append-only `verdict` event (never mutates the shipped row). Merge
+detection is by **sha-ancestor** (`git merge-base --is-ancestor <sha> <base>`) — authoritative even after
+the branch ref is deleted, and needs no `gh`/PR API. Verdicts: `merged` / `dropped` (gone, unmerged) /
+`open` (implicit default — only terminal verdicts are written, so nightly re-runs stay quiet and
+idempotent). Findings (branch=null) get a hand verdict: `harvest.sh verdict <sel> <resolved|wontfix|…>`.
+Wired into `main()` at night start (non-fatal) so the morning digest is current; also runnable on demand.
+`schema_version:2` stamped on every verdict row (folds in Fable's schema-drift point — a consumer can
+tell "old schema, field absent" from "genuinely empty"). Digest gained a **harvest scoreboard** line
+(all-time shipped / merged / dropped / open + merge-rate). First run: shipped 4 · merged 1 · dropped 1 ·
+open 2 · 50% — and it corrected the record: `doc-…172110` merged, `doc-…155528` was actually *dropped*
+unmerged (superseded by 1ea086d), not merged as memory had it.
 
-**Night-1 already demonstrated the gap twice:** (a) the finding-only entry (missing `extract_json.py` in
-the docs table) is now actually FIXED in `docs/design/prototype.md`, but the ledger still reads
-`outcome:finding` — it can't see its own resolution. (b) On 2026-07-10 the two open PRs (valuelens #1,
-market-digest #2) were human-merged after a Fable review — the ledger doesn't record that verdict either.
-Both are exactly the signal this build captures.
-
-**Also fold in (Fable):** ledger schema drift. The proof/verifiability fields landed *between* the two
-live nights, so early rows lack them (PR #1 unstamped, PR #2 stamped) — not nondeterminism, schema
-evolution. Add a `schema_version` to ledger rows (and/or a one-time backfill) so a harvest/stats consumer
-can tell "field absent because old schema" from "field genuinely empty."
-
-Build sketch (do BEFORE any second-reviewer / merge-recommendation layer below):
-- A harvest step (run at start of each night, and/or a `bin/harvest` command) that, for every ledger
-  row with `outcome:"shipped"` and an open branch/PR, reconciles against reality: is the branch merged
-  (`git branch --merged`, or the PR state via `gh pr view --json state,mergedAt`)? closed unmerged?
-  deleted? still open? Write the result back as a `verdict` (merged | closed | deleted | open) + a
-  timestamp — append a new ledger event rather than mutating the shipped row (keep it append-only).
-- Surface it: a small stats line in the digest (merge rate, and merge rate split by `verifiability` /
-  `proof` and by finding `type`) so the churn question is answered by data, not opinion.
-- This is also what feeds the open-branch backpressure a truer signal (a closed/deleted branch frees a
-  slot just like a merge). Builds on the review=verify work above (proof / verifiability per row).
+**Still open (follow-ups, not blockers):**
+- Dashboard read-side (llmstack `dashboard/app/main.py`): show the latest verdict per item so the
+  Nightshift tab distinguishes open / merged / dropped instead of showing every `shipped` alike.
+- Richer stats split (merge-rate by `verifiability` / `proof` / finding `type`) — the churn question by
+  data. Current scoreboard is the headline number only.
+- Findings resolution is still manual (`harvest.sh verdict … resolved`); no auto-detection that a
+  fingerprinted finding was fixed. Fine for now — cheap and explicit beats a fragile re-check.
+- Feed the open-branch backpressure from verdicts (a dropped branch frees a slot just like a merge).
 
 ## Scheduler-Koexistenz mit market-digest — geprüft, unkritisch (2026-07-10)
 

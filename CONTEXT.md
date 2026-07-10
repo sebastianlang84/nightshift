@@ -34,7 +34,7 @@ Ports-and-adapters. The **core is harness-neutral**; only the runner knows a spe
 | Layer | Holds | Portable? |
 |-------|-------|-----------|
 | **Brain** | selection (explore/exploit), the budget loop, policy evaluation | yes — plain scripts + files |
-| **Memory** | the ledger: done / attempted-and-abandoned, per-target, with SHAs | yes — data only (JSONL/sqlite) |
+| **Memory** | the ledger: done / attempted-and-abandoned, per-target, with SHAs, plus `verdict` events (merged/dropped) from harvest — the human feedback loop | yes — data only (JSONL/sqlite) |
 | **Policy** | the rulebook: repo whitelist + per-repo mode, limits, tool allowlist, prohibitions | yes — declarative (YAML/MD) |
 | **Runner (adapter)** | invokes the LLM agent headless for one bounded task | **no — harness-specific** |
 
