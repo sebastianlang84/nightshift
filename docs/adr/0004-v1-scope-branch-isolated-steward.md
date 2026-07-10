@@ -133,17 +133,20 @@ rewritten, so the evolution stays traceable.
   picks by recent git activity (most-recently-changed repo/files) with round-robin across repos as
   the tiebreak. Good enough to prototype; refine with real signal later.
 
-- **Output — normal PRs, opened by the Runner (2026-07-09).** The original decision "branches only,
-  never PRs" is **superseded**: after `finalize` pushes a `nightshift/*` branch, the Runner opens a
-  **normal (non-draft) PR** for it (`gh pr create`, `NIGHTSHIFT_OPEN_PR=1` default). Rationale: a PR
-  is a GitHub-API object, **not** a push to `main` — the `pre-push` hook and the branch-only guarantee
-  are untouched, and the merge stays the human's click. Normal (not draft) so CI runs overnight and
-  the morning triage sees a green/red check with the merge button already live. The **Runner** owns
-  the `gh` call; the agent never touches it (stays in the git cage). Best-effort and non-fatal: PR
-  disabled, no GitHub remote (e.g. the local-bare sandbox), missing `gh`, or a `gh` failure all just
-  skip the PR — the branch is already pushed. The PR url is recorded in the ledger row and linked in
-  the digest. This partially reactivates the deferred "PRs" item (Consequences) while keeping every
-  safety property intact.
+- **Output — pushed `nightshift/*` branches; PR-opening is opt-in, OFF by default (2026-07-10).**
+  The Runner *can* open a PR after `finalize` pushes a branch (`gh pr create`, GitHub-only today),
+  but this is now **opt-in** (`NIGHTSHIFT_OPEN_PR=1`), **off by default** — reverting the 2026-07-09
+  "PR by default" amendment. Reason: a PR is a **host-API** object needing per-host API credentials
+  (GitHub token, Bitbucket app password, ...) that the **SSH git transport does not provide** — and
+  the push identity (SSH key) and the PR-API identity (token) are independent principals, so assuming
+  they match silently fails (observed: SSH push as `sebastianlang84` succeeds, `gh` PR as a different
+  account → "must be a collaborator"). The **credential-free baseline** is therefore branch-only: the
+  pushed `nightshift/*` branch is the unit of review, and each git host already prints a one-click
+  "create pull request" URL on push. PR-opening stays best-effort and non-fatal (disabled, no
+  credential, wrong host, or a `gh` failure → skip; the branch is already pushed) and, when enabled,
+  the PR url is recorded in the ledger and linked in the digest. The branch-only guarantee and the
+  `pre-push` hook are untouched either way. Multi-host PR creation (Bitbucket/GitLab) remains open —
+  see todo "Lücke 1".
 
 Still open (non-blocking for the prototype): the non-git shell scope (§2b); mechanical NIGHTSHIFT.md
 enforcement at Finalize (§3d); the `findings-only` landing path (§2e); and the doc-corpus sweep of

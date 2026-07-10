@@ -13,9 +13,13 @@ timestamped log under `~/.local/state/nightshift/logs/` (plus journald). Enabled
 live fire Fri 2026-07-10 03:00. Manage with `bin/schedule.sh {install|enable|disable|status|logs|
 dry-run|uninstall}` — this also subsumes the old "schedule management templates/scripts" item.
 
-_Also resolved 2026-07-09:_ auto-PR — the Runner now opens a **normal (non-draft) PR** per shipped
-branch (`gh pr create`, `NIGHTSHIFT_OPEN_PR=1` default; ADR 0004 amendment). Chosen over draft so CI
-runs overnight and the morning triage sees a green/red check with the merge button live.
+_PR-opening (revised 2026-07-10):_ the Runner *can* open a PR per shipped branch (`gh pr create`,
+GitHub-only) but this is now **opt-in and OFF by default** (`NIGHTSHIFT_OPEN_PR=1` to enable).
+A PR needs per-host API credentials the SSH transport doesn't provide, and the push identity (SSH)
+and PR-API identity (token) are independent — so branch-only is the credential-free baseline and the
+pushed `nightshift/*` branch is the unit of review (each host also prints a one-click "create PR" URL
+on push). See ADR 0004 and "Multi-host PR automation (Lücke 1)". _(Supersedes the 2026-07-09 auto-PR
+"default on" decision.)_
 
 Open follow-ups on the scheduler (not blocking):
 - **Sleep/suspend:** if the workstation suspends overnight the 03:00 fire is missed; `Persistent=true`
@@ -243,8 +247,11 @@ nothing to do with the target repos' hosts.
 `open_pr` only recognises `*github.com*` and shells out to `gh pr create`. On Bitbucket/GitLab remotes
 it logs "no GitHub remote — PR skipped" and pushes a bare `nightshift/*` branch. So on `~/partflow`
 (Bitbucket) the morning triage is branch-based, not PR-based.
-- Decision needed: implement Bitbucket (REST API / `bb`) and/or GitLab PR creation, dispatched by the
-  remote host — or accept bare branches and set `NIGHTSHIFT_OPEN_PR=0` to drop the misleading log.
+- **Decided 2026-07-10: accept bare branches for now.** `NIGHTSHIFT_OPEN_PR` now defaults to 0, so no
+  misleading "PR skipped" log and no credential needed; triage is branch-based across all hosts. Each
+  host prints a one-click "create PR" URL on push (could be captured into the digest — small, no creds).
+  Re-open the implement path (Bitbucket REST / GitLab, host-dispatched) only if/when API PRs are wanted
+  and per-host credentials are provisioned.
 - If implemented: keep it best-effort (branch is already pushed; a PR-API failure must not fail the run),
   mirroring the current GitHub path.
 

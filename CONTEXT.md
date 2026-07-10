@@ -19,7 +19,9 @@ An **unattended overnight steward**. Given a set of repositories it is allowed t
 3. keeps a **persistent memory (ledger)** of what it did, so it does not repeat work;
 4. obeys a **configurable rulebook** (allowed repos, tools, change-size limits, hard "don't touch");
 5. both **reviews** and **fixes** — in **v1**, fixes land on isolated `nightshift/*` **branches**,
-   never PRs, never merged ([ADR 0004](docs/adr/0004-v1-scope-branch-isolated-steward.md));
+   never auto-merged; the pushed branch is the unit of review. Opening a PR per branch is
+   opt-in and needs per-host API credentials — off by default
+   ([ADR 0004](docs/adr/0004-v1-scope-branch-isolated-steward.md));
 6. is **budget-aware** — it works until its time/quota window is spent, then checkpoints and stops.
 
 Guiding image: the *Heinzelmännchen* — works at night within its rules, stops when observed / out
@@ -75,7 +77,9 @@ open question is whether nightshift *reuses* that pipeline as a tool or supersed
 
 ## Non-goals (current)
 
-- No auto-merge, ever. In v1 the output is isolated `nightshift/*` branches, never PRs; humans
-  review those branches in the morning ([ADR 0004](docs/adr/0004-v1-scope-branch-isolated-steward.md)).
+- No auto-merge, ever. In v1 the output is isolated `nightshift/*` branches; humans review (and
+  merge) them in the morning. Opening a PR per branch is an opt-in convenience requiring per-host
+  API credentials — off by default; the branch itself is the deliverable
+  ([ADR 0004](docs/adr/0004-v1-scope-branch-isolated-steward.md)).
 - Not a hosted SaaS; self-hosted, uses your own subscription/key.
 - Not a general task runner — scope is review and fix of code in allowed repos.

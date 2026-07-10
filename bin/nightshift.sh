@@ -9,10 +9,12 @@ set -euo pipefail
 
 NIGHTSHIFT_HOME="${NIGHTSHIFT_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 NIGHTSHIFT_AGENT="${NIGHTSHIFT_AGENT:-mock}"
-# After pushing a nightshift/* branch, open a normal PR for it on GitHub (1=on).
-# A PR is a GitHub-API object, not a push to main — the pre-push hook is untouched
-# and the merge stays the human's click. Set 0 to go back to bare branches.
-NIGHTSHIFT_OPEN_PR="${NIGHTSHIFT_OPEN_PR:-1}"
+# After pushing a nightshift/* branch, optionally open a PR for it (1=on). OFF by default:
+# a PR is a host-API object that needs per-host API credentials (GitHub token, Bitbucket app
+# password, ...) which the SSH git transport does NOT provide — so branch-only is the credential-
+# free baseline and the pushed branch is the unit of review. Opt in with NIGHTSHIFT_OPEN_PR=1
+# once the host credential is in the run environment (GitHub-only today; see todo Luecke 1).
+NIGHTSHIFT_OPEN_PR="${NIGHTSHIFT_OPEN_PR:-0}"
 RULEBOOK="${RULEBOOK:-$NIGHTSHIFT_HOME/rulebook.yaml}"
 [ -f "$RULEBOOK" ] || RULEBOOK="$NIGHTSHIFT_HOME/rulebook.example.yaml"
 HOOKS_DIR="$NIGHTSHIFT_HOME/hooks"
