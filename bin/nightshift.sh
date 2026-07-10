@@ -415,7 +415,7 @@ write_digest() { # made open status
         'select(.night==$n and .outcome=="shipped") | "- " + (if .proof=="unproven" then "**[unverified]** " else "" end) + .repo + " → `" + (.branch // "") + "` — " + (.summary // .fingerprint) + (if .pr_url then "  ([open PR](" + .pr_url + "))" else "" end)' \
         "$LEDGER" 2>/dev/null || true
       echo
-      echo "## Findings (findings-only — reported, not touched)"
+      echo "## Findings (surfaced — reported, not touched)"
       [ -f "$LEDGER" ] && jq -r --arg n "$NIGHT" \
         'select(.night==$n and .outcome=="finding") | "- " + .repo + " — " + (.summary // .fingerprint) + "  (" + .fingerprint + ")"' \
         "$LEDGER" 2>/dev/null || true
@@ -442,7 +442,7 @@ main() {
   fi
   log "agent=$NIGHTSHIFT_AGENT prefix=$BRANCH_PREFIX · cap: max $MAX_OPEN unmerged ${BRANCH_PREFIX} branches · run ceiling $MAX_RUN_BRANCHES · fix iters $MAX_FIX_ITER"
 
-  local made=0 considered=0 findings=0 repo mode id found fp fnj iter verdict wt base b summary open pass=0 progress stop_reason=ok
+  local made=0 considered=0 findings=0 repo mode id found fp fnj iter verdict wt base b summary open pass=0 progress stop_reason=ok disp
   # No per-night production cap. The ONLY cap is the count of OPEN (unmerged) nightshift/* branches:
   # work continues while fewer than max_open_branches are unmerged; merging/closing frees slots and
   # work resumes; when merging stops it fills to the cap and stops. "All night" continuous operation
@@ -507,6 +507,20 @@ main() {
     fi
 
     # branch-fix
+    # Intent-ambiguous divergence: the reviewer can PROVE it but cannot know which side is
+    # authoritative (a value labelled temporary/test, a fix that deletes a stated rationale,
+    # a "truth" that contradicts the component's own purpose). It ships as a human-owned
+    # finding (TODO), never an auto-fix — surfacing beats blessing a throwaway value.
+    disp=$(jq -r '.disposition // "fix"' "$id/finding.json" 2>/dev/null || echo fix)
+    if [ "$disp" = surface ]; then
+      if already_done "$fp"; then
+        log "  $(basename "$repo") [branch-fix]: already surfaced ($fp) — skip"; remove_worktree "$repo" "$wt"; continue
+      fi
+      ledger_append "$(basename "$id")" "$repo" "$fp" "" "" "finding" "$summary"
+      findings=$((findings + 1))
+      log "  $(basename "$repo") [branch-fix]: surfaced, not auto-fixed: $summary"
+      remove_worktree "$repo" "$wt"; continue
+    fi
     if already_acted "$fp"; then
       log "  $(basename "$repo"): already handled ($fp) — skip"; remove_worktree "$repo" "$wt"; continue
     fi

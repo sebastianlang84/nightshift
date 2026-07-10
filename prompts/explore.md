@@ -42,6 +42,18 @@ Rules:
   twins for another night (that fragments one change into several branches/merges). Still
   bounded: if the occurrences exceed the change budget or aren't truly the same cause,
   narrow or drop it.
+- Some divergences you can PROVE but must NOT rewrite, because the fix has to pick which
+  side is authoritative and the repo does not settle that — the direction is a judgment
+  about intent you explicitly lack. Set `"disposition":"surface"` (report it for a human;
+  change nothing) when reconciling the divergence would require ANY of:
+    - siding with a value one side labels temporary/test/WIP/placeholder/example;
+    - deleting or inverting a stated design rationale (e.g. a comment "the whole point of X is Y");
+    - siding with a value that contradicts the component's own documented name or purpose.
+  Otherwise use `"disposition":"fix"` (the default): the repo itself names the authority
+  (a linter, a pinned dependency, sibling code that does it the settled way), so the
+  correction direction is determinable. When you cannot tell which applies, prefer
+  "surface" over guessing a direction — a wrong-direction fix that blesses a throwaway
+  value is worse than a flagged TODO.
 
 confidence = how completely the claim can be PROVEN statically against current state
 (1.0 = a search settles it; lower as dynamic/reflective references or runtime
@@ -52,5 +64,6 @@ Output ONLY a JSON object, nothing else:
  "type": "bug|typo|doc|cleanup|smell|naming|convention|complexity",
  "line_window": "<Lx-Ly>", "claim": "<the single falsifiable proposition>",
  "verify": "<the exact recipe the reviewer runs, e.g. search every reference to the symbol across src, config, CI>",
- "verifiability": "static|static-given-deps|convention|runtime", "summary": "<one line>",
+ "verifiability": "static|static-given-deps|convention|runtime",
+ "disposition": "fix|surface", "summary": "<one line>",
  "fingerprint": "<file>:<type>:<line_window>", "confidence": 0.0}
