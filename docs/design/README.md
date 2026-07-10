@@ -22,5 +22,8 @@ discard clearly bad ones before thinking about how to build any of it.
   every run and the human share: four invariants, two physical homes, the read/write matrix.
 - [hook-spec.md](hook-spec.md) — **accepted (v1).** The git-confinement hook (§2a): two layers that
   make "branch-only" a mechanical guarantee via resolved-ref checking, not command parsing.
+- [risk-analysis.md](risk-analysis.md) — **living document (not idea-stage).** Security/safety
+  posture of unattended operation: trust model, controls in place (mapped to code), the open risk
+  register, and recommended mitigations. R1 (secret exfiltration) is the material residual risk.
 
 Open decisions are flagged inline in each note and mirrored in [../../OPEN-QUESTIONS.md](../../OPEN-QUESTIONS.md).
