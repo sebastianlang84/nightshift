@@ -52,7 +52,7 @@ def main(path: str) -> None:
             repos.append(cur)
 
     print(f"prefix\t{prefix}")
-    print(f"max_open\t{limits.get('max_open_branches', '10')}")
+    print(f"max_open\t{limits.get('max_open_branches', '2')}")
     # Emitted empty when absent so bash can apply the env override before its default
     # (precedence: rulebook -> NIGHTSHIFT_MAX_RUN_BRANCHES -> default). The others have
     # no env counterpart, so the parser owns their defaults directly.
