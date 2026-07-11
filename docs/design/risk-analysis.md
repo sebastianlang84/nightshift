@@ -46,19 +46,19 @@ These are implemented and active today. Each is enforced by mechanism, not by pr
 
 | # | Control | Mechanism | Where |
 |---|---------|-----------|-------|
-| C1 | **No shell for the agent** | Per-stage `--tools` allowlist. explore/review = `Read,Grep,Glob`; fix = `+Write,Edit`. **No stage grants `Bash`** → no `git`/`curl`/`rm`/`docker`/`sudo` *invoked by the agent itself*. Does **not** stop code execution via the write primitive — see [R8](#r8)/[R10](#r10). | [nightshift.sh:184-187](../../bin/nightshift.sh) |
-| C2 | **Repo never touched directly** | Every work item runs in a throwaway `git worktree --detach` under `$TMPDIR`, removed `--force` after. Edits land there, not in the real checkout. | [nightshift.sh:302-305](../../bin/nightshift.sh) |
+| C1 | **No shell for the agent** | Per-stage `--tools` allowlist. explore/review = `Read,Grep,Glob`; fix = `+Write,Edit`. **No stage grants `Bash`** → no `git`/`curl`/`rm`/`docker`/`sudo` *invoked by the agent itself*. Does **not** stop code execution via the write primitive — see [R8](#r8)/[R10](#r10). | [nightshift.sh:194-197](../../bin/nightshift.sh) |
+| C2 | **Repo never touched directly** | Every work item runs in a throwaway `git worktree --detach` under `$TMPDIR`, removed `--force` after. Edits land there, not in the real checkout. | [nightshift.sh:312-315](../../bin/nightshift.sh) |
 | C3 | **Push confinement (Layer 1)** | `hooks/pre-push` checks git's already-**resolved** refs: rejects any ref outside `nightshift/*`, plus deletes and tag pushes. Every bypass spelling (`+main`, `:branch`, `--all`, `--mirror`) is resolved by git before the hook sees it. | [pre-push](../../hooks/pre-push) |
-| C4 | **Can't disable Layer 1 (Layer 2)** | `core.hooksPath` injected via `GIT_CONFIG_*` env (process env, never an agent command). A `PreToolUse` guard denies `--no-verify`, `hooksPath` overrides, and `GIT_CONFIG_*`-setting commands. | [pretooluse-guard.sh](../../hooks/pretooluse-guard.sh), [nightshift.sh:230](../../bin/nightshift.sh) |
+| C4 | **Can't disable Layer 1 (Layer 2)** | `core.hooksPath` injected via `GIT_CONFIG_*` env (process env, never an agent command). A `PreToolUse` guard denies `--no-verify`, `hooksPath` overrides, and `GIT_CONFIG_*`-setting commands. | [pretooluse-guard.sh](../../hooks/pretooluse-guard.sh), [nightshift.sh:240](../../bin/nightshift.sh) |
 | C5 | **Never merges** | Output is `nightshift/*` branches (+ optional PR on this repo only). A human reviews before any merge. | ADR 0004, `rulebook.yaml` |
-| C6 | **Runaway caps** | `--max-turns 25` per stage; `max_fix_iterations 3`; `max_open_branches 2` (halts when reached); `max_branches_per_run 50` run ceiling; `flock` single-instance so runs never overlap. | [nightshift.sh:176](../../bin/nightshift.sh), rulebook, [nightshift-cron.sh:25-29](../../bin/nightshift-cron.sh) |
+| C6 | **Runaway caps** | `--max-turns 25` per stage; `max_fix_iterations 3`; `max_open_branches 2` (halts when reached); `max_branches_per_run 50` run ceiling; `flock` single-instance so runs never overlap. | [nightshift.sh:186](../../bin/nightshift.sh), rulebook, [nightshift-cron.sh:25-29](../../bin/nightshift-cron.sh) |
 | C7 | **Report-only for sensitive repos** | `findings-only` mode reports without ever pushing (e.g. llmstack). | `rulebook.yaml` |
-| C8 | **Change-size pressure** | Soft file/line budgets injected into explore/fix prompts (15 files / 400 lines) to keep changes reviewable. | [nightshift.sh:195-197](../../bin/nightshift.sh) |
+| C8 | **Change-size pressure** | Soft file/line budgets injected into explore/fix prompts (15 files / 400 lines) to keep changes reviewable. | [nightshift.sh:205-207](../../bin/nightshift.sh) |
 
 **Consequence — and its limit.** The *destructive-git* class is structurally blocked: no merge, no
 push outside `nightshift/*`, no direct repo access. But "no `Bash`" was **over-read** in the first
 cut as "no code execution." It is not: `Write`/`Edit` accept **absolute paths** and are unconfined
-(the settings only guard `Bash`, [nightshift.sh:117-121](../../bin/nightshift.sh)), so the agent can
+(the settings only guard `Bash`, [nightshift.sh:127-131](../../bin/nightshift.sh)), so the agent can
 write anywhere `llmadmin` can — including files that later execute ([R8](#r8), [R10](#r10)). The real
 risk lives in the **write primitive**, not in a shell.
 
@@ -112,7 +112,7 @@ the impact is removed by running under a dedicated unprivileged account — [M1]
 
 ### R3 — `--dangerously-skip-permissions` default everywhere <a id="r3"></a>
 The claude adapter defaults its flags to `--dangerously-skip-permissions --max-turns 25` for **all**
-runs, not only the sandbox ([nightshift.sh:176](../../bin/nightshift.sh)); the cron path does not
+runs, not only the sandbox ([nightshift.sh:186](../../bin/nightshift.sh)); the cron path does not
 override `NIGHTSHIFT_CLAUDE_FLAGS`. Defensible only because the `--tools` allowlist (C1) is the true
 containment — but it means command execution has exactly one line of defense, with the permission
 layer fully off.
@@ -131,8 +131,8 @@ On drift, the run continues until a cap (C6) stops it.
 Target-repo content is untrusted and reaches the prompt. Injection could steer what the agent flags
 or how it "fixes" code. Worse, it is **second-order**: the explore stage's output — itself derived
 from untrusted content — is re-embedded verbatim as `### finding.json` into the fix **and** review
-prompts ([nightshift.sh:200-204](../../bin/nightshift.sh)), and the working-tree diff (also
-attacker-influenced) is embedded into review ([nightshift.sh:208-209](../../bin/nightshift.sh)). So
+prompts ([nightshift.sh:210-214](../../bin/nightshift.sh)), and the working-tree diff (also
+attacker-influenced) is embedded into review ([nightshift.sh:218-219](../../bin/nightshift.sh)). So
 the same adversary shapes both the instruction the fixer follows and the diff the reviewer signs off.
 Backstopped by C5 (human review before merge) for correctness — but **not** for the R1 exfil variant
 (damage done at push time), and R9 shows the review evidence itself is incomplete.
@@ -155,9 +155,9 @@ Bounded by `--max-turns`, `max_fix_iterations`, `max_open_branches` (hard halt a
 *Residual: low.* The value-based throttle in autonomy-and-shutoff.md would tighten it further.
 
 ### R8 — Write/Edit accept absolute paths → code execution as `llmadmin` <a id="r8"></a>
-The fix stage grants `Write,Edit` ([nightshift.sh:185](../../bin/nightshift.sh)); the process only
-does `cd "$wd"` ([nightshift.sh:229](../../bin/nightshift.sh)) and the agent settings guard **only**
-`Bash` ([nightshift.sh:117-121](../../bin/nightshift.sh)). `Write`/`Edit` take absolute paths, so a
+The fix stage grants `Write,Edit` ([nightshift.sh:195](../../bin/nightshift.sh)); the process only
+does `cd "$wd"` ([nightshift.sh:239](../../bin/nightshift.sh)) and the agent settings guard **only**
+`Bash` ([nightshift.sh:127-131](../../bin/nightshift.sh)). `Write`/`Edit` take absolute paths, so a
 prompt-injected fix stage can write anywhere `llmadmin` can — `~/.bashrc`, `~/.ssh/authorized_keys`,
 `~/.config/systemd/user/*.service`, `~/.claude/settings.json`, or a fake binary in `~/.local/bin/`.
 That is arbitrary code execution as a `docker`+`sudo` account (→ host root, R2) reached with **no
@@ -168,9 +168,9 @@ commit-content exfil): "no shell → no code execution" was the first cut's cent
 *Residual: unmitigated. The single highest-severity finding.* Closed by [N1](#n1) (+ [M2](#m2)).
 
 ### R9 — Untracked files bypass the review evidence chain <a id="r9"></a>
-Review is shown `git -C "$wd" diff` ([nightshift.sh:209](../../bin/nightshift.sh)) — a plain diff
+Review is shown `git -C "$wd" diff` ([nightshift.sh:219](../../bin/nightshift.sh)) — a plain diff
 shows **tracked modifications only**, not new untracked files. finalize then stages everything with
-`git add -A` ([nightshift.sh:364](../../bin/nightshift.sh)) and pushes. A fix stage that *creates* a
+`git add -A` ([nightshift.sh:374](../../bin/nightshift.sh)) and pushes. A fix stage that *creates* a
 new file (a secret dump, a malicious `.github/` workflow, a planted binary) is invisible to the
 reviewer yet committed and pushed to the `nightshift/*` branch.
 
@@ -179,7 +179,7 @@ reviewer yet committed and pushed to the `nightshift/*` branch.
 ### R10 — `~/.local/bin` first on PATH → write primitive hijacks the Runner <a id="r10"></a>
 The launcher prepends `$HOME/.local/bin` to PATH ([nightshift-cron.sh:16](../../bin/nightshift-cron.sh))
 and the Runner calls `jq`, `git`, `gh`, `python3`, `codemap` **unqualified** throughout (e.g.
-[nightshift.sh:359,364,366,376](../../bin/nightshift.sh)). Chained with R8: a fix stage that writes
+[nightshift.sh:369,374,376,386](../../bin/nightshift.sh)). Chained with R8: a fix stage that writes
 `~/.local/bin/jq` gets that binary executed **by the Runner** on the next `jq` call in the same run —
 turning a write-only agent into RCE without the agent executing anything itself.
 
@@ -188,7 +188,7 @@ turning a write-only agent into RCE without the agent executing anything itself.
 ### R11 — Git-confinement layers guard an already-closed door <a id="r11"></a>
 C3 (pre-push) and C4 (PreToolUse guard) only bite if the agent can run `git` / set `GIT_CONFIG_*` —
 but no stage grants `Bash`, so it cannot. The Runner always issues `push -u origin "$branch"` with
-`branch=nightshift/*` ([nightshift.sh:370](../../bin/nightshift.sh)), so even a disabled hook cannot
+`branch=nightshift/*` ([nightshift.sh:380](../../bin/nightshift.sh)), so even a disabled hook cannot
 redirect the refspec. The two layers are therefore **latent** insurance against a future `Bash`
 grant, not active containment — while the live exposure (R8/R9) has no enforcement layer at all.
 Not a vulnerability; a mis-allocation of defense effort that the register originally mispresented as
@@ -200,7 +200,7 @@ core containment. C4 also carries an unverified prototype assumption (its PreToo
 The `gh` token carries `admin:public_key` and `repo` (§1). If exfiltrated (R1/R8), an attacker can
 register SSH keys on the account — persistence beyond this repo. Separately, `open_pr` builds the PR
 title/body from model-derived `summary`/`worknote`/`proof` and sends it via the **GitHub API**, not
-`git push` ([nightshift.sh:373](../../bin/nightshift.sh)) — so a diff-content scanner (M3/N6) as
+`git push` ([nightshift.sh:383](../../bin/nightshift.sh)) — so a diff-content scanner (M3/N6) as
 scoped to commits would never see it. Lower live risk today: `NIGHTSHIFT_OPEN_PR` defaults 0
 ([nightshift.sh:17](../../bin/nightshift.sh)).
 
@@ -249,7 +249,7 @@ the guard (C4) currently notes it as an unverified prototype assumption. Hardens
 
 ### N1 — PreToolUse deny on Write/Edit outside the worktree <a id="n1"></a>
 **Closes R8 — the biggest gap, and cheaper than M2.** Add a second hook in `write_claude_settings`
-([nightshift.sh:117-121](../../bin/nightshift.sh)) with `matcher:"Write|Edit"` pointing at a guard
+([nightshift.sh:127-131](../../bin/nightshift.sh)) with `matcher:"Write|Edit"` pointing at a guard
 that reads `.tool_input.file_path`, `realpath`-normalises it, and denies anything not under `$wd`
 (pass the worktree root via env, same pattern as `NIGHTSHIFT_BRANCH_PREFIX`). Resolve symlinks
 before comparison. No new infrastructure.
@@ -260,7 +260,7 @@ relocate `HOOKS_DIR` to a root-owned path. The agent has no `Bash`, so it cannot
 `Write` over an immutable file fails. Backstops R8 even if N1 is bypassed.
 
 ### N3 — Feed the reviewer the full change; refuse hidden files <a id="n3"></a>
-**Closes R9.** Replace `git -C "$wd" diff` ([nightshift.sh:209](../../bin/nightshift.sh)) with
+**Closes R9.** Replace `git -C "$wd" diff` ([nightshift.sh:219](../../bin/nightshift.sh)) with
 `git -C "$wd" add -A && git -C "$wd" diff --staged` so review sees exactly what finalize commits.
 Better: in finalize, after `add -A`, assert the changed-file set equals the finding's declared
 file(s) and abandon/flag on any extra path.
