@@ -51,7 +51,7 @@ These are implemented and active today. Each is enforced by mechanism, not by pr
 | C3 | **Push confinement (Layer 1)** | `hooks/pre-push` checks git's already-**resolved** refs: rejects any ref outside `nightshift/*`, plus deletes and tag pushes. Every bypass spelling (`+main`, `:branch`, `--all`, `--mirror`) is resolved by git before the hook sees it. | [pre-push](../../hooks/pre-push) |
 | C4 | **Can't disable Layer 1 (Layer 2)** | `core.hooksPath` injected via `GIT_CONFIG_*` env (process env, never an agent command). A `PreToolUse` guard denies `--no-verify`, `hooksPath` overrides, and `GIT_CONFIG_*`-setting commands. | [pretooluse-guard.sh](../../hooks/pretooluse-guard.sh), [nightshift.sh:230](../../bin/nightshift.sh) |
 | C5 | **Never merges** | Output is `nightshift/*` branches (+ optional PR on this repo only). A human reviews before any merge. | ADR 0004, `rulebook.yaml` |
-| C6 | **Runaway caps** | `--max-turns 25` per stage; `max_fix_iterations 3`; `max_open_branches 2` (halts when reached); `max_branches_per_run 50` run ceiling; `flock` single-instance so runs never overlap. | [nightshift.sh:176](../../bin/nightshift.sh), rulebook, [nightshift-cron.sh:25-29](../../bin/nightshift-cron.sh) |
+| C6 | **Runaway caps** | `--max-turns 25` per stage; `max_fix_iterations 3`; `max_open_branches 2` (halts when reached); `max_branches_per_run 50` run ceiling; `flock` single-instance so runs never overlap. | [nightshift.sh:186](../../bin/nightshift.sh), rulebook, [nightshift-cron.sh:25-29](../../bin/nightshift-cron.sh) |
 | C7 | **Report-only for sensitive repos** | `findings-only` mode reports without ever pushing (e.g. llmstack). | `rulebook.yaml` |
 | C8 | **Change-size pressure** | Soft file/line budgets injected into explore/fix prompts (15 files / 400 lines) to keep changes reviewable. | [nightshift.sh:195-197](../../bin/nightshift.sh) |
 
@@ -112,7 +112,7 @@ the impact is removed by running under a dedicated unprivileged account — [M1]
 
 ### R3 — `--dangerously-skip-permissions` default everywhere <a id="r3"></a>
 The claude adapter defaults its flags to `--dangerously-skip-permissions --max-turns 25` for **all**
-runs, not only the sandbox ([nightshift.sh:176](../../bin/nightshift.sh)); the cron path does not
+runs, not only the sandbox ([nightshift.sh:186](../../bin/nightshift.sh)); the cron path does not
 override `NIGHTSHIFT_CLAUDE_FLAGS`. Defensible only because the `--tools` allowlist (C1) is the true
 containment — but it means command execution has exactly one line of defense, with the permission
 layer fully off.
