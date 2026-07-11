@@ -26,6 +26,7 @@ RUNS_DIR="${NIGHTSHIFT_RUNS_DIR:-$NIGHTSHIFT_HOME/runs}/$NIGHT"
 DIGEST_DIR="${NIGHTSHIFT_DIGEST_DIR:-$NIGHTSHIFT_HOME/digests}"
 LEDGER="$STATE_DIR/ledger.jsonl"
 RUNSLOG="$STATE_DIR/runs.jsonl"
+RECON_DIR="$STATE_DIR/recon"   # per-repo recon caches (ADR 0010); derived, disposable, HEAD/TTL-invalidated
 # Worktrees live OUTSIDE the control repo, so nightshift can target its own repo
 # without nesting a worktree inside a working tree.
 WORKTREES_DIR="${NIGHTSHIFT_WORKTREES:-${TMPDIR:-/tmp}/nightshift-worktrees}"
@@ -34,20 +35,28 @@ mkdir -p "$STATE_DIR" "$RUNS_DIR" "$DIGEST_DIR" "$WORKTREES_DIR"
 log() { echo "[nightshift] $*" >&2; }
 
 # ---------------------------------------------------------------- rulebook ----
-declare -a REPO_PATHS=() REPO_MODES=() REPO_BASES=()
+declare -a REPO_PATHS=() REPO_MODES=() REPO_BASES=() REPO_FINDINGS=() REPO_DIMS=() DIMENSIONS=()
 load_rulebook() {
-  local tag a b c rb_run_branches=""
-  while IFS=$'\t' read -r tag a b c; do
+  local tag a b c d e rb_run_branches=""
+  while IFS=$'\t' read -r tag a b c d e; do
     case "$tag" in
-      prefix)               BRANCH_PREFIX="$a" ;;
-      max_open)             MAX_OPEN="$a" ;;
-      max_branches_per_run) rb_run_branches="$a" ;;
-      max_fix_iterations)   MAX_FIX_ITER="$a" ;;
-      max_files)            MAX_FILES="$a" ;;
-      max_lines)            MAX_LINES="$a" ;;
-      repo)                 REPO_PATHS+=("$a"); REPO_MODES+=("$b"); REPO_BASES+=("$c") ;;
+      prefix)                BRANCH_PREFIX="$a" ;;
+      max_open)              MAX_OPEN="$a" ;;
+      max_findings_per_item) MAX_FINDINGS="$a" ;;
+      recon_enabled)         RECON_ENABLED="$a" ;;
+      recon_ttl_days)        RECON_TTL_DAYS="$a" ;;
+      max_branches_per_run)  rb_run_branches="$a" ;;
+      max_fix_iterations)    MAX_FIX_ITER="$a" ;;
+      max_files)             MAX_FILES="$a" ;;
+      max_lines)             MAX_LINES="$a" ;;
+      dimension)             DIMENSIONS+=("$a") ;;
+      repo)                  REPO_PATHS+=("$a"); REPO_MODES+=("$b"); REPO_BASES+=("$c"); REPO_FINDINGS+=("$d"); REPO_DIMS+=("$e") ;;
     esac
   done < <(python3 "$NIGHTSHIFT_HOME/lib/parse_rulebook.py" "$RULEBOOK")
+  MAX_FINDINGS="${MAX_FINDINGS:-1}"
+  RECON_ENABLED="${RECON_ENABLED:-true}"; RECON_TTL_DAYS="${RECON_TTL_DAYS:-7}"
+  # Fallback dimension set if the rulebook declares none, so rotation still works out of the box.
+  [ "${#DIMENSIONS[@]}" -gt 0 ] || DIMENSIONS=(correctness security infra docs tests perf ui-ux deps craft)
   # Per-run safety ceiling: the rulebook wins; NIGHTSHIFT_MAX_RUN_BRANCHES stays as an
   # ops override for when it is not set there; 50 is the last-resort default.
   MAX_RUN_BRANCHES="${rb_run_branches:-${NIGHTSHIFT_MAX_RUN_BRANCHES:-50}}"
@@ -66,17 +75,18 @@ append_run() { # stage agent start dur tokens status item cost
       exit:$status}' >> "$RUNSLOG"
 }
 
-ledger_append() { # item repo fp branch sha outcome [summary] [pr_url] [proof] [verifiability]
+ledger_append() { # item repo fp branch sha outcome [summary] [pr_url] [proof] [verifiability] [dimension]
   jq -nc \
     --arg night "$NIGHT" --arg item "$1" --arg repo "$2" --arg fp "$3" \
     --arg branch "$4" --arg sha "$5" --arg outcome "$6" --arg summary "${7:-}" --arg pr "${8:-}" \
-    --arg proof "${9:-}" --arg verif "${10:-}" --arg ts "$(date -Iseconds)" \
+    --arg proof "${9:-}" --arg verif "${10:-}" --arg dim "${11:-}" --arg ts "$(date -Iseconds)" \
     '{night:$night,item:$item,repo:$repo,fingerprint:$fp,
       branch:($branch|if .=="" then null else . end),
       sha:($sha|if .=="" then null else . end),
       pr_url:($pr|if .=="" then null else . end),
       proof:($proof|if .=="" then null else . end),
       verifiability:($verif|if .=="" then null else . end),
+      dimension:($dim|if .=="" then null else . end),
       outcome:$outcome,summary:$summary,ts:$ts}' >> "$LEDGER"
 }
 
@@ -171,24 +181,50 @@ run_agent() { # stage workdir item_dir
 }
 
 # ---- mock adapter (deterministic; the tested path) ----
-mock_explore() { # workdir item_dir
-  local wd="$1" id="$2"
+mock_explore() { # workdir item_dir — emits the v2 container {found, findings:[…]} with up to N planted defects
+  local wd="$1" id="$2" arr='[]'
   if [ -f "$wd/README.md" ] && grep -q 'teh ' "$wd/README.md"; then
-    jq -nc '{found:true,file:"README.md",type:"typo",line_window:"L1-L40",
-             summary:"typo \"teh\" -> \"the\" in README",
-             fingerprint:"README.md:typo:L1-L40",confidence:0.9}' > "$id/finding.json"
-  else
-    jq -nc '{found:false}' > "$id/finding.json"
+    arr=$(printf '%s' "$arr" | jq -c '. + [{file:"README.md",type:"typo",line_window:"L1-L40",
+      disposition:"fix",verifiability:"static",summary:"typo \"teh\" -> \"the\" in README",
+      fingerprint:"README.md:typo:L1-L40",rank:1,confidence:0.9}]')
   fi
+  if [ -f "$wd/app.py" ] && grep -q 'retrun' "$wd/app.py"; then
+    arr=$(printf '%s' "$arr" | jq -c '. + [{file:"app.py",type:"typo",line_window:"L1-L10",
+      disposition:"fix",verifiability:"static",summary:"typo \"retrun\" -> \"return\" in app.py comment",
+      fingerprint:"app.py:typo:L1-L10",rank:2,confidence:0.9}]')
+  fi
+  jq -nc --argjson f "$arr" '{found:($f|length>0),findings:$f}' > "$id/finding.json"
 }
-mock_fix() { # workdir item_dir
-  local wd="$1" id="$2"
-  sed -i 's/teh /the /g' "$wd/README.md"
-  printf '# Worknote\n\nFixed typo "teh" -> "the" in README.md.\nSingle file, reversible, no behaviour change.\n' > "$id/worknote.md"
+mock_fix() { # workdir item_dir — applies the fix for THIS finding (dispatched on .file)
+  local wd="$1" id="$2" file
+  file=$(jq -r '.file' "$id/finding.json" 2>/dev/null || echo "")
+  case "$file" in
+    README.md) sed -i 's/teh /the /g' "$wd/README.md"
+      printf '# Worknote\n\nFixed typo "teh" -> "the" in README.md. Single file, reversible.\n' > "$id/worknote.md" ;;
+    app.py)    sed -i 's/retrun/return/g' "$wd/app.py"
+      printf '# Worknote\n\nFixed typo "retrun" -> "return" in app.py comment. Single file, reversible.\n' > "$id/worknote.md" ;;
+    *)         printf '# Worknote\n\nNo mock fix registered for %s.\n' "$file" > "$id/worknote.md" ;;
+  esac
 }
 mock_review() { # workdir item_dir
   local _wd="$1" id="$2"
   jq -nc '{verdict:"ship",reason:"Typo fix; single file, reversible, no behaviour change — clears the smallness bar."}' > "$id/review.md"
+}
+mock_recon() { # workdir item_dir — deterministic applicability straight from recon_signals.json
+  local _wd="$1" id="$2" sig
+  sig=$(cat "$id/signals.json" 2>/dev/null || echo '{}')
+  printf '%s' "$sig" | jq -c '. as $s | {
+    dimensions: {
+      correctness:{applicable:true, hint:"any code path"},
+      security:   {applicable:true, hint:"trust boundaries"},
+      infra:      {applicable:(($s.has_compose//false) or ($s.has_dockerfile//false) or ($s.has_ci//false) or ($s.has_iac//false)), hint:"compose/docker/ci present"},
+      docs:       {applicable:true, hint:"docs vs code"},
+      tests:      {applicable:($s.has_tests//false), hint:"test dir present"},
+      perf:       {applicable:((($s.languages//[])|length)>0), hint:"code present"},
+      "ui-ux":    {applicable:($s.has_frontend//false), hint:"frontend present"},
+      deps:       {applicable:((($s.lockfiles//[])|length)>0), hint:"lockfiles present"},
+      craft:      {applicable:true, hint:"floor lens"}
+    }, notes:"mock recon (deterministic mapping from filesystem signals)"}' > "$id/recon.json"
 }
 
 # ---- claude adapter (first-party CLI headless, ADR 0003) ----
@@ -220,6 +256,38 @@ Repo working directory: $wd"
 Prefer a change under ${MAX_FILES:-15} files and ${MAX_LINES:-400} lines. Larger is acceptable only
 if it is genuinely ONE coherent, reviewable improvement — never bundle unrelated changes." ;;
   esac
+  if [ "$stage" = explore ]; then
+    prompt="$prompt
+
+## Findings budget
+Emit UP TO ${NIGHTSHIFT_FINDINGS_N:-1} finding(s) this pass — the top of your ranked shortlist, each a
+DISTINCT root cause (the repeated-inconsistency rule still collapses twins into ONE finding). Rank them
+so the most valuable is first; the runner ships in that order and truncates at the cap. Fewer is fine —
+never pad. If nothing clears the value bar, return found:false with an empty findings array."
+  fi
+  if [ "$stage" = explore ] && [ -n "${NIGHTSHIFT_DIMENSION:-}" ] && \
+     [ -f "$NIGHTSHIFT_HOME/prompts/dimensions/$NIGHTSHIFT_DIMENSION.md" ]; then
+    prompt="$prompt
+
+## Tonight's lens: ${NIGHTSHIFT_DIMENSION}
+Aim your scan through the lens below. Rank findings WITHIN it — but a screaming, out-of-lens
+correctness bug you happen to see may still take a slot; the lens focuses attention, it does not
+blind you to a live bug.
+
+$(cat "$NIGHTSHIFT_HOME/prompts/dimensions/$NIGHTSHIFT_DIMENSION.md")"
+  fi
+  if [ "$stage" = explore ] && [ -n "${NIGHTSHIFT_RECON_NOTES:-}" ]; then
+    prompt="$prompt
+
+## Repo orientation (from tonight's recon)
+${NIGHTSHIFT_RECON_NOTES}"
+  fi
+  if [ "$stage" = recon ] && [ -f "$id/signals.json" ]; then
+    prompt="$prompt
+
+### recon_signals (deterministic filesystem probe — refine these into per-dimension applicability)
+$(cat "$id/signals.json")"
+  fi
   case "$stage" in
     fix|review) prompt="$prompt
 
@@ -267,6 +335,7 @@ repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
     explore) python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/finding.json" ;;
     fix)     cp "$id/$stage.out" "$id/worknote.md" ;;
     review)  python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/review.md" ;;
+    recon)   python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/recon.json" ;;
   esac
   return 0
 }
@@ -288,6 +357,93 @@ select_order() { # emit "path<TAB>mode<TAB>base", least-recently-serviced repo f
     st=$(last_serviced_epoch "$path")                                # nightshift last touched
     printf '%s\t%s\t%s\t%s\t%s\n' "$st" "$ct" "$path" "$mode" "$base"
   done | sort -t"$(printf '\t')" -k1,1n -k2,2nr | cut -f3-
+}
+
+repo_findings() { # repo -> per-repo `findings:` override from the rulebook, else global MAX_FINDINGS
+  local repo="$1" i
+  for i in "${!REPO_PATHS[@]}"; do
+    if [ "${REPO_PATHS[$i]}" = "$repo" ]; then
+      echo "${REPO_FINDINGS[$i]:-$MAX_FINDINGS}"; return
+    fi
+  done
+  echo "$MAX_FINDINGS"
+}
+
+repo_dimensions() { # repo -> applicable dimensions, space-separated, in priority order (ADR 0010)
+  # Per-repo `dimensions:` (comma-separated) overrides the global set. Recon further narrows this
+  # (Phase 3) via recon_applicable(); here it is the configured candidate set.
+  local repo="$1" i
+  for i in "${!REPO_PATHS[@]}"; do
+    if [ "${REPO_PATHS[$i]}" = "$repo" ]; then
+      [ -n "${REPO_DIMS[$i]:-}" ] && { echo "${REPO_DIMS[$i]//,/ }"; return; }
+      break
+    fi
+  done
+  echo "${DIMENSIONS[*]}"
+}
+
+last_dim_epoch() { # repo dim -> epoch of the last WORK-ITEM ledger row for this (repo,dim), 0 if never
+  local repo="$1" dim="$2" iso
+  [ -f "$LEDGER" ] || { echo 0; return; }
+  iso=$(jq -rs --arg r "$repo" --arg d "$dim" \
+    '[.[]|select(.repo==$r and .dimension==$d and (.outcome=="finding" or .outcome=="shipped" or .outcome=="abandoned"))|.ts]
+     | max // empty' "$LEDGER" 2>/dev/null || true)
+  [ -n "$iso" ] || { echo 0; return; }
+  date -d "$iso" +%s 2>/dev/null || echo 0
+}
+
+recon_applicable() { # repo dim -> 0 if applicable (or unknown/no-recon), 1 only if recon says NOT applicable
+  local repo="$1" dim="$2" cache val
+  cache="$RECON_DIR/$(basename "$repo").json"
+  [ -f "$cache" ] || return 0   # no recon cache → never starve; treat as applicable
+  val=$(jq -r --arg d "$dim" '.dimensions[$d].applicable // true' "$cache" 2>/dev/null || echo true)
+  [ "$val" = false ] && return 1 || return 0
+}
+
+select_dimension() { # repo -> the least-recently-serviced APPLICABLE dimension (rulebook order breaks ties)
+  # Reproduces the operator's "security yesterday on A → docs today on A, security on B" rotation:
+  # argmin of last_dim_epoch over the recon-applicable set; strict `<` scan in priority order means
+  # the earliest-listed dimension wins a tie (so at cold start every repo gets the first-listed lens).
+  local repo="$1" dim best_dim="" best_ep="" ep
+  for dim in $(repo_dimensions "$repo"); do
+    recon_applicable "$repo" "$dim" || continue
+    ep=$(last_dim_epoch "$repo" "$dim")
+    if [ -z "$best_ep" ] || [ "$ep" -lt "$best_ep" ]; then best_ep="$ep"; best_dim="$dim"; fi
+  done
+  # If recon excluded everything (shouldn't happen — correctness/docs/craft are always applicable),
+  # fall back to the first configured dimension so a repo is never fully starved.
+  if [ -z "$best_dim" ]; then local -a dd; read -ra dd <<< "$(repo_dimensions "$repo")"; best_dim="${dd[0]:-}"; fi
+  echo "$best_dim"
+}
+
+ensure_recon() { # repo -> refresh the recon cache if missing / HEAD changed / older than ttl_days (ADR 0010)
+  [ "${RECON_ENABLED:-true}" != false ] || return 0
+  local repo="$1" cache head chead cts cepoch now ttl id wt base
+  cache="$RECON_DIR/$(basename "$repo").json"; mkdir -p "$RECON_DIR"
+  head=$(git -C "$repo" rev-parse HEAD 2>/dev/null || echo "")
+  if [ -f "$cache" ]; then
+    chead=$(jq -r '.head // ""' "$cache" 2>/dev/null || echo "")
+    cts=$(jq -r '.ts // ""' "$cache" 2>/dev/null || echo "")
+    cepoch=0; [ -n "$cts" ] && cepoch=$(date -d "$cts" +%s 2>/dev/null || echo 0)
+    now=$(date +%s); ttl=$(( ${RECON_TTL_DAYS:-7} * 86400 ))
+    if [ "$chead" = "$head" ] && [ "$cepoch" -gt 0 ] && [ "$(( now - cepoch ))" -lt "$ttl" ]; then
+      return 0   # cache is fresh — recon costs zero this run
+    fi
+  fi
+  id="$RUNS_DIR/recon-$(date +%s%N)"; mkdir -p "$id"
+  "$NIGHTSHIFT_HOME/lib/recon_signals.sh" "$repo" > "$id/signals.json" 2>/dev/null || echo '{}' > "$id/signals.json"
+  # Recon is read-only; run it in a throwaway worktree (isolation), falling back to the repo path.
+  base="$(base_ref "$repo")"; wt="$WORKTREES_DIR/$(basename "$id")"
+  if setup_worktree "$repo" "$wt" "$base"; then
+    run_agent recon "$wt" "$id" || true; remove_worktree "$repo" "$wt"
+  else
+    run_agent recon "$repo" "$id" || true
+  fi
+  if [ -s "$id/recon.json" ]; then
+    jq -c --arg h "$head" --arg r "$repo" --arg ts "$(date -Iseconds)" \
+      '. + {repo:$r, head:$h, ts:$ts}' "$id/recon.json" > "$cache" 2>/dev/null \
+      || log "  $(basename "$repo"): recon cache write failed — continuing without recon"
+  fi
 }
 
 open_branch_count() { # unmerged nightshift/* across all repos (reconciles against reality, §3e)
@@ -385,12 +541,19 @@ open_pr() { # repo wt branch item_dir -> echoes PR url ("" if none)
 }
 
 # ---------------------------------------------------------------- finalize ----
-finalize() { # repo worktree item_dir -> echoes branch name
-  local repo="$1" wt="$2" id="$3" fp type slug branch sha
+finalize() { # repo worktree item_dir [seq] -> echoes branch name
+  local repo="$1" wt="$2" id="$3" seq="${4:-0}" fp type dim slug branch sha
   fp=$(jq -r '.fingerprint' "$id/finding.json")
   type=$(jq -r '.type // "change"' "$id/finding.json")   # default so the branch slug never reads "null"
-  slug="$(printf '%s-%s' "$type" "$(basename "$repo")" | tr '[:upper:] /' '[:lower:]--' | cut -c1-40)"
-  branch="${BRANCH_PREFIX}${slug}-$(date +%Y%m%d-%H%M%S)"
+  dim=$(jq -r '.dimension // ""' "$id/finding.json")     # the review lens (ADR 0010), leads the slug
+  if [ -n "$dim" ]; then
+    slug="$(printf '%s-%s-%s' "$dim" "$type" "$(basename "$repo")" | tr '[:upper:] /' '[:lower:]--' | cut -c1-48)"
+  else
+    slug="$(printf '%s-%s' "$type" "$(basename "$repo")" | tr '[:upper:] /' '[:lower:]--' | cut -c1-40)"
+  fi
+  # `seq` (a per-run monotonic counter) disambiguates several findings that finalize within the
+  # same clock second in one repo/pass — without it their timestamped branch names would collide.
+  branch="${BRANCH_PREFIX}${slug}-$(date +%Y%m%d-%H%M%S)-${seq}"
   git -C "$wt" checkout -q -b "$branch"
   git -C "$wt" add -A
   git -C "$wt" -c user.name=nightshift -c user.email=nightshift@localhost \
@@ -404,7 +567,7 @@ $(cat "$id/worknote.md")"
   pr_url=$(open_pr "$repo" "$wt" "$branch" "$id")
   proof=$(jq -r '.proof // ""' "$id/review.md" 2>/dev/null || true)
   verif=$(jq -r '.verifiability // ""' "$id/finding.json" 2>/dev/null || true)
-  ledger_append "$(basename "$id")" "$repo" "$fp" "$branch" "$sha" "shipped" "$(jq -r '.summary // ""' "$id/finding.json")" "$pr_url" "$proof" "$verif"
+  ledger_append "$(basename "$id")" "$repo" "$fp" "$branch" "$sha" "shipped" "$(jq -r '.summary // ""' "$id/finding.json")" "$pr_url" "$proof" "$verif" "$dim"
   echo "$branch"
 }
 
@@ -436,6 +599,39 @@ write_digest() { # made open status
       | if $n==0 then empty else
           "- harvest (all-time): shipped \($n) · merged \($m) · dropped \($d) · open \($open)"
           + (if ($m+$d)>0 then " · merge-rate \((100*$m/($m+$d))|floor)%" else "" end)
+        end' "$LEDGER" 2>/dev/null || true
+    # Coverage matrix (ADR 0010): days since nightshift last serviced each (repo × dimension).
+    # Makes the rotation observable — a large number or — flags a long-overdue lens.
+    if [ "${#DIMENSIONS[@]}" -gt 0 ] && [ "${#REPO_PATHS[@]}" -gt 0 ]; then
+      local nowe rp d e; nowe=$(date +%s)
+      echo; echo "## Coverage — days since last serviced (— = never)"; echo
+      { printf '| repo |'; for d in "${DIMENSIONS[@]}"; do printf ' %s |' "$d"; done; printf '\n'
+        printf '|---|'; for d in "${DIMENSIONS[@]}"; do printf '%s' '---|'; done; printf '\n'
+        for rp in "${REPO_PATHS[@]}"; do
+          printf '| %s |' "$(basename "$rp")"
+          for d in "${DIMENSIONS[@]}"; do
+            e=$(last_dim_epoch "$rp" "$d")
+            if [ "$e" -gt 0 ]; then printf ' %s |' "$(( (nowe - e) / 86400 ))"; else printf ' — |'; fi
+          done
+          printf '\n'
+        done
+      }
+    fi
+    # Per-dimension merge-rate (ADR 0010 Phase 4): the tuning signal — which lenses produce findings
+    # humans actually merge. Join the latest verdict per branch back to the shipped row's dimension.
+    [ -f "$LEDGER" ] && jq -rs '
+      ([.[]|select(.outcome=="verdict" and .branch!=null)] | group_by(.branch) | map(sort_by(.ts)|last)
+        | map(select(.verdict=="merged" or .verdict=="dropped")) | INDEX(.branch)) as $v
+      | [.[]|select(.outcome=="shipped" and .branch!=null)]
+      | group_by(.dimension // "—")
+      | map({dim:(.[0].dimension // "—"), br:(map(.branch)|unique)})
+      | map({dim:.dim, n:(.br|length),
+             m:(.br|map(select($v[.].verdict=="merged"))|length),
+             d:(.br|map(select($v[.].verdict=="dropped"))|length)})
+      | if length==0 then empty else
+          "\n## Merge-rate by dimension (all-time)\n"
+          + (map("- \(.dim): shipped \(.n) · merged \(.m) · dropped \(.d)"
+                 + (if (.m+.d)>0 then " · rate \((100*.m/(.m+.d))|floor)%" else "" end)) | join("\n"))
         end' "$LEDGER" 2>/dev/null || true
     echo
     if [ "$status" = "backpressure" ]; then
@@ -469,11 +665,15 @@ main() {
   # dropped) so the morning digest scoreboard is current. Non-fatal — a harvest
   # hiccup must never block the night's work.
   if [ -x "$NIGHTSHIFT_HOME/bin/harvest.sh" ]; then
-    "$NIGHTSHIFT_HOME/bin/harvest.sh" >/dev/null 2>&1 || log "harvest: skipped (non-fatal)"
+    # Pass THIS run's state/ledger/rulebook through: harvest honours STATE_DIR/LEDGER/RULEBOOK, but
+    # nightshift.sh names them NIGHTSHIFT_STATE_DIR/… — without this bridge an isolated run (e.g. an
+    # e2e test with NIGHTSHIFT_STATE_DIR set) would silently reconcile the LIVE ledger instead.
+    STATE_DIR="$STATE_DIR" LEDGER="$LEDGER" RULEBOOK="$RULEBOOK" \
+      "$NIGHTSHIFT_HOME/bin/harvest.sh" >/dev/null 2>&1 || log "harvest: skipped (non-fatal)"
   fi
   log "agent=$NIGHTSHIFT_AGENT prefix=$BRANCH_PREFIX · cap: max $MAX_OPEN unmerged ${BRANCH_PREFIX} branches · run ceiling $MAX_RUN_BRANCHES · fix iters $MAX_FIX_ITER"
 
-  local made=0 considered=0 findings=0 repo mode id found fp fnj iter verdict wt base b summary open pass=0 progress stop_reason=ok disp
+  local made=0 considered=0 findings=0 repo mode cfgbase id fp fnj iter verdict wt base b summary open pass=0 progress stop_reason=ok disp rfind farr n_find k fd dim
   # No per-night production cap. The ONLY cap is the count of OPEN (unmerged) nightshift/* branches:
   # work continues while fewer than max_open_branches are unmerged; merging/closing frees slots and
   # work resumes; when merging stops it fills to the cap and stops. "All night" continuous operation
@@ -513,77 +713,108 @@ main() {
       fi
     fi
 
+    rfind=$(repo_findings "$repo")
+    export NIGHTSHIFT_FINDINGS_N="$rfind"
+    # Recon (cached): survey the repo and narrow which dimensions apply. Then pick the review lens
+    # for this repo/pass: its least-recently-serviced APPLICABLE dimension (ADR 0010). The lens and
+    # the recon orientation notes are injected into explore; the lens is stamped onto every finding.
+    ensure_recon "$repo"
+    dim=$(select_dimension "$repo")
+    export NIGHTSHIFT_DIMENSION="$dim"
+    NIGHTSHIFT_RECON_NOTES="$(jq -r '.notes // ""' "$RECON_DIR/$(basename "$repo").json" 2>/dev/null || true)"
+    export NIGHTSHIFT_RECON_NOTES
+    log "  $(basename "$repo") [$mode]: lens=${dim:-none} · budget=$rfind"
     run_agent explore "$wt" "$id" || true
     considered=$((considered + 1))
-    found=$(jq -r '.found' "$id/finding.json" 2>/dev/null || echo false)
-    if [ "$found" != "true" ]; then
-      log "  $(basename "$repo") [$mode]: nothing worth doing"; remove_worktree "$repo" "$wt"; continue
-    fi
-    fp=$(finding_fingerprint "$id/finding.json")
-    if [ -z "$fp" ]; then
-      log "  $(basename "$repo") [$mode]: finding without a usable fingerprint — skip"; remove_worktree "$repo" "$wt"; continue
-    fi
-    # Persist the resolved fingerprint so finalize/ledger read the same identity.
-    fnj=$(jq --arg fp "$fp" '.fingerprint=$fp' "$id/finding.json") && printf '%s' "$fnj" > "$id/finding.json"
-    summary=$(jq -r '.summary // ""' "$id/finding.json")
-
-    if [ "$mode" = findings-only ]; then
-      if already_done "$fp"; then
-        log "  $(basename "$repo") [findings-only]: already reported ($fp) — skip"; remove_worktree "$repo" "$wt"; continue
-      fi
-      ledger_append "$(basename "$id")" "$repo" "$fp" "" "" "finding" "$summary"
-      findings=$((findings + 1))
-      log "  $(basename "$repo") [findings-only]: $summary"
-      remove_worktree "$repo" "$wt"; continue
-    fi
-
-    # branch-fix
-    # Intent-ambiguous divergence: the reviewer can PROVE it but cannot know which side is
-    # authoritative (a value labelled temporary/test, a fix that deletes a stated rationale,
-    # a "truth" that contradicts the component's own purpose). It ships as a human-owned
-    # finding (TODO), never an auto-fix — surfacing beats blessing a throwaway value.
-    # Fail closed: an unrecognized disposition surfaces (asks a human) rather than auto-fixing.
-    disp=$(jq -r '.disposition // "fix"' "$id/finding.json" 2>/dev/null || echo fix)
-    case "$disp" in
-      fix|surface) ;;
-      *) log "  $(basename "$repo"): unrecognized disposition '$disp' — surfacing instead of auto-fixing"; disp=surface ;;
-    esac
-    # A surfaced divergence LATCHES: once a human owns it as a TODO, a later run must neither
-    # re-surface it nor quietly auto-fix it (model nondeterminism could flip disposition to
-    # `fix` and ship the wrong-direction change while the TODO is still open).
-    if already_surfaced "$fp"; then
-      log "  $(basename "$repo"): previously surfaced — human-owned, not touching ($fp)"; remove_worktree "$repo" "$wt"; continue
-    fi
-    if [ "$disp" = surface ]; then
-      ledger_append "$(basename "$id")" "$repo" "$fp" "" "" "finding" "$summary"
-      findings=$((findings + 1))
-      log "  $(basename "$repo") [branch-fix]: surfaced, not auto-fixed: $summary"
-      remove_worktree "$repo" "$wt"; continue
-    fi
-    if already_acted "$fp"; then
-      log "  $(basename "$repo"): already handled ($fp) — skip"; remove_worktree "$repo" "$wt"; continue
-    fi
-    iter=0; verdict="revise"
-    while [ "$iter" -lt "$MAX_FIX_ITER" ]; do
-      iter=$((iter + 1))
-      run_agent fix "$wt" "$id" || true
-      run_agent review "$wt" "$id" || true
-      verdict=$(jq -r '.verdict' "$id/review.md" 2>/dev/null || echo abandon)
-      [ "$verdict" = ship ] && break
-      [ "$verdict" = abandon ] && break
-    done
-
-    b=""
-    if [ "$verdict" = ship ]; then
-      b=$(finalize "$repo" "$wt" "$id")
-      made=$((made + 1)); progress=1
-      log "  $(basename "$repo"): shipped -> $b"
-    else
-      ledger_append "$(basename "$id")" "$repo" "$fp" "" "" "abandoned" "$summary"
-      log "  $(basename "$repo"): abandoned ($fp)"
-    fi
+    # Explore emits the v2 container {found, findings:[…]} or (back-compat) a single finding object
+    # {found:true,file,…}. Normalise to a findings array, cap it at the repo's N, then remove the
+    # explore worktree — explore is read-only; every fix gets its OWN fresh worktree so diffs never
+    # compound and each finding lands as one independently-reviewable, independently-rejectable branch.
+    farr=$(jq -c 'if (.findings|type)=="array" then .findings elif (.found==true) then [.] else [] end' "$id/finding.json" 2>/dev/null || echo '[]')
     remove_worktree "$repo" "$wt"
-    [ -n "$b" ] && git -C "$repo" branch -q -D "$b" >/dev/null 2>&1 || true
+    n_find=$(printf '%s' "$farr" | jq 'length' 2>/dev/null || echo 0)
+    [ "$n_find" -gt "$rfind" ] && n_find="$rfind"
+    if [ "$n_find" -le 0 ]; then
+      log "  $(basename "$repo") [$mode]: nothing worth doing"; continue
+    fi
+
+    for (( k=0; k<n_find; k++ )); do
+      open=$(open_branch_count)
+      if [ "$open" -ge "$MAX_OPEN" ]; then
+        log "  open-branch cap reached ($open/$MAX_OPEN) — stop"; stop_reason=backpressure; break
+      fi
+      fd="$id/f$k"; mkdir -p "$fd"
+      printf '%s' "$farr" | jq -c ".[$k]" > "$fd/finding.json"
+      fp=$(finding_fingerprint "$fd/finding.json")
+      if [ -z "$fp" ]; then
+        log "  $(basename "$repo") [$mode]: finding without a usable fingerprint — skip"; continue
+      fi
+      # Persist the resolved fingerprint AND the selected dimension so finalize/ledger read the
+      # same identity and the coverage rotation (ADR 0010) has its signal.
+      fnj=$(jq --arg fp "$fp" --arg d "$dim" '.fingerprint=$fp | .dimension=$d' "$fd/finding.json") && printf '%s' "$fnj" > "$fd/finding.json"
+      summary=$(jq -r '.summary // ""' "$fd/finding.json")
+
+      if [ "$mode" = findings-only ]; then
+        if already_done "$fp"; then
+          log "  $(basename "$repo") [findings-only]: already reported ($fp) — skip"; continue
+        fi
+        ledger_append "$(basename "$fd")" "$repo" "$fp" "" "" "finding" "$summary" "" "" "" "$dim"
+        findings=$((findings + 1)); progress=1
+        log "  $(basename "$repo") [findings-only]: $summary"
+        continue
+      fi
+
+      # branch-fix
+      # Intent-ambiguous divergence (ADR 0006): the reviewer can PROVE it but cannot know which side
+      # is authoritative. It ships as a human-owned finding (TODO), never an auto-fix. Fail closed:
+      # an unrecognized disposition surfaces (asks a human) rather than auto-fixing.
+      disp=$(jq -r '.disposition // "fix"' "$fd/finding.json" 2>/dev/null || echo fix)
+      case "$disp" in
+        fix|surface) ;;
+        *) log "  $(basename "$repo"): unrecognized disposition '$disp' — surfacing instead of auto-fixing"; disp=surface ;;
+      esac
+      # A surfaced divergence LATCHES: once a human owns it as a TODO, a later run must neither
+      # re-surface it nor quietly auto-fix it.
+      if already_surfaced "$fp"; then
+        log "  $(basename "$repo"): previously surfaced — human-owned, not touching ($fp)"; continue
+      fi
+      if [ "$disp" = surface ]; then
+        ledger_append "$(basename "$fd")" "$repo" "$fp" "" "" "finding" "$summary" "" "" "" "$dim"
+        findings=$((findings + 1)); progress=1
+        log "  $(basename "$repo") [branch-fix]: surfaced, not auto-fixed: $summary"
+        continue
+      fi
+      if already_acted "$fp"; then
+        log "  $(basename "$repo"): already handled ($fp) — skip"; continue
+      fi
+
+      # One finding = one branch = one fresh worktree from base (diffs stay independent).
+      wt="$WORKTREES_DIR/$(basename "$id")-f$k"
+      if ! setup_worktree "$repo" "$wt" "$base"; then
+        log "  $(basename "$repo"): could not create worktree for finding — skip"; continue
+      fi
+      iter=0; verdict="revise"
+      while [ "$iter" -lt "$MAX_FIX_ITER" ]; do
+        iter=$((iter + 1))
+        run_agent fix "$wt" "$fd" || true
+        run_agent review "$wt" "$fd" || true
+        verdict=$(jq -r '.verdict' "$fd/review.md" 2>/dev/null || echo abandon)
+        [ "$verdict" = ship ] && break
+        [ "$verdict" = abandon ] && break
+      done
+      b=""
+      if [ "$verdict" = ship ]; then
+        b=$(finalize "$repo" "$wt" "$fd" "$made")   # $made is the per-run monotonic branch-uniqueness seq
+        made=$((made + 1)); progress=1
+        log "  $(basename "$repo"): shipped -> $b"
+      else
+        ledger_append "$(basename "$fd")" "$repo" "$fp" "" "" "abandoned" "$summary" "" "" "" "$dim"
+        log "  $(basename "$repo"): abandoned ($fp)"
+      fi
+      remove_worktree "$repo" "$wt"
+      [ -n "$b" ] && git -C "$repo" branch -q -D "$b" >/dev/null 2>&1 || true
+    done
+    [ "$stop_reason" = backpressure ] && break
   done < <(select_order)
     [ "$progress" -eq 0 ] && { log "pass $pass: no new shippable work — stop"; break; }
   done

@@ -9,12 +9,35 @@ limits:
   # across all repos. NOT a per-night count. Merge/close a branch and a slot frees up immediately, so
   # if you review continuously it runs all night; if you stop, it fills to this many and stops.
   max_open_branches: 2
+  max_findings_per_item: 1       # N ranked findings explore may emit per repo/pass (ADR 0011). Each
+                                 # ships as its OWN branch, so N × branch-fix repos can fill the cap
+                                 # above — size both to your morning review appetite. Per-repo
+                                 # `findings:` overrides. Default 1 = pre-v2 single-finding behavior.
   max_branches_per_run: 50       # HARD safety ceiling per single run (runaway backstop, NOT policy —
                                  # backpressure above is the real governor). Env override:
                                  # NIGHTSHIFT_MAX_RUN_BRANCHES wins only if this is unset.
   max_fix_iterations: 3          # HARD cap on Fix<->Review round-trips per finding before abandon
   max_files_per_change: 15       # SOFT — guidance to the agent, not a hard reject
   max_lines_per_change: 400      # SOFT — a bigger change is fine if it's one coherent improvement
+
+recon:                           # reconnaissance stage (ADR 0010): surveys each repo (docs/, compose,
+  enabled: true                  # frontend, tests, CI …) and narrows which dimensions apply to it.
+  ttl_days: 7                    # cache is re-run when the repo HEAD changes or is older than this.
+
+# Review dimensions / lenses (ADR 0010). ORDER = cold-start and tie-break priority: at a tie the
+# earliest-listed lens wins, so a fresh repo gets `correctness` first. The Runner rotates — each
+# repo/pass gets its least-recently-serviced APPLICABLE dimension, so coverage spreads over nights.
+# Trim this list, or override per repo with a repo-level `dimensions:` (comma-separated) key.
+dimensions:
+  - correctness                  # live/latent bugs, wrong results, unhandled edges
+  - security                     # secrets, injection, authz gaps, unsafe defaults (never quotes a secret)
+  - infra                        # docker-compose/Dockerfile/CI/systemd/env quality
+  - docs                         # docs-vs-code contradictions, stale comments/READMEs
+  - tests                        # skipped/assertion-free tests, critical-path coverage gaps
+  - perf                         # N+1, sync-in-async, quadratic hot paths, missing indexes
+  - ui-ux                        # broken flows, a11y, inconsistent components, missing states, copy
+  - deps                         # EOL/vulnerable pins, lockfile drift, unused deps
+  - craft                        # smells, dead code, naming — the FLOOR lens
 
 repos:
   - path: /absolute/path/to/your/repo
@@ -24,3 +47,5 @@ repos:
   #   base: develop              # OPTIONAL branch to work from. Empty = auto-detect (origin/HEAD ->
   #                              # main/master). Set to `develop` for gitflow repos so fixes branch
   #                              # off the integration branch, not production `main`.
+  #   findings: 5                # OPTIONAL per-repo override of max_findings_per_item
+  #   dimensions: security,infra,docs  # OPTIONAL per-repo lens set (comma-separated); beats the global list

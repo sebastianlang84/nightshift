@@ -24,6 +24,7 @@ EOF
 
 cat > app.py <<'EOF'
 def greet(name):
+    # retrun the greeting
     return "hello " + name
 EOF
 
@@ -31,16 +32,29 @@ git -c user.name=demo -c user.email=demo@localhost add -A
 git -c user.name=demo -c user.email=demo@localhost commit -q -m "initial demo project"
 git push -q -u origin main
 
-cat > "$HOME_DIR/rulebook.yaml" <<EOF
+# Write the rulebook INTO the sandbox — never clobber the live $HOME_DIR/rulebook.yaml (which
+# points at the real repos). Run nightshift against it with RULEBOOK + isolated state dirs.
+cat > "$SB/rulebook.yaml" <<EOF
 branch_prefix: nightshift/
 limits:
-  max_open_branches: 2
-  max_files_per_change: 15
-  max_lines_per_change: 400
+  max_open_branches: 5
+  max_findings_per_item: 2
+recon:
+  enabled: true
+  ttl_days: 7
+dimensions:
+  - correctness
+  - docs
 repos:
   - path: $SB/target
     mode: branch-fix
 EOF
 
 echo "sandbox ready: $SB"
-echo "rulebook.yaml -> $HOME_DIR/rulebook.yaml (points at the sandbox)"
+echo "rulebook  -> $SB/rulebook.yaml (points at the sandbox; live rulebook untouched)"
+echo
+echo "run it isolated (mock or claude):"
+echo "  NIGHTSHIFT_AGENT=mock RULEBOOK=$SB/rulebook.yaml \\"
+echo "    NIGHTSHIFT_STATE_DIR=$SB/state NIGHTSHIFT_RUNS_DIR=$SB/runs \\"
+echo "    NIGHTSHIFT_DIGEST_DIR=$SB/digests NIGHTSHIFT_WORKTREES=$SB/wt \\"
+echo "    bash $HOME_DIR/bin/nightshift.sh"

@@ -14,7 +14,9 @@ def val(raw: str) -> str:
 def main(path: str) -> None:
     prefix = "nightshift/"
     limits: dict[str, str] = {}
+    recon: dict[str, str] = {}
     repos: list[dict[str, str]] = []
+    dims: list[str] = []
     cur: dict[str, str] | None = None
     section: str | None = None
 
@@ -31,11 +33,21 @@ def main(path: str) -> None:
                     prefix = val(s.split(":", 1)[1])
                 elif s.rstrip() == "limits:":
                     section = "limits"
+                elif s.rstrip() == "recon:":
+                    section = "recon"
+                elif s.rstrip() == "dimensions:":
+                    section = "dimensions"
                 elif s.rstrip() == "repos:":
                     section = "repos"
             elif section == "limits":
                 k, _, v = s.partition(":")
                 limits[k.strip()] = val(v)
+            elif section == "recon":
+                k, _, v = s.partition(":")
+                recon[k.strip()] = val(v)
+            elif section == "dimensions":
+                if s.startswith("- "):
+                    dims.append(val(s[2:]))
             elif section == "repos":
                 if s.startswith("- "):
                     if cur:
@@ -60,9 +72,20 @@ def main(path: str) -> None:
     print(f"max_fix_iterations\t{limits.get('max_fix_iterations', '3')}")
     print(f"max_files\t{limits.get('max_files_per_change', '15')}")
     print(f"max_lines\t{limits.get('max_lines_per_change', '400')}")
+    # Findings emitted per repo per pass. Default 1 keeps a rulebook that omits the key at the
+    # pre-v2 single-finding behavior; the live rulebook sets it explicitly (ADR 0011).
+    print(f"max_findings_per_item\t{limits.get('max_findings_per_item', '1')}")
+    # Recon stage: on by default; cache invalidated on HEAD change or after ttl_days.
+    print(f"recon_enabled\t{recon.get('enabled', 'true')}")
+    print(f"recon_ttl_days\t{recon.get('ttl_days', '7')}")
+    # Global review-dimension set; ORDER is the cold-start / tie priority in the Runner.
+    for d in dims:
+        print(f"dimension\t{d}")
     for r in repos:
         # base is optional: empty means "auto-detect" (base_ref) in the Runner.
-        print(f"repo\t{r.get('path', '')}\t{r.get('mode', 'findings-only')}\t{r.get('base', '')}")
+        # findings is optional: empty means "inherit max_findings_per_item".
+        # dimensions is optional (comma-separated scalar): empty means "inherit the global set".
+        print(f"repo\t{r.get('path', '')}\t{r.get('mode', 'findings-only')}\t{r.get('base', '')}\t{r.get('findings', '')}\t{r.get('dimensions', '')}")
 
 
 if __name__ == "__main__":
