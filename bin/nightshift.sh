@@ -122,6 +122,20 @@ already_surfaced() { # fingerprint — a prior human-owned finding exists (a TOD
     "$LEDGER" >/dev/null 2>&1
 }
 
+last_serviced_epoch() { # repo -> epoch of the last WORK-ITEM nightshift produced for it (0 if never)
+  # Fairness signal for select_order (ADR 0008): the more recently nightshift last serviced a
+  # repo, the LATER it sorts. Only work-item outcomes count (finding/shipped/abandoned) — the
+  # harvest `verdict` reconcile rows are bookkeeping, not attention spent, and would otherwise
+  # make a just-merged repo look freshly serviced and sink it unfairly.
+  local repo="$1" iso
+  [ -f "$LEDGER" ] || { echo 0; return; }
+  iso=$(jq -rs --arg r "$repo" \
+    '[.[]|select(.repo==$r and (.outcome=="finding" or .outcome=="shipped" or .outcome=="abandoned"))|.ts]
+     | max // empty' "$LEDGER" 2>/dev/null || true)
+  [ -n "$iso" ] || { echo 0; return; }
+  date -d "$iso" +%s 2>/dev/null || echo 0
+}
+
 # Layer 2 settings for the agent: register the PreToolUse guard so the agent
 # cannot disable the pre-push hook (--no-verify / core.hooksPath override).
 write_claude_settings() {
@@ -258,15 +272,22 @@ repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
 }
 
 # --------------------------------------------------------------- selection ----
-select_order() { # emit "path<TAB>mode<TAB>base", most-recently-changed first (cold-start churn)
-  local i path mode base ts
+select_order() { # emit "path<TAB>mode<TAB>base", least-recently-serviced repo first (ADR 0008)
+  # Fairness over recency: the repo nightshift has NOT touched in the longest sorts first, so
+  # coverage rotates instead of fixating on the most-active repo (which is nightshift itself —
+  # it commits nightly, so a commit-recency sort put it first every night and starved the tail
+  # repos at the open-branch cap). Human commit-recency stays as the tiebreaker: among equally-
+  # (or never-) serviced repos, prefer the one with the hottest code. Cold start = no ledger =
+  # every repo ties at serviced 0, so night one still orders by commit-recency exactly as before.
+  local i path mode base ct st
   for i in "${!REPO_PATHS[@]}"; do
     path="${REPO_PATHS[$i]}"; mode="${REPO_MODES[$i]}"; base="${REPO_BASES[$i]:-}"
     case "$mode" in branch-fix|findings-only) ;; *) continue ;; esac
     [ -d "$path/.git" ] || { log "skip $path (not a git repo)"; continue; }
-    ts=$(git -C "$path" log -1 --format=%ct 2>/dev/null || echo 0)
-    printf '%s\t%s\t%s\t%s\n' "$ts" "$path" "$mode" "$base"
-  done | sort -rn | cut -f2-
+    ct=$(git -C "$path" log -1 --format=%ct 2>/dev/null || echo 0)   # human commit recency
+    st=$(last_serviced_epoch "$path")                                # nightshift last touched
+    printf '%s\t%s\t%s\t%s\t%s\n' "$st" "$ct" "$path" "$mode" "$base"
+  done | sort -t"$(printf '\t')" -k1,1n -k2,2nr | cut -f3-
 }
 
 open_branch_count() { # unmerged nightshift/* across all repos (reconciles against reality, §3e)
