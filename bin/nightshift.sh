@@ -50,7 +50,7 @@ load_rulebook() {
       max_files)             MAX_FILES="$a" ;;
       max_lines)             MAX_LINES="$a" ;;
       dimension)             DIMENSIONS+=("$a") ;;
-      repo)                  REPO_PATHS+=("$a"); REPO_MODES+=("$b"); REPO_BASES+=("$c"); REPO_FINDINGS+=("$d"); REPO_DIMS+=("$e") ;;
+      repo)                  REPO_PATHS+=("${a#path=}"); REPO_MODES+=("${b#mode=}"); REPO_BASES+=("${c#base=}"); REPO_FINDINGS+=("${d#findings=}"); REPO_DIMS+=("${e#dimensions=}") ;;
     esac
   done < <(python3 "$NIGHTSHIFT_HOME/lib/parse_rulebook.py" "$RULEBOOK")
   MAX_FINDINGS="${MAX_FINDINGS:-1}"

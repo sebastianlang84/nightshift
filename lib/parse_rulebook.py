@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal YAML-subset parser for the nightshift rulebook — emits TSV for bash.
+"""Minimal YAML-subset parser for the nightshift rulebook — emits tagged TSV for bash.
 
 Handles exactly the shape we control: top-level `branch_prefix`, a `limits:` map,
 and a `repos:` list of `{path, mode}`. Not a general YAML parser on purpose (no deps)."""
@@ -85,7 +85,21 @@ def main(path: str) -> None:
         # base is optional: empty means "auto-detect" (base_ref) in the Runner.
         # findings is optional: empty means "inherit max_findings_per_item".
         # dimensions is optional (comma-separated scalar): empty means "inherit the global set".
-        print(f"repo\t{r.get('path', '')}\t{r.get('mode', 'findings-only')}\t{r.get('base', '')}\t{r.get('findings', '')}\t{r.get('dimensions', '')}")
+        # Bash treats tab as IFS whitespace and collapses adjacent delimiters. Prefixing each
+        # optional value with its key keeps every field non-empty (`base=`) and position-stable.
+        findings = r.get("findings", "")
+        if findings and (not findings.isdecimal() or int(findings) < 1):
+            raise SystemExit(
+                f"repo {r.get('path', '')}: findings must be a positive integer"
+            )
+        print(
+            "repo"
+            f"\tpath={r.get('path', '')}"
+            f"\tmode={r.get('mode', 'findings-only')}"
+            f"\tbase={r.get('base', '')}"
+            f"\tfindings={findings}"
+            f"\tdimensions={r.get('dimensions', '')}"
+        )
 
 
 if __name__ == "__main__":
