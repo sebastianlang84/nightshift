@@ -35,8 +35,11 @@ no deletes), tool allowlist, change-size limits (max lines/files per PR, max PRs
 — three layers (constitution / rulebook / hard-enforcement), precedence, the four pillars.
 
 ## 4. Budget model — the real break from a per-task timer
-**RESOLVED (ADR 0004): hard `max_runs_per_night` cap** (small) is the primary control, plus per-run
-bounds + auto-compact off; usage-window observation is a backstop. Supersedes MartinLoop as gate.
+**RESOLVED (ADR 0004, amended 2026-07-09 + ADR 0005): no per-night cap.** Throughput is governed
+solely by open-branch backpressure (`max_open_branches`); the earlier per-night production count
+(`max_branches_per_night`) was reverted and removed. Per-run bounds + a per-run runaway ceiling
+(`max_branches_per_run`, backstop not policy) + auto-compact off apply; usage-window observation is a
+backstop. Supersedes MartinLoop as gate.
 Instead of a timer per task: one outer loop `{pick work item → bounded run → record outcome}` that
 repeats until the time/quota window is spent. Inner runs stay bounded (no drift); the outer loop
 consumes the night. How do we detect "window exhausted" per harness (adapter concern)?
