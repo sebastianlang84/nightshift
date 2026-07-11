@@ -1,8 +1,8 @@
 # Prototype — how to run it
 
-- Status: **runnable prototype, 2026-07-08.** Proves the v1 mechanics end-to-end with zero risk to
-  real repos. Both agent paths are verified against the sandbox: `mock` (deterministic) and `claude`
-  (real Explore/Fix/Review via the first-party CLI).
+- Status: **runnable prototype, 2026-07-11.** Proves the v2 mechanics end-to-end with zero risk to
+  real repos. Adapter paths are `mock` (deterministic), `claude`, and `codex`; the real adapters
+  invoke their first-party CLIs headlessly.
 
 ## Run it
 
@@ -10,6 +10,7 @@
 bin/setup-sandbox.sh                    # throwaway target repo + local bare remote + a planted typo
 bin/nightshift.sh                       # one night, mock agent (default)
 NIGHTSHIFT_AGENT=claude bin/nightshift.sh   # one night, real claude -p stages
+NIGHTSHIFT_AGENT=codex NIGHTSHIFT_CODEX_MODEL=<model> NIGHTSHIFT_CODEX_REASONING_EFFORT=high bin/nightshift.sh
 ```
 
 Per-repo `mode` (rulebook.yaml): **`branch-fix`** does the full loop and pushes a `nightshift/*`
@@ -54,6 +55,11 @@ Stages are invoked through `run_agent(stage, workdir, item_dir)`, which dispatch
   (~$0.37 for the trivial fix across 3 Opus calls — telemetry immediately surfaces that a smaller
   model for Explore/Review is the obvious cost lever). Still to harden: sub-agents for Explore
   (context control, §3b), the PreToolUse guard wired into settings, and non-sandbox permission mode.
+- `NIGHTSHIFT_AGENT=codex` — calls `codex exec` ephemerally. Recon/Explore/Review use Codex's
+  `read-only` sandbox; Fix uses `workspace-write` in the disposable worktree with network disabled.
+  `NIGHTSHIFT_CODEX_MODEL` and `NIGHTSHIFT_CODEX_REASONING_EFFORT` are optional host configuration;
+  no model is committed as the default. Codex can execute sandboxed commands during Fix, unlike the
+  Claude adapter's no-Bash profile. The Runner still owns branch, commit, and push.
 
 ## Files
 
@@ -64,8 +70,8 @@ Stages are invoked through `run_agent(stage, workdir, item_dir)`, which dispatch
 | `hooks/pre-push` | Layer 1 git-confinement (resolved-ref check) |
 | `hooks/pretooluse-guard.sh` | Layer 2 anti-bypass (Claude PreToolUse; for the claude path) |
 | `lib/parse_rulebook.py` | minimal rulebook YAML-subset parser |
-| `lib/extract_json.py` | pulls the JSON artifact out of a stage model's output (claude path) |
-| `prompts/{explore,fix,review}.md` | stage prompts (for the claude path) |
+| `lib/extract_json.py` | pulls the JSON artifact out of a stage model's output |
+| `prompts/{recon,explore,fix,review}.md` | provider-neutral stage prompts |
 | `rulebook.example.yaml` | the governance template |
 
 Runtime state (`state/`, `runs/`, `digests/`, `sandbox/`, `rulebook.yaml`) is gitignored.

@@ -18,8 +18,9 @@ ADR [0003](../adr/0003-subscription-safe-execution.md) (headless execution) and
 
 ## 1. Trust model — what runs, as whom, with what reach
 
-nightshift launches a first-party Claude Code CLI headless (`claude -p`) per stage, orchestrated by
-a "dumb" launcher fired from a systemd **user** timer with linger enabled (fires while logged out).
+nightshift launches a selected first-party CLI headlessly (`claude -p` or `codex exec`) per stage,
+orchestrated by a "dumb" launcher fired from a systemd **user** timer with linger enabled. The
+original threat analysis targeted Claude; adapter-specific differences are explicit below.
 
 - **Identity:** runs as the interactive user `llmadmin`. That account is a member of the `docker`
   and `sudo` groups and can read the user's SSH private keys, the `gh` OAuth token
@@ -46,12 +47,12 @@ These are implemented and active today. Each is enforced by mechanism, not by pr
 
 | # | Control | Mechanism | Where |
 |---|---------|-----------|-------|
-| C1 | **No shell for the agent** | Per-stage `--tools` allowlist. explore/review = `Read,Grep,Glob`; fix = `+Write,Edit`. **No stage grants `Bash`** → no `git`/`curl`/`rm`/`docker`/`sudo` *invoked by the agent itself*. Does **not** stop code execution via the write primitive — see [R8](#r8)/[R10](#r10). | [nightshift.sh:194-197](../../bin/nightshift.sh) |
+| C1 | **Stage capability boundary** | Claude uses a per-stage tool allowlist and never grants `Bash`. Codex uses `read-only` for Recon/Explore/Review and `workspace-write` with network disabled for Fix; Codex can execute sandboxed commands inside that worktree. | [nightshift.sh](../../bin/nightshift.sh) |
 | C2 | **Repo never touched directly** | Every work item runs in a throwaway `git worktree --detach` under `$TMPDIR`, removed `--force` after. Edits land there, not in the real checkout. | [nightshift.sh:312-315](../../bin/nightshift.sh) |
 | C3 | **Push confinement (Layer 1)** | `hooks/pre-push` checks git's already-**resolved** refs: rejects any ref outside `nightshift/*`, plus deletes and tag pushes. Every bypass spelling (`+main`, `:branch`, `--all`, `--mirror`) is resolved by git before the hook sees it. | [pre-push](../../hooks/pre-push) |
-| C4 | **Can't disable Layer 1 (Layer 2)** | `core.hooksPath` injected via `GIT_CONFIG_*` env (process env, never an agent command). A `PreToolUse` guard denies `--no-verify`, `hooksPath` overrides, and `GIT_CONFIG_*`-setting commands. | [pretooluse-guard.sh](../../hooks/pretooluse-guard.sh), [nightshift.sh:240](../../bin/nightshift.sh) |
+| C4 | **Can't disable Layer 1 (Layer 2, Claude only)** | `core.hooksPath` is injected into both adapters. Claude also has a `PreToolUse` guard denying bypass flags. Codex has no equivalent tool hook here; its sandbox is the primary agent boundary, while the Runner's final push supplies the hook independently. | [pretooluse-guard.sh](../../hooks/pretooluse-guard.sh), [nightshift.sh](../../bin/nightshift.sh) |
 | C5 | **Never merges** | Output is `nightshift/*` branches (+ optional PR on this repo only). A human reviews before any merge. | ADR 0004, `rulebook.yaml` |
-| C6 | **Runaway caps** | `--max-turns 25` per stage; `max_fix_iterations 3`; `max_open_branches 2` (halts when reached); `max_branches_per_run 50` run ceiling; `flock` single-instance so runs never overlap. | [nightshift.sh:186](../../bin/nightshift.sh), rulebook, [nightshift-cron.sh:25-29](../../bin/nightshift-cron.sh) |
+| C6 | **Runaway caps** | Claude has `--max-turns 25` per stage. Both adapters have fix-iteration, open-branch and per-run caps, single-instance `flock`, and the service's wall-clock timeout. Codex currently has no separate per-stage turn cap. | [nightshift.sh](../../bin/nightshift.sh), rulebook, [nightshift-cron.sh](../../bin/nightshift-cron.sh), [nightshift.service](../../scheduler/nightshift.service) |
 | C7 | **Report-only for sensitive repos** | `findings-only` mode reports without ever pushing (e.g. llmstack). | `rulebook.yaml` |
 | C8 | **Change-size pressure** | Soft file/line budgets injected into explore/fix prompts (15 files / 400 lines) to keep changes reviewable. | [nightshift.sh:205-207](../../bin/nightshift.sh) |
 
@@ -61,6 +62,12 @@ cut as "no code execution." It is not: `Write`/`Edit` accept **absolute paths** 
 (the settings only guard `Bash`, [nightshift.sh:127-131](../../bin/nightshift.sh)), so the agent can
 write anywhere `llmadmin` can — including files that later execute ([R8](#r8), [R10](#r10)). The real
 risk lives in the **write primitive**, not in a shell.
+
+**Codex adapter delta.** `--ignore-user-config` and `--ignore-rules` prevent host-global Codex
+configuration and exec-policy rules from silently changing unattended behavior. Read-only stages
+cannot modify the worktree; Fix is OS-sandboxed to workspace writes with network disabled, but it
+can execute commands there. This is a different boundary from Claude's no-shell tool allowlist.
+The shared Runner still creates the disposable worktree, owns commit/push, and applies the hook.
 
 ---
 
@@ -296,6 +303,8 @@ outside `nightshift/*`) is structurally blocked. The independent review correcte
 through the Runner's PATH (R10) — reached with no shell at all. Secret exfiltration (R1) and the
 review-evidence gap (R9) sit alongside it. All of this is amplified by R2: the containment, though
 individually sound, is single-tier and sits on a `docker`/`sudo` (host-root-capable) account.
+For Codex, workspace sandboxing narrows the arbitrary-write exposure, while permitted in-worktree
+commands and the missing per-stage turn cap are adapter-specific residuals.
 
 Ordered response: **N1** (deny Write/Edit outside the worktree) is the cheapest, highest-leverage
 step and should land first — it neutralises R8 without new infrastructure. **N3** and **N4** close the

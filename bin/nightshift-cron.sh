@@ -4,7 +4,7 @@
 # things an unattended run needs that an interactive one gets for free:
 #   1. a single-instance flock — a long run must NEVER overlap the next night's;
 #   2. an explicit PATH — systemd user services start with a minimal env, but
-#      nightshift shells out to claude/gh which live under ~/.local/bin;
+#      nightshift shells out to claude/codex/gh which may live under ~/.local/bin;
 #   3. a timestamped log file (everything also still goes to journald).
 set -euo pipefail
 
