@@ -3,6 +3,99 @@
 Running list of enhancements to build later. Not design tensions (those live in OPEN-QUESTIONS.md)
 and not the ratified v1 scope (ADR 0004) — just good ideas parked with enough context to act on.
 
+## Fable v2-Review — offene Befunde (2026-07-11)
+
+Nach dem v2-Commit (cb527e9 — recon, review dimensions, rotation, multi-finding; ADR 0009–0011)
+ließ Sebastian **Fable** (cross-model) die komplette v2 gegen ADRs 0009–0011 + CONTEXT.md reviewen,
+mit **Live-Verifikation im Mock-Sandbox** (gitignored, danach entfernt, Tree unberührt). Safety-
+Architektur hält (siehe „verifiziert intakt" unten); zwei HIGH-Bugs sind live reproduziert. Reihenfolge
+= schwerwiegendste zuerst. **Nichts davon ist gefixt — reine Todo-Erfassung.**
+
+- **[HIGH · correctness/robustness] Fehlgeschlagener `git push` wird als `shipped` verbucht.**
+  `bin/nightshift.sh:564` (push), `:570` (ledger_append), `:807` (caller). `finalize` läuft in
+  `b=$(finalize …)`; Command-Substitution erbt kein `errexit`, also läuft es nach einem Push-Fehler
+  weiter: berechnet SHA, schreibt `outcome:"shipped"` für einen Branch, der auf origin nicht existiert,
+  `made` inkrementiert. **Live bestätigt**: Remote auf `/nonexistent/remote.git` → Run exit 0, Digest
+  „2 shipped … 0 now open", Ledger zwei Phantom-`shipped`-Zeilen. Folgen: (a) `already_acted` dedupt auf
+  diesem Fingerprint für immer → Fix dauerhaft verloren; (b) Harvest reconciled Phantom-Branch als
+  `dropped` → Merge-Rate-Signal korrumpiert; (c) **wenn der pre-push-Confinement-Hook einen Push ablehnt,
+  wird das als Erfolg gemeldet** — genau das Signal, das man sehen will, wird geschluckt. Pre-existing in
+  v1, aber v2 fasst diese Zeilen an und vervielfacht Pushes/Nacht (N Findings × Repos); Commit behauptet
+  „verified end-to-end", aber der Push-Fehlerpfad war nicht abgedeckt. Fix: in `finalize`
+  `git … push … || { log "push failed"; return 1; }`; im Caller `if b=$(finalize …); then … else`
+  → `abandoned` (oder neues `push-failed`-Outcome) ledgern und laut loggen.
+
+- **[HIGH · correctness] Neue Per-Repo-Overrides `findings:`/`dimensions:` durch TSV-Feld-Kollaps kaputt.**
+  `bin/nightshift.sh:41` (`IFS=$'\t' read -r tag a b c d e`), `lib/parse_rulebook.py:88`,
+  `bin/harvest.sh:43`. Tab ist IFS-Whitespace → aufeinanderfolgende Tabs kollabieren, spätere Felder
+  rutschen nach links. **Live bestätigt**: (a) `path + mode + findings: 5` (ohne base) → `base="5"`,
+  `findings=""` — Per-Repo-Cap still ignoriert, resolve_base loggt bogus „base '5' not found";
+  (b) `path + base: develop + dimensions: security,infra` → `findings="security,infra"`, dims verloren →
+  explore-Prompt liest „Emit UP TO security,infra finding(s)", und die defensive Truncation
+  `[ "$n_find" -gt "$rfind" ]` (`:736`) wirft „integer expression expected" (geschluckt) → ADR-0011-
+  Garantie „Runner kappt beim Cap" no-opt, explore-Output shippt komplett, nur durch MAX_OPEN/
+  MAX_RUN_BRANCHES gebremst; (c) harvest.sh liest nur 4 Felder → bei gesetzten Overrides falsche Base-
+  Auflösung → gitflow-Repos bekommen Merge-Verdicts gegen falsche Base (nach develop gemergter Branch
+  bleibt für immer `open`). Live-`rulebook.yaml` nutzt die Keys nicht → heute unkritisch, aber das
+  dokumentierte rulebook.example.yaml-Feature ist ab Tag 1 kaputt. Fix: nicht-kollabierbaren Platzhalter
+  (`-`) für Leerfelder emittieren und in bash übersetzen (oder `key=value`-Paare); harvest.sh im selben
+  Zug auf 6 Felder heben.
+
+- **[MEDIUM · correctness] Ledger/Telemetrie-Item-Identität auf `f0`/`f1` degradiert.**
+  `bin/nightshift.sh:761, 782, 811` + `finalize` (`basename "$id"` wobei `$id` jetzt `$fd`), Telemetrie
+  via `run_agent` `:179`. v1 schrieb `item:"item-<nanos>"` (eindeutig); v2 reicht `$fd="$id/f$k"` durch,
+  also protokolliert jede Ledger-Zeile und jede runs.jsonl-Zeile `item:"f0"`/`"f1"` (im Sandbox
+  bestätigt). Nicht eindeutig über Repos/Nächte → `harvest.sh verdict <item>` mehrdeutig (matcht neueste
+  von vielen), runs.jsonl-Stage-Zeilen nicht mehr an ihr explore-Item joinbar. Fix:
+  `"$(basename "$id")-f$k"`.
+
+- **[MEDIUM · correctness] Recon-Cache per `basename "$repo"` → gleichnamige Repos kollidieren.**
+  `bin/nightshift.sh:397, 422, 724`. `/a/app` und `/b/app` teilen `state/recon/app.json`. Cached `head`
+  matcht nie den HEAD des anderen Repos → recon läuft jeden Pass neu (Cache-Thrash, Agent-Kosten), und
+  zwischen Refreshes wendet `recon_applicable`/`NIGHTSHIFT_RECON_NOTES` die Applicability-Map + Orientation-
+  Notes von Repo A auf Repo B an → falsche Dimension-Narrowing + irreführender Prompt-Kontext.
+  Fail-open, nicht unsicher, aber falsch. Fix: vollen Pfad in den Cache-Dateinamen hashen
+  (`echo "$repo" | md5sum`) oder vollen Pfad sanitizen.
+
+- **[MEDIUM · design/correctness] Rotation rückt bei leerem Lens-Ergebnis nie vor.**
+  `bin/nightshift.sh:403-417` (`select_dimension`/`last_dim_epoch`). Lens-Epoch avanciert nur über
+  `finding|shipped|abandoned`-Ledger-Zeilen. Liefert explore `found:false` unter Lens X, wird nichts
+  geschrieben → X bleibt Epoch 0 und wird per striktem `<`-Tie-break (Rulebook-Reihenfolge) jeden Pass +
+  jede Nacht wieder gewählt. Ein ruhiges Repo bleibt für immer auf `correctness` gepinnt; `security/docs/
+  tests/…` nie erreicht → ADR-0010-Rotation konterkariert, und innerhalb eines Runs wird pro Extra-Pass
+  dieselbe Frage neu gestellt (Agent-Kosten). Fix: leichten „serviced"-Marker pro (repo, dim) auch bei
+  leerem explore schreiben — z.B. `explored`-Outcome-Zeile oder `state/`-Seitendatei, die `last_dim_epoch`
+  konsultiert.
+
+- **[LOW/MEDIUM · robustness] `progress=1` auf Findings-only-Zeilen kann Pass-Loop ohne Findings-Cap die
+  ganze Nacht laufen lassen.** `bin/nightshift.sh:762, 783`. v2 setzt `progress=1` neu, wenn ein Finding
+  auftaucht (v1 nur bei geshippten Branches). Findings zählen weder gegen `MAX_OPEN` noch
+  `MAX_RUN_BRANCHES`, also hält ein nichtdeterministischer explore, der immer neue Fingerprints emittiert,
+  Pass um Pass auf einem Findings-only-Repo → unbegrenzter Token-Burn + Ledger/Digest-Wachstum, nur durchs
+  Abo-Fenster gebremst. Evtl. beabsichtigt („all night"), aber kein Governor für den Findings-only-Pfad.
+  Erwägen: Per-Nacht-Findings-Cap oder Findings aus `progress` ausnehmen.
+
+- **[LOW · robustness] Recon-Fallback läuft im Live-Checkout; diverse Recon-Cache-Edge-Cases.**
+  `bin/nightshift.sh:437-446`. (a) Wenn `setup_worktree` fehlschlägt, läuft recon im Live-Checkout des
+  Repos — read-only-Tools (Read/Grep/Glob, kein Bash) sind dann die einzige Isolation; laut Kommentar
+  bewusst, aber dokumentierte Schwächung von „nie im Live-Checkout". (b) `jq … > "$cache"` truncatet vor
+  jq-Lauf → jq-Fehler hinterlässt leeren Cache (self-healing, fail-open, aber Fenster). (c) Leeres
+  `recon.json` (Agent-Fehler) schreibt keinen Cache → recon läuft jeden Pass neu, kein Negative-Caching.
+  (d) Nicht-numerisches `ttl_days` wird still ttl=0 → recon jeden Run. Alle fail-open, keiner unsicher.
+
+**Safety-Invarianten — verifiziert intakt (Fable):** Push-Confinement (nur `finalize` pusht,
+per-push `-c core.hooksPath` + unveränderter `hooks/pre-push`, `nightshift/*`-Namespace-Check, lehnt
+Deletes/Tags/out-of-prefix ab; recon bekommt read-only-Profil, fix hat kein Bash); Branch-only/Human-
+Merge-Gate (nichts merged/deployt; `open_pr` bleibt opt-in); Worktree-Isolation (sogar verbessert —
+pro Finding frische Worktree ab Base, 2 Defekte → 2 unabhängige Branches, sauber aufgeräumt); der
+Harvest-Isolations-Fix (`STATE_DIR`/`LEDGER`/`RULEBOOK` exakt die Namen, die harvest.sh honoriert,
+`RECON_DIR` unter isoliertem `STATE_DIR`) und der setup-sandbox-Fix (Rulebook nach `$SB/rulebook.yaml`,
+Live-Rulebook unberührt) sind **real und vollständig**. Prompts enthalten keine unsicheren Instruktionen.
+Eine Nuance zur Rückwärtskompatibilität: `recon.enabled` ist per Default an → ein v1-Rulebook bekommt
+eine Extra-Agent-Stage pro Repo/TTL (so von ADR 0010 gewollt, aber nicht wörtlich „defaults keep pre-v2
+behavior"). **Wichtigster Widerspruch:** Commit sagt „verified end-to-end", aber der `shipped`-bei-Push-
+Fehler-Bug ließ sich genau im Sandbox auslösen — die Verifikation deckte den Push-Fehlerpfad nicht ab.
+
 ## Scheduler — nightly 03:00 — DONE (2026-07-09)
 
 **Shipped.** A systemd *user* timer fires `bin/nightshift-cron.sh` every night at 03:00 local
