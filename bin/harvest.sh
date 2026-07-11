@@ -39,10 +39,10 @@ SCHEMA_VERSION=2
 
 declare -a REPO_PATHS=() REPO_BASES=()
 load_rulebook() {
-  local tag a b c
-  while IFS=$'\t' read -r tag a b c; do
+  local tag a b c d e
+  while IFS=$'\t' read -r tag a b c d e; do
     case "$tag" in
-      repo) REPO_PATHS+=("$a"); REPO_BASES+=("$c") ;;   # a=path b=mode c=base
+      repo) REPO_PATHS+=("${a#path=}"); REPO_BASES+=("${c#base=}") ;;
     esac
   done < <(python3 "$NIGHTSHIFT_HOME/lib/parse_rulebook.py" "$RULEBOOK")
 }

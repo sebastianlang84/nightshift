@@ -50,7 +50,7 @@ load_rulebook() {
       max_files)             MAX_FILES="$a" ;;
       max_lines)             MAX_LINES="$a" ;;
       dimension)             DIMENSIONS+=("$a") ;;
-      repo)                  REPO_PATHS+=("$a"); REPO_MODES+=("$b"); REPO_BASES+=("$c"); REPO_FINDINGS+=("$d"); REPO_DIMS+=("$e") ;;
+      repo)                  REPO_PATHS+=("${a#path=}"); REPO_MODES+=("${b#mode=}"); REPO_BASES+=("${c#base=}"); REPO_FINDINGS+=("${d#findings=}"); REPO_DIMS+=("${e#dimensions=}") ;;
     esac
   done < <(python3 "$NIGHTSHIFT_HOME/lib/parse_rulebook.py" "$RULEBOOK")
   MAX_FINDINGS="${MAX_FINDINGS:-1}"
@@ -542,7 +542,7 @@ open_pr() { # repo wt branch item_dir -> echoes PR url ("" if none)
 
 # ---------------------------------------------------------------- finalize ----
 finalize() { # repo worktree item_dir [seq] -> echoes branch name
-  local repo="$1" wt="$2" id="$3" seq="${4:-0}" fp type dim slug branch sha
+  local repo="$1" wt="$2" id="$3" seq="${4:-0}" fp type dim slug branch sha summary verif
   fp=$(jq -r '.fingerprint' "$id/finding.json")
   type=$(jq -r '.type // "change"' "$id/finding.json")   # default so the branch slug never reads "null"
   dim=$(jq -r '.dimension // ""' "$id/finding.json")     # the review lens (ADR 0010), leads the slug
@@ -560,10 +560,19 @@ finalize() { # repo worktree item_dir [seq] -> echoes branch name
       commit -q -m "nightshift: $(jq -r '.summary' "$id/finding.json")
 
 $(cat "$id/worknote.md")"
-  # Layer 1 hook active for THIS push only (-c), never persisted to the repo config.
-  git -c core.hooksPath="$HOOKS_DIR" -C "$wt" push -q -u origin "$branch"
   sha=$(git -C "$wt" rev-parse HEAD)
-  local pr_url proof verif
+  summary=$(jq -r '.summary // ""' "$id/finding.json")
+  verif=$(jq -r '.verifiability // ""' "$id/finding.json" 2>/dev/null || true)
+  # Layer 1 hook active for THIS push only (-c), never persisted to the repo config.
+  if ! git -c core.hooksPath="$HOOKS_DIR" -C "$wt" push -q -u origin "$branch"; then
+    log "  $(basename "$repo"): push failed — not shipped: $branch"
+    ledger_append "$(basename "$id")" "$repo" "$fp" "$branch" "$sha" "push-failed" "$summary" "" "" "$verif" "$dim"
+    git -C "$wt" checkout -q --detach >/dev/null 2>&1 || true
+    git -C "$repo" branch -q -D "$branch" >/dev/null 2>&1 \
+      || log "  $(basename "$repo"): cleanup warning — local branch remains: $branch"
+    return 1
+  fi
+  local pr_url proof
   pr_url=$(open_pr "$repo" "$wt" "$branch" "$id")
   proof=$(jq -r '.proof // ""' "$id/review.md" 2>/dev/null || true)
   verif=$(jq -r '.verifiability // ""' "$id/finding.json" 2>/dev/null || true)
@@ -649,7 +658,7 @@ write_digest() { # made open status
       echo
       echo "## Considered but not shipped"
       [ -f "$LEDGER" ] && jq -r --arg n "$NIGHT" \
-        'select(.night==$n and (.outcome=="abandoned" or .outcome=="deferred")) | "- " + .repo + " — " + .outcome + ": " + (.summary // .fingerprint)' \
+        'select(.night==$n and (.outcome=="abandoned" or .outcome=="deferred" or .outcome=="push-failed")) | "- " + .repo + " — " + .outcome + ": " + (.summary // .fingerprint)' \
         "$LEDGER" 2>/dev/null || true
     fi
   } > "$f"
@@ -804,9 +813,10 @@ main() {
       done
       b=""
       if [ "$verdict" = ship ]; then
-        b=$(finalize "$repo" "$wt" "$fd" "$made")   # $made is the per-run monotonic branch-uniqueness seq
-        made=$((made + 1)); progress=1
-        log "  $(basename "$repo"): shipped -> $b"
+        if b=$(finalize "$repo" "$wt" "$fd" "$made"); then
+          made=$((made + 1)); progress=1
+          log "  $(basename "$repo"): shipped -> $b"
+        fi
       else
         ledger_append "$(basename "$fd")" "$repo" "$fp" "" "" "abandoned" "$summary" "" "" "" "$dim"
         log "  $(basename "$repo"): abandoned ($fp)"

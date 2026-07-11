@@ -61,7 +61,7 @@ NIGHTSHIFT.md (optional)           # local "don't touch" rules, robots.txt-style
 | **Explore** | target repo · NIGHTSHIFT.md · "already done here" (derived from ledger) | `finding.json` |
 | **Fix** | `finding.json` · target files | branch + commits · `worknote.md` |
 | **Review** | `finding.json` · `worknote.md` · the diff | `review.md` |
-| **Finalize** (Brain) | `review.md` | push **or** append `ledger.jsonl` with `outcome: abandoned\|deferred` + fingerprint |
+| **Finalize** (Brain) | `review.md` | successful push → `shipped`; failed push → retryable `push-failed`; rejected work → `abandoned\|deferred` |
 | **Digest** (end of night) | tonight's `ledger.jsonl` entries · all `review.md` | `digests/<date>.md` |
 | **Human** (morning) | `digests/<date>.md`, then the branches | `rulebook.yaml` (governance only) |
 
@@ -83,6 +83,9 @@ v1 records but does not auto-act on them (distinct from the deferred §5 value-l
   agent-authored free-prose with no provenance. Deferred ideas are instead `ledger.jsonl` rows with
   `outcome: deferred` (+ fingerprint), surfaced in a digest section. Same need, no confabulation
   surface, no hand-maintained parallel file.
+- **A push is shipped only after remote success.** A failed push records `outcome: push-failed`
+  with the attempted branch and commit SHA, appears in the digest, and remains eligible for retry;
+  it never enters the shipped/dedup set.
 - **`runs/` is ephemeral working state**, archived (not pruned) after the night for audit value;
   it is never a source of truth — `ledger.jsonl` is.
 - **This mirrors the project's own doc philosophy** — `CONTEXT.md` = canonical current state,
