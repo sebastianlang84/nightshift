@@ -26,6 +26,8 @@ Then look at `digests/<date>.md`, `state/ledger.jsonl`, `state/runs.jsonl`, and 
   most-recent-commit churn) → Explore → Fix⟷Review
   (capped) → Finalize (push a `nightshift/*` branch) → append ledger + telemetry → digest.
 - **Branch isolation:** the fix lands on `nightshift/*`; `main` is untouched.
+- **Push truthfulness:** `shipped` is written only after the remote accepts the branch. Failure
+  records a retryable `push-failed` outcome, cleans the local branch, and appears in the digest.
 - **Worktree isolation:** each item runs in a throwaway `git worktree`, never the repo's live
   checkout — so nightshift never touches your branch/state, and any misstep (incl. non-git shell,
   §2b) is confined to a dir deleted afterwards. The confinement hook is activated per-push via
