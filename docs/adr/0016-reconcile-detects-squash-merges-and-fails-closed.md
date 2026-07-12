@@ -71,6 +71,28 @@ and an authoritative `gh` MERGED (rung 3) both count as objective merges and may
 held or previously-recorded false verdict, exactly as `sha-in-base` does. This is what lets the
 three false `dropped` rows above heal to `merged` on the next harvest.
 
+### Orphan sweep
+
+reconcile only ever sees branches the ledger already recorded as `shipped`. A `<prefix>*` branch
+that exists on origin with **no** ledger row is therefore invisible to it forever — yet it still
+counts against the open-branch cap (`open_branch_count` counts live refs, not ledger rows), so a
+single orphan can wedge the whole pipeline into FULL STOP. This happens when a shipped record is
+lost: a run launched with an isolated `NIGHTSHIFT_STATE_DIR` whose `git push` still reached the
+real origin (observed 2026-07-12), or a crash between `finalize`'s push and its `ledger_append`.
+
+harvest therefore **sweeps** each rulebook repo (`git ls-remote --heads origin "<prefix>*"`) and
+reports every branch absent from the ledger's known set (shipped ∪ any verdict). It is
+**report-only**: the operator adopts the branch (review + merge, which a later reconcile records)
+or deletes it on origin. The sweep is strictly read-only — `ls-remote` only, no push, no ref
+mutation — so it does not touch the branch-only confinement (ADR 0004, hook-spec).
+
+Adoption is deliberately *not* automated: synthesising a `shipped` row would fabricate the
+`dimension`/`type`/`proof` metadata the merge-rate scoreboard depends on, corrupting the very
+signal this ADR restores. A `finalize` reorder (write `shipped` before opening the PR) to avoid
+*producing* crash-window orphans was considered and rejected: preserving `pr_url` would split it
+across `shipped` + `pr-opened` rows rippling into harvest and the digest — disproportionate to a
+sub-second window the sweep already recovers on the next run.
+
 ## Consequences
 
 - The three false `dropped` verdicts self-heal to `merged` on the next reconcile; the merge-rate
