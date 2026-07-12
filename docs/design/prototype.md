@@ -61,6 +61,15 @@ Stages are invoked through `run_agent(stage, workdir, item_dir)`, which dispatch
   no model is committed as the default. Codex can execute sandboxed commands during Fix, unlike the
   Claude adapter's no-Bash profile. The Runner still owns branch, commit, and push.
 
+**Verification debt — real-model prompt behavior.** The Runner logic (recon caching, yield-weighted
+dimension selection, the empty-scope ledger row and its digest suggestions — ADR 0010/0015) is
+covered end-to-end only in **mock** mode, which drives the real branch/worktree/git/ledger path but
+fakes the model boundary. The *prompt-level* v2 behavior against a live model is unproven: whether a
+real Recon calibrates `yield` sensibly, and whether a real Explore honestly returns
+`out_of_scope`/`in_scope_no_findings` under the confabulation guard rather than manufacturing a
+finding. A single supervised real-model night against a throwaway sandbox repo would close this;
+until then, treat live-model lens quality as observed-in-mock-only.
+
 ## Files
 
 | Path | Role |
