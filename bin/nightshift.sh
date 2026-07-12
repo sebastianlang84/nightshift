@@ -453,9 +453,13 @@ last_dim_epoch() { # repo dim -> epoch of the last WORK-ITEM ledger row for this
   date -d "$iso" +%s 2>/dev/null || echo 0
 }
 
+recon_cache_path() { # repo -> cache path; basename for readability + a path hash so two repos
+  # with the SAME basename (e.g. /a/api and /b/api) never share (and cross-contaminate) a cache.
+  printf '%s/%s-%s.json' "$RECON_DIR" "$(basename "$1")" "$(printf '%s' "$1" | sha1sum | cut -c1-8)"
+}
 recon_applicable() { # repo dim -> 0 if applicable (or unknown/no-recon), 1 only if recon says NOT applicable
   local repo="$1" dim="$2" cache val
-  cache="$RECON_DIR/$(basename "$repo").json"
+  cache="$(recon_cache_path "$repo")"
   [ -f "$cache" ] || return 0   # no recon cache → never starve; treat as applicable
   val=$(jq -r --arg d "$dim" '.dimensions[$d].applicable // true' "$cache" 2>/dev/null || echo true)
   [ "$val" = false ] && return 1 || return 0
@@ -480,7 +484,7 @@ select_dimension() { # repo -> the least-recently-serviced APPLICABLE dimension 
 ensure_recon() { # repo -> refresh the recon cache if missing / HEAD changed / older than ttl_days (ADR 0010)
   [ "${RECON_ENABLED:-true}" != false ] || return 0
   local repo="$1" cache head chead cts cepoch now ttl id wt base
-  cache="$RECON_DIR/$(basename "$repo").json"; mkdir -p "$RECON_DIR"
+  cache="$(recon_cache_path "$repo")"; mkdir -p "$RECON_DIR"
   head=$(git -C "$repo" rev-parse HEAD 2>/dev/null || echo "")
   if [ -f "$cache" ]; then
     chead=$(jq -r '.head // ""' "$cache" 2>/dev/null || echo "")
@@ -801,7 +805,7 @@ main() {
     ensure_recon "$repo"
     dim=$(select_dimension "$repo")
     export NIGHTSHIFT_DIMENSION="$dim"
-    NIGHTSHIFT_RECON_NOTES="$(jq -r '.notes // ""' "$RECON_DIR/$(basename "$repo").json" 2>/dev/null || true)"
+    NIGHTSHIFT_RECON_NOTES="$(jq -r '.notes // ""' "$(recon_cache_path "$repo")" 2>/dev/null || true)"
     export NIGHTSHIFT_RECON_NOTES
     log "  $(basename "$repo") [$mode]: lens=${dim:-none} · budget=$rfind"
     run_agent explore "$wt" "$id" || true
