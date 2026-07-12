@@ -36,6 +36,7 @@ LEDGER="${LEDGER:-$STATE_DIR/ledger.jsonl}"
 RULEBOOK="${RULEBOOK:-$NIGHTSHIFT_HOME/rulebook.yaml}"
 [ -f "$RULEBOOK" ] || RULEBOOK="$NIGHTSHIFT_HOME/rulebook.example.yaml"
 SCHEMA_VERSION=2
+BRANCH_PREFIX="nightshift/"   # overridden by the rulebook's branch_prefix; the orphan sweep needs it
 
 declare -a REPO_PATHS=() REPO_BASES=()
 load_rulebook() {
@@ -46,7 +47,8 @@ load_rulebook() {
     || { echo "rulebook parse failed ($RULEBOOK) — aborting harvest" >&2; exit 1; }
   while IFS=$'\t' read -r tag a b c d e; do
     case "$tag" in
-      repo) REPO_PATHS+=("${a#path=}"); REPO_BASES+=("${c#base=}") ;;
+      repo)   REPO_PATHS+=("${a#path=}"); REPO_BASES+=("${c#base=}") ;;
+      prefix) [ -n "$a" ] && BRANCH_PREFIX="$a" ;;
     esac
   done <<< "$parsed"
 }
@@ -138,6 +140,31 @@ reconcile() { # repo base branch sha [pr_url]
   [ "$rc" -ne 0 ] && { echo skip; return; }
   [ -n "$refs" ] && { echo open; return; }
   echo dropped
+}
+
+# Orphan sweep (ADR 0016): a <prefix>* branch on origin that the ledger has no row for can never
+# receive a verdict (reconcile iterates ledger `shipped` rows), yet it still occupies an
+# open-branch cap slot. Such a branch means a shipped record was lost — an isolated-state run
+# that pushed to the real origin, or a crash between push and ledger_append. Report them so they
+# are never invisible; the operator adopts (review + merge) or deletes on origin. Read-only.
+sweep_orphans() {
+  local i repo known n=0 sha ref b
+  known="$(jq -rs '[.[]|select((.branch//"")!="")|.branch]|unique|.[]' "$LEDGER" 2>/dev/null || true)"
+  for i in "${!REPO_PATHS[@]}"; do
+    repo="${REPO_PATHS[$i]}"
+    [ "${FETCHED[$repo]:-}" = fail ] && continue   # unreachable — don't guess (fail closed)
+    [ -d "$repo/.git" ] || continue
+    while read -r sha ref; do
+      [ -n "$ref" ] || continue
+      b="${ref#refs/heads/}"
+      grep -qxF "$b" <<<"$known" && continue
+      [ "$n" -eq 0 ] && printf 'orphan %s* branches on origin (pushed, no ledger row):\n' "$BRANCH_PREFIX"
+      printf '  %-28s %s\n' "$(basename "$repo")" "$b"
+      n=$((n + 1))
+    done < <(git -C "$repo" ls-remote --heads origin "${BRANCH_PREFIX}*" 2>/dev/null || true)
+  done
+  [ "$n" -gt 0 ] && printf '  -> %d orphan(s): each holds a cap slot. Adopt (review + merge) or delete on origin.\n' "$n"
+  return 0
 }
 
 # ---------------------------------------------------------- manual verdict ----
@@ -257,3 +284,4 @@ if [ "$DRYRUN" -eq 1 ]; then
 else
   echo "$changed verdict event(s) appended (* = changed since last harvest)."
 fi
+sweep_orphans
