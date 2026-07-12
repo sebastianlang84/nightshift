@@ -21,6 +21,7 @@ per repo from a reconnaissance survey and least-recently-serviced coverage. See
 
 Start here:
 - [`CONTEXT.md`](CONTEXT.md) — what nightshift is, its architecture, and the canonical vocabulary.
+- [`docs/deployment.md`](docs/deployment.md) — operator guide: bootstrap, updates, state, branch-only operation.
 - [`todo.md`](todo.md) — active work, ordered by priority.
 - [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) — unresolved architectural choices only.
 - [`docs/adr/`](docs/adr/) — architecture decisions, one file per decision.
