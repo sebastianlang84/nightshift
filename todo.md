@@ -12,25 +12,10 @@ resolved and removed: fail-closed rulebook parsing, configured-base PRs, recon n
 checkout, collision-safe recon caches and work-item IDs, empty-Explore rotation, Fix-stage write
 confinement (R8), the `surface` route + bounded findings-only loops, hardened recon cache writes,
 digest merge-rate breakdowns, the deployment guide (ADR 0012), independent branch review, the
-wall-clock spend budget (ADR 0013), and stable finding identity + lifecycle (ADR 0014).
+wall-clock spend budget (ADR 0013), stable finding identity + lifecycle (ADR 0014), and recon
+yield-weighting / never-exclude with the empty-scope feedback loop (ADR 0015).
 
-## Implement ADR 0015 — Recon reprioritizes, never excludes
-
-Decision recorded ([ADR 0015](docs/adr/0015-recon-reprioritizes-never-excludes.md)); code still
-emits `applicable`. Deltas:
-
-- `prompts/recon.md` + `mock_recon`: emit `yield: high|normal|low` instead of `applicable`; drop the
-  `correctness/docs/craft` always-applicable special-case.
-- `select_dimension()`: replace `recon_applicable()` skip with weighted-staleness `argmax` —
-  `score = (now − last_epoch) · eff_w`; weights `2.0/1.0/0.2` clamp `[0.2,2.0]`; evidence floor at
-  `1.0`; cadence-relative overdue ceiling `2.5 · D · median_gap(R)` (60d bootstrap) boosts to `2.0`.
-- Evidence override: derive from ledger `shipped`/human-confirmed rows newer than the recon-cache
-  `generated_epoch`; write nothing to the cache.
-- Empty Explore passes emit a `{dimension, scope}` ledger row (`in_scope_no_findings` |
-  `out_of_scope`); confabulation guard in `explore.md` makes "nothing in scope" a first-class return.
-- Digest: 3 consecutive `out_of_scope` for a (repo,dim) → suggest a rulebook exclusion; flag
-  rulebook/reality contradictions.
-- Extend the ADR 0010 mock test to cover recon→yield→weighted-rotation→empty-scope→digest end-to-end.
+_No active implementation work at present._
 
 ## Conditional / deferred
 

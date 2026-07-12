@@ -116,7 +116,18 @@ ranked best-first:
     "disposition": "fix|surface", "summary": "<one line>",
     "rank": 1, "confidence": 0.0}
  ]}
-If nothing clears the bar: {"found": false, "findings": []}
+If nothing clears the bar, say so honestly and declare whether tonight's lens even applies here:
+{"found": false, "findings": [], "scope": "in_scope_no_findings"}
+  — `in_scope_no_findings`: tonight's lens IS relevant to this repo, you looked, nothing cleared the
+    bar this pass. This is the default and by far the common case.
+  — `out_of_scope`: this repo has no surface for tonight's lens at all (e.g. a `ui-ux` pass on a repo
+    with no frontend, a `perf` pass on a config-only repo). Return this ONLY when the lens is
+    categorically inapplicable, not merely quiet.
+
+Reporting nothing is a correct, valued outcome. NEVER manufacture, inflate, or lower your VALUE bar to
+produce a finding just because tonight's lens was assigned — a fabricated or padded finding erodes
+trust in the whole digest far more than an honest empty pass. If the lens does not fit this repo, that
+is signal, not failure: return `out_of_scope` and move on.
 
 The Runner derives a STABLE identity from `files` (or `file`), `type`, and `symbol` — NOT from your
 prose or line numbers, so those may change freely between runs without creating a duplicate. Always

@@ -1,7 +1,12 @@
 # ADR 0010 — review dimensions, recon, and coverage rotation
 
-- Status: accepted
+- Status: accepted (dimension-selection semantics superseded by [ADR 0015](0015-recon-reprioritizes-never-excludes.md))
 - Date: 2026-07-11
+
+> **Note (ADR 0015):** the `applicable:true/false` recon output and the `argmin`-over-applicable
+> selection described below are superseded — recon now emits `yield` weights and never excludes; the
+> "should recon only ever raise priority?" open question at the end is resolved (yes). The recon
+> *stage*, caching, dimensions, and ledger-as-memory are unchanged.
 
 ## Context
 

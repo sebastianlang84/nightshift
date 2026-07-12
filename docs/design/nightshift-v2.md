@@ -26,8 +26,8 @@ per repo (order: least-recently-serviced first — ADR 0008):
     fix disposition → FRESH worktree from base → fix ⟷ review → finalize → own branch
 ```
 
-Three orthogonal selectors compose: **repo** (LRU, ADR 0008) × **dimension** (LRU over applicable,
-ADR 0010) × **throughput** (open-branch cap, ADR 0004/0005). All derive from the ledger; no new
+Three orthogonal selectors compose: **repo** (LRU, ADR 0008) × **dimension** (weighted staleness
+over recon yield, ADR 0010 + 0015) × **throughput** (open-branch cap, ADR 0004/0005). All derive from the ledger; no new
 persistent state except the disposable recon cache.
 
 ## Components
@@ -105,6 +105,6 @@ Each phase was verified end-to-end in an isolated mock sandbox.
    Lever: a `--model` downgrade for recon (a cheap survey).
 5. **Cold-start dimension priority.** The `dimensions:` list order decides the first lens every
    repo gets; currently `correctness` then `security`.
-6. **Recon exclusion trust.** A wrong `applicable:false` silently starves a dimension; mitigated by
-   per-repo overrides, the never-starve fallback, and `—` visibility in the matrix. Open: should
-   recon only ever raise priority, never exclude?
+6. **Recon exclusion trust.** RESOLVED by ADR 0015: recon reprioritizes via yield weights and never
+   excludes. A wrong `low` verdict only slows a lens (finite weight floor → ~10× less often, never
+   never), backstopped by a cadence-relative overdue ceiling; only the human rulebook excludes.

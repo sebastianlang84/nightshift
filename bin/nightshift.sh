@@ -87,11 +87,11 @@ append_run() { # stage agent start dur tokens status item cost
       exit:$status}' >> "$RUNSLOG"
 }
 
-ledger_append() { # item repo fp branch sha outcome [summary] [pr_url] [proof] [verifiability] [dimension] [type] [code_sig]
+ledger_append() { # item repo fp branch sha outcome [summary] [pr_url] [proof] [verifiability] [dimension] [type] [code_sig] [scope]
   jq -nc \
     --arg night "$NIGHT" --arg item "$1" --arg repo "$2" --arg fp "$3" \
     --arg branch "$4" --arg sha "$5" --arg outcome "$6" --arg summary "${7:-}" --arg pr "${8:-}" \
-    --arg proof "${9:-}" --arg verif "${10:-}" --arg dim "${11:-}" --arg type "${12:-}" --arg csig "${13:-}" --arg ts "$(date -Iseconds)" \
+    --arg proof "${9:-}" --arg verif "${10:-}" --arg dim "${11:-}" --arg type "${12:-}" --arg csig "${13:-}" --arg scope "${14:-}" --arg ts "$(date -Iseconds)" \
     '{night:$night,item:$item,repo:$repo,fingerprint:$fp,
       branch:($branch|if .=="" then null else . end),
       sha:($sha|if .=="" then null else . end),
@@ -101,6 +101,7 @@ ledger_append() { # item repo fp branch sha outcome [summary] [pr_url] [proof] [
       dimension:($dim|if .=="" then null else . end),
       type:($type|if .=="" then null else . end),
       code_sig:($csig|if .=="" then null else . end),
+      scope:($scope|if .=="" then null else . end),
       outcome:$outcome,summary:$summary,ts:$ts}' >> "$LEDGER"
 }
 
@@ -337,7 +338,12 @@ mock_explore() { # workdir item_dir — emits the v2 container {found, findings:
       disposition:"frobnicate",verifiability:"static",summary:"unknown disposition must fail closed",
       fingerprint:"WEIRD.md:other:L1-L3",rank:1,confidence:0.8}]')
   fi
-  jq -nc --argjson f "$arr" '{found:($f|length>0),findings:$f}' > "$id/finding.json"
+  # ADR 0015 scope: when nothing is found, declare whether the lens even applies here. Deterministic
+  # trigger — a `NOSCOPE` sentinel file makes the mock return out_of_scope (the "no surface" verdict).
+  local scope=in_scope_no_findings
+  [ -f "$wd/NOSCOPE" ] && scope=out_of_scope
+  jq -nc --argjson f "$arr" --arg scope "$scope" \
+    '{found:($f|length>0),findings:$f} + (if ($f|length>0) then {} else {scope:$scope} end)' > "$id/finding.json"
 }
 mock_fix() { # workdir item_dir — applies the fix for THIS finding (dispatched on .file)
   local wd="$1" id="$2" file
@@ -363,21 +369,23 @@ mock_advise() { # workdir item_dir — deterministic second-opinion from the bra
     jq -nc '{recommendation:"do-not-merge",reason:"Non-trivial change; a human should judge intent."}' > "$id/advice.json"
   fi
 }
-mock_recon() { # workdir item_dir — deterministic applicability straight from recon_signals.json
+mock_recon() { # workdir item_dir — deterministic yield straight from recon_signals.json (ADR 0015)
   local _wd="$1" id="$2" sig
   sig=$(cat "$id/signals.json" 2>/dev/null || echo '{}')
+  # Recon reprioritizes, never excludes (ADR 0015): every dimension gets a yield label, never
+  # dropped. high = strong signal the lens pays off here; low = little signal, still rotated in.
   printf '%s' "$sig" | jq -c '. as $s | {
     dimensions: {
-      correctness:{applicable:true, hint:"any code path"},
-      security:   {applicable:true, hint:"trust boundaries"},
-      infra:      {applicable:(($s.has_compose//false) or ($s.has_dockerfile//false) or ($s.has_ci//false) or ($s.has_iac//false)), hint:"compose/docker/ci present"},
-      docs:       {applicable:true, hint:"docs vs code"},
-      tests:      {applicable:($s.has_tests//false), hint:"test dir present"},
-      perf:       {applicable:((($s.languages//[])|length)>0), hint:"code present"},
-      "ui-ux":    {applicable:($s.has_frontend//false), hint:"frontend present"},
-      deps:       {applicable:((($s.lockfiles//[])|length)>0), hint:"lockfiles present"},
-      craft:      {applicable:true, hint:"floor lens"}
-    }, notes:"mock recon (deterministic mapping from filesystem signals)"}' > "$id/recon.json"
+      correctness:{yield:"normal", hint:"any code path"},
+      security:   {yield:"normal", hint:"trust boundaries"},
+      infra:      {yield:(if (($s.has_compose//false) or ($s.has_dockerfile//false) or ($s.has_ci//false) or ($s.has_iac//false)) then "high" else "low" end), hint:"compose/docker/ci present"},
+      docs:       {yield:"normal", hint:"docs vs code"},
+      tests:      {yield:(if ($s.has_tests//false) then "normal" else "low" end), hint:"test dir present"},
+      perf:       {yield:"low", hint:"hot path only if data volume"},
+      "ui-ux":    {yield:(if ($s.has_frontend//false) then "high" else "low" end), hint:"frontend present"},
+      deps:       {yield:(if ((($s.lockfiles//[])|length)>0) then "normal" else "low" end), hint:"lockfiles present"},
+      craft:      {yield:"normal", hint:"floor lens"}
+    }, notes:"mock recon (deterministic yield mapping from filesystem signals)"}' > "$id/recon.json"
 }
 
 # ---- claude adapter (first-party CLI headless, ADR 0003) ----
@@ -564,27 +572,86 @@ recon_cache_path() { # repo -> cache path; basename for readability + a path has
   # with the SAME basename (e.g. /a/api and /b/api) never share (and cross-contaminate) a cache.
   printf '%s/%s-%s.json' "$RECON_DIR" "$(basename "$1")" "$(printf '%s' "$1" | sha1sum | cut -c1-8)"
 }
-recon_applicable() { # repo dim -> 0 if applicable (or unknown/no-recon), 1 only if recon says NOT applicable
-  local repo="$1" dim="$2" cache val
+# --- ADR 0015: recon reprioritizes via yield weights, never excludes ----------
+# Recon can no longer drop a dimension; it only weights it. The finite low-weight floor is the real
+# anti-starvation guarantee (a `low` lens recurs ~DIM_W_HIGH/DIM_W_LOW = 10x less often than a `high`
+# one, never never); the cadence-relative ceiling is a legibility backstop. Fable's 2.0/1.0/0.2
+# weights are scaled ×5 to integers so the whole selection score stays integer arithmetic in bash.
+DIM_W_HIGH=10 DIM_W_NORMAL=5 DIM_W_LOW=1
+
+dim_weight() { # repo dim -> integer yield weight; no cache / unknown / pre-0015 => normal (never drops)
+  local repo="$1" dim="$2" cache y
   cache="$(recon_cache_path "$repo")"
-  [ -f "$cache" ] || return 0   # no recon cache → never starve; treat as applicable
-  val=$(jq -r --arg d "$dim" '.dimensions[$d].applicable // true' "$cache" 2>/dev/null || echo true)
-  [ "$val" = false ] && return 1 || return 0
+  [ -f "$cache" ] || { echo "$DIM_W_NORMAL"; return; }
+  y=$(jq -r --arg d "$dim" '.dimensions[$d].yield // "normal"' "$cache" 2>/dev/null || echo normal)
+  case "$y" in high) echo "$DIM_W_HIGH" ;; low) echo "$DIM_W_LOW" ;; *) echo "$DIM_W_NORMAL" ;; esac
 }
 
-select_dimension() { # repo -> the least-recently-serviced APPLICABLE dimension (rulebook order breaks ties)
-  # Reproduces the operator's "security yesterday on A → docs today on A, security on B" rotation:
-  # argmin of last_dim_epoch over the recon-applicable set; strict `<` scan in priority order means
-  # the earliest-listed dimension wins a tie (so at cold start every repo gets the first-listed lens).
-  local repo="$1" dim best_dim="" best_ep="" ep
-  for dim in $(repo_dimensions "$repo"); do
-    recon_applicable "$repo" "$dim" || continue
-    ep=$(last_dim_epoch "$repo" "$dim")
-    if [ -z "$best_ep" ] || [ "$ep" -lt "$best_ep" ]; then best_ep="$ep"; best_dim="$dim"; fi
+recon_generated_epoch() { # repo -> epoch the recon cache was generated (0 if none)
+  local cache iso; cache="$(recon_cache_path "$1")"
+  [ -f "$cache" ] || { echo 0; return; }
+  iso=$(jq -r '.ts // ""' "$cache" 2>/dev/null || echo "")
+  { [ -n "$iso" ] && date -d "$iso" +%s 2>/dev/null; } || echo 0
+}
+
+evidence_override() { # repo dim -> 0 if a SHIPPED finding for (repo,dim) postdates recon's last look.
+  # A shipped finding (passed review) newer than recon's judgment proves a `low` verdict stale, so the
+  # weight floors at normal. Anchored to recon's generation time, it self-clears once recon re-runs
+  # with that finding in history. Only `shipped` counts — a later-dropped false positive must not pin
+  # the weight up. Derived from the durable ledger; NOTHING is written to the disposable recon cache.
+  local repo="$1" dim="$2" gen ts e
+  [ -f "$LEDGER" ] || return 1
+  gen=$(recon_generated_epoch "$repo")
+  while IFS= read -r ts; do
+    [ -n "$ts" ] || continue
+    e=$(date -d "$ts" +%s 2>/dev/null || echo 0)
+    [ "$e" -gt "$gen" ] && return 0
+  done < <(jq -r --arg r "$repo" --arg d "$dim" \
+            'select(.repo==$r and .dimension==$d and .outcome=="shipped") | .ts' "$LEDGER" 2>/dev/null || true)
+  return 1
+}
+
+median_gap() { # repo D -> median inter-service interval (secs) across the repo's service rows; 60d bootstrap
+  # "Overdue" is judged RELATIVE to how often this repo actually gets attention, not absolute calendar
+  # age — else a slow-cadence repo would trip an absolute ceiling on every lens every run, neutralizing
+  # the weights. Until the repo has >= D recorded services, bootstrap with an absolute 60d.
+  local repo="$1" D="$2" boot=$((60*86400)) ts e n; local -a eps=()
+  [ -f "$LEDGER" ] || { echo "$boot"; return; }
+  while IFS= read -r ts; do
+    [ -n "$ts" ] || continue
+    e=$(date -d "$ts" +%s 2>/dev/null || echo 0); [ "$e" -gt 0 ] && eps+=("$e")
+  done < <(jq -r --arg r "$repo" \
+            'select(.repo==$r and (.outcome=="finding" or .outcome=="shipped" or .outcome=="abandoned" or .outcome=="empty")) | .ts' \
+            "$LEDGER" 2>/dev/null || true)
+  n=${#eps[@]}
+  [ "$n" -lt "$D" ] && { echo "$boot"; return; }
+  printf '%s\n' "${eps[@]}" | sort -n | awk 'NR>1{print $1-p} {p=$1}' | sort -n \
+    | awk -v boot="$boot" '{a[NR]=$1} END{ if(NR==0){print boot;exit}
+        m=(NR%2)?a[(NR+1)/2]:int((a[int(NR/2)]+a[int(NR/2)+1])/2); if(m<=0)m=boot; print m }'
+}
+
+dim_ceiling() { # repo D -> overdue threshold in secs = 2.5 * D * median_gap  (~2.5 realized rotations)
+  local repo="$1" D="$2" gap; gap=$(median_gap "$repo" "$D"); echo $(( 5 * D * gap / 2 ))
+}
+
+select_dimension() { # repo -> highest weighted-staleness dimension (ADR 0015)
+  # score = (now - last_epoch) * eff_weight. eff_weight = recon yield weight, floored to normal by
+  # ledger evidence, boosted to high when overdue past the cadence-relative ceiling. Strict `>` scan in
+  # rulebook order means the earliest-listed dimension wins a tie (cold-start / all-overdue => flat
+  # rulebook-order rotation, which is the correct behavior for a starved repo). No dimension is ever
+  # skipped — recon reprioritizes, it never excludes; only the human rulebook narrows the candidate set.
+  local repo="$1" now dim w ep age score best_dim="" best_score=-1 ceil
+  local -a dd; read -ra dd <<< "$(repo_dimensions "$repo")"
+  local D=${#dd[@]}; [ "$D" -gt 0 ] || { echo ""; return; }
+  now=$(date +%s); ceil=$(dim_ceiling "$repo" "$D")
+  for dim in "${dd[@]}"; do
+    w=$(dim_weight "$repo" "$dim")
+    { evidence_override "$repo" "$dim" && [ "$w" -lt "$DIM_W_NORMAL" ]; } && w=$DIM_W_NORMAL
+    ep=$(last_dim_epoch "$repo" "$dim"); age=$(( now - ep )); [ "$age" -lt 0 ] && age=0
+    [ "$age" -gt "$ceil" ] && w=$DIM_W_HIGH
+    score=$(( age * w ))
+    if [ "$score" -gt "$best_score" ]; then best_score=$score; best_dim="$dim"; fi
   done
-  # If recon excluded everything (shouldn't happen — correctness/docs/craft are always applicable),
-  # fall back to the first configured dimension so a repo is never fully starved.
-  if [ -z "$best_dim" ]; then local -a dd; read -ra dd <<< "$(repo_dimensions "$repo")"; best_dim="${dd[0]:-}"; fi
   echo "$best_dim"
 }
 
@@ -869,6 +936,35 @@ write_digest() { # made open status [advice]
         done
       }
     fi
+    # ADR 0015: rulebook-exclusion suggestions. 3 consecutive out-of-scope passes for a (repo,dim) —
+    # a full review through the lens that keeps concluding it has no surface here — is strong evidence
+    # recon's low verdict is right. Recon can't exclude (it only reprioritizes); the human owns the
+    # rulebook, so surface a suggestion rather than acting. Driven by Explore's own conclusion, not by
+    # recon repeating itself (which would be a circular doom loop).
+    [ -f "$LEDGER" ] && jq -rs '
+      [.[] | select(.dimension!=null and (.outcome=="empty" or .outcome=="finding" or .outcome=="shipped" or .outcome=="abandoned"))]
+      | group_by([.repo,.dimension])
+      | map(sort_by(.ts) | .[-3:])
+      | map(select(length==3 and all(.[]; .outcome=="empty" and .scope=="out_of_scope")))
+      | if length==0 then empty else
+          "\n## Suggested rulebook exclusions (ADR 0015)\n"
+          + (map("- `\(.[0].repo)` × `\(.[0].dimension)` — 3 consecutive out-of-scope passes; consider dropping this lens for this repo in rulebook.yaml `dimensions:`") | join("\n"))
+        end' "$LEDGER" 2>/dev/null || true
+    # ADR 0015: rulebook/recon contradictions. A lens the human narrowed OUT of a repo's configured
+    # set that recon still sees signal for — a hand-exclusion never re-evaluates on its own, so flag it.
+    if [ "${#REPO_PATHS[@]}" -gt 0 ]; then
+      local contra="" rp cfg d y cache
+      for rp in "${REPO_PATHS[@]}"; do
+        cache="$(recon_cache_path "$rp")"; [ -f "$cache" ] || continue
+        cfg=" $(repo_dimensions "$rp") "
+        for d in "${DIMENSIONS[@]}"; do
+          case "$cfg" in *" $d "*) continue ;; esac
+          y=$(jq -r --arg d "$d" '.dimensions[$d].yield // "low"' "$cache" 2>/dev/null || echo low)
+          case "$y" in high|normal) contra+="- \`$(basename "$rp")\` excludes \`$d\`, but recon rates it $y-yield here"$'\n' ;; esac
+        done
+      done
+      [ -n "$contra" ] && printf '\n## Rulebook/recon contradictions (ADR 0015)\n%s' "$contra"
+    fi
     # Per-dimension merge-rate (ADR 0010 Phase 4): the tuning signal — which lenses produce findings
     # humans actually merge. Join the latest verdict per branch back to the shipped row's dimension.
     [ -f "$LEDGER" ] && jq -rs '
@@ -1045,7 +1141,15 @@ main() {
     n_find=$(printf '%s' "$farr" | jq 'length' 2>/dev/null || echo 0)
     [ "$n_find" -gt "$rfind" ] && n_find="$rfind"
     if [ "$n_find" -le 0 ]; then
-      log "  $(basename "$repo") [$mode]: nothing worth doing"; continue
+      # ADR 0015: an empty pass logs a {dimension, scope} ledger row (the scan marker already advanced
+      # rotation above). scope = the model's first-class "nothing here" verdict: `out_of_scope` (this
+      # lens has no surface in this repo — the confabulation-guard's honest return) vs the conservative
+      # default `in_scope_no_findings` (lens applies, just clean this pass). Only out_of_scope, repeated,
+      # feeds the digest's rulebook-exclusion suggestion, so we never up-rate an unstated verdict.
+      scope=$(jq -r '.scope // "in_scope_no_findings"' "$id/finding.json" 2>/dev/null || echo in_scope_no_findings)
+      case "$scope" in out_of_scope|in_scope_no_findings) ;; *) scope=in_scope_no_findings ;; esac
+      [ -n "$dim" ] && ledger_append "$(basename "$id")" "$repo" "" "" "" "empty" "" "" "" "" "$dim" "" "" "$scope"
+      log "  $(basename "$repo") [$mode]: nothing worth doing (scope=$scope)"; continue
     fi
 
     for (( k=0; k<n_find; k++ )); do
