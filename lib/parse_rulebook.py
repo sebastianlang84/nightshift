@@ -86,7 +86,14 @@ def main(path: str) -> None:
     print(f"max_run_minutes\t{mrm}")
     # Findings emitted per repo per pass. Default 1 keeps a rulebook that omits the key at the
     # pre-v2 single-finding behavior; the live rulebook sets it explicitly (ADR 0011).
-    print(f"max_findings_per_item\t{limits.get('max_findings_per_item', '1')}")
+    # A hand-set 0 forces n_find=0 in the Runner (MAX_FINDINGS=0 → repo_findings 0 → the
+    # `n_find -le 0` guard), so every repo without a per-repo override silently no-ops; a
+    # non-numeric value detonates later in bash integer arithmetic. Require a positive
+    # integer so the misconfig fails loudly, matching every sibling limit above.
+    mfp = limits.get("max_findings_per_item", "1")
+    if not mfp.isdecimal() or int(mfp) < 1:
+        raise SystemExit("limits.max_findings_per_item must be a positive integer")
+    print(f"max_findings_per_item\t{mfp}")
     # Recon stage: on by default; cache invalidated on HEAD change or after ttl_days.
     print(f"recon_enabled\t{recon.get('enabled', 'true')}")
     # A malformed ttl_days silently became 0 in bash arithmetic → the cache was never fresh →
