@@ -816,7 +816,7 @@ main() {
   fi
   log "agent=$NIGHTSHIFT_AGENT prefix=$BRANCH_PREFIX · cap: max $MAX_OPEN unmerged ${BRANCH_PREFIX} branches · run ceiling $MAX_RUN_BRANCHES · fix iters $MAX_FIX_ITER"
 
-  local made=0 considered=0 findings=0 repo mode cfgbase id fp fnj iter verdict wt base b summary open pass=0 progress stop_reason=ok disp rfind farr n_find k fd dim
+  local made=0 considered=0 findings=0 repo mode cfgbase id fp fnj iter verdict wt base b summary open pass=0 progress ship_progress stop_reason=ok disp rfind farr n_find k fd dim
   # No per-night production cap. The ONLY cap is the count of OPEN (unmerged) nightshift/* branches:
   # work continues while fewer than max_open_branches are unmerged; merging/closing frees slots and
   # work resumes; when merging stops it fills to the cap and stops. "All night" continuous operation
@@ -829,7 +829,10 @@ main() {
       stop_reason=backpressure; break
     fi
     pass=$((pass + 1))
-    progress=0
+    # `progress` = anything happened this pass (incl. surfaced findings); `ship_progress` = a branch
+    # was shipped. Only shipping keeps the multi-pass loop alive: shipped work is bounded by the
+    # branch caps, whereas a nondeterministic Findings-only repo could surface new findings forever.
+    progress=0; ship_progress=0
   while IFS=$'\t' read -r repo mode cfgbase; do
     [ -n "$repo" ] || continue
     open=$(open_branch_count)
@@ -955,7 +958,7 @@ main() {
       b=""
       if [ "$verdict" = ship ]; then
         if b=$(finalize "$repo" "$wt" "$fd" "$made" "$base"); then
-          made=$((made + 1)); progress=1
+          made=$((made + 1)); progress=1; ship_progress=1
           log "  $(basename "$repo"): shipped -> $b"
         fi
       else
@@ -967,7 +970,17 @@ main() {
     done
     [ "$stop_reason" = backpressure ] && break
   done < <(select_order)
-    [ "$progress" -eq 0 ] && { log "pass $pass: no new shippable work — stop"; break; }
+    # Gate on SHIPPABLE progress. Findings surface once (they dedup/latch), so a pass that only
+    # surfaced findings must not spin the loop — else a nondeterministic Findings-only fleet never
+    # halts. Always emit an explicit stop reason.
+    if [ "$ship_progress" -eq 0 ]; then
+      if [ "$progress" -ne 0 ]; then
+        log "pass $pass: only surfaced findings, no shippable work — stop (findings don't keep the loop alive)"
+      else
+        log "pass $pass: no new work — stop"
+      fi
+      break
+    fi
   done
 
   open=$(open_branch_count)
