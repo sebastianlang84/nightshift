@@ -19,6 +19,10 @@ limits:
   max_fix_iterations: 3          # HARD cap on Fix<->Review round-trips per finding before abandon
   max_files_per_change: 15       # SOFT — guidance to the agent, not a hard reject
   max_lines_per_change: 400      # SOFT — a bigger change is fine if it's one coherent improvement
+  # max_run_minutes: 240         # OPTIONAL wall-clock budget for the whole night (ADR 0013). Checked
+                                 # before each pass and each fix: a read-only stage in flight finishes
+                                 # but no new branch starts once spent; the digest shows the stop.
+                                 # Omit = no time cap. Env override (seconds): NIGHTSHIFT_MAX_RUN_SECONDS.
 
 recon:                           # reconnaissance stage (ADR 0010): surveys each repo (docs/, compose,
   enabled: true                  # frontend, tests, CI …) and narrows which dimensions apply to it.

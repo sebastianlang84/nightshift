@@ -58,6 +58,7 @@ load_rulebook() {
       recon_ttl_days)        RECON_TTL_DAYS="$a" ;;
       max_branches_per_run)  rb_run_branches="$a" ;;
       max_fix_iterations)    MAX_FIX_ITER="$a" ;;
+      max_run_minutes)       RB_MAX_RUN_MINUTES="$a" ;;
       max_files)             MAX_FILES="$a" ;;
       max_lines)             MAX_LINES="$a" ;;
       dimension)             DIMENSIONS+=("$a") ;;
@@ -786,6 +787,7 @@ write_digest() { # made open status [advice]
     local fcount=0
     [ -f "$LEDGER" ] && fcount=$(jq -s --arg n "$NIGHT" '[.[]|select(.night==$n and .outcome=="finding")]|length' "$LEDGER" 2>/dev/null || echo 0)
     echo "- agent: \`$NIGHTSHIFT_AGENT\` · shipped this run: ${made} · surfaced (findings): ${fcount} · open (unmerged): ${open}/${MAX_OPEN} (cap)"
+    [ "$status" = budget ] && echo "- **Stopped: time budget exhausted** (\`${MAX_RUN_SECONDS:-?}s\`) — the night ended on the spend cap, not for lack of work."
     if [ -f "$RUNSLOG" ]; then
       runs=$(grep -c "\"night\":\"$NIGHT\"" "$RUNSLOG" || true)
       dur=$(jq -s --arg n "$NIGHT" '[.[]|select(.night==$n)|.duration_s]|add // 0' "$RUNSLOG")
@@ -882,11 +884,27 @@ write_digest() { # made open status [advice]
   log "digest -> $f"
 }
 
+# --------------------------------------------------------------- spend budget ----
+# Wall-clock is the one budget signal that works identically for both first-party CLIs without a
+# metered API (ADR 0013). Enforced for the whole night: checked before each pass and before each
+# fix, so a read-only stage in flight finishes but no NEW mutation starts once the budget is spent.
+over_budget() { # 0 (true) iff a time budget is set and the run has reached it
+  [ -n "${MAX_RUN_SECONDS:-}" ] || return 1
+  [ "$(( $(date +%s) - ${RUN_START:-0} ))" -ge "$MAX_RUN_SECONDS" ]
+}
+
 # --------------------------------------------------------------------- main ----
 main() {
   load_rulebook
   write_claude_settings
   write_codemap_mcp
+  # Resolve the night's wall-clock budget: env (seconds, also the test hook) wins, else the rulebook's
+  # max_run_minutes, else none. Empty ⇒ no time cap (unchanged behavior).
+  RUN_START=$(date +%s)
+  MAX_RUN_SECONDS="${NIGHTSHIFT_MAX_RUN_SECONDS:-}"
+  if [ -z "$MAX_RUN_SECONDS" ] && [ -n "${RB_MAX_RUN_MINUTES:-}" ]; then
+    MAX_RUN_SECONDS=$(( RB_MAX_RUN_MINUTES * 60 ))
+  fi
   # Harvest first: reconcile prior shipped branches against git reality (merged/
   # dropped) so the morning digest scoreboard is current. Non-fatal — a harvest
   # hiccup must never block the night's work.
@@ -906,6 +924,7 @@ main() {
   # is bounded by this cap, by running out of new work, and by the subscription 5h window.
   while true; do
     [ "$made" -ge "$MAX_RUN_BRANCHES" ] && { log "safety ceiling ($MAX_RUN_BRANCHES) reached — stop"; break; }
+    if over_budget; then log "time budget (${MAX_RUN_SECONDS}s) exhausted — stop"; stop_reason=budget; break; fi
     open=$(open_branch_count)
     if [ "$open" -ge "$MAX_OPEN" ]; then
       log "open-branch cap reached ($open/$MAX_OPEN) — stop; merge/close some to free slots"
@@ -1023,6 +1042,9 @@ main() {
       if already_acted "$fp"; then
         log "  $(basename "$repo"): already handled ($fp) — skip"; continue
       fi
+      # Spend budget: stop BEFORE starting a new fix (the only mutation). Findings already surfaced
+      # this pass stay recorded; we simply do not open another branch once the budget is spent.
+      if over_budget; then log "  time budget exhausted — stop before fix"; stop_reason=budget; break; fi
 
       # One finding = one branch = one fresh worktree from base (diffs stay independent).
       wt="$WORKTREES_DIR/$(basename "$id")-f$k"
@@ -1051,8 +1073,9 @@ main() {
       remove_worktree "$repo" "$wt"
       [ -n "$b" ] && git -C "$repo" branch -q -D "$b" >/dev/null 2>&1 || true
     done
-    [ "$stop_reason" = backpressure ] && break
+    case "$stop_reason" in backpressure|budget) break ;; esac
   done < <(select_order)
+    [ "$stop_reason" = budget ] && break
     # Gate on SHIPPABLE progress. Findings surface once (they dedup/latch), so a pass that only
     # surfaced findings must not spin the loop — else a nondeterministic Findings-only fleet never
     # halts. Always emit an explicit stop reason.

@@ -78,6 +78,12 @@ def main(path: str) -> None:
     print(f"max_fix_iterations\t{mfi}")
     print(f"max_files\t{limits.get('max_files_per_change', '15')}")
     print(f"max_lines\t{limits.get('max_lines_per_change', '400')}")
+    # Wall-clock spend budget for the whole night (ADR 0013). Empty = no time cap (bash applies the
+    # NIGHTSHIFT_MAX_RUN_SECONDS env override first). Validate a present value as a positive integer.
+    mrm = limits.get("max_run_minutes", "")
+    if mrm and (not mrm.isdecimal() or int(mrm) < 1):
+        raise SystemExit("limits.max_run_minutes must be a positive integer")
+    print(f"max_run_minutes\t{mrm}")
     # Findings emitted per repo per pass. Default 1 keeps a rulebook that omits the key at the
     # pre-v2 single-finding behavior; the live rulebook sets it explicitly (ADR 0011).
     print(f"max_findings_per_item\t{limits.get('max_findings_per_item', '1')}")

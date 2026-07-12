@@ -26,26 +26,6 @@ Constraints already decided:
 - surfaced ambiguity remains human-owned until cleared ([ADR 0006](docs/adr/0006-surface-intent-ambiguous-divergences.md));
 - wording and drifting line numbers alone are insufficient identity.
 
-## 2. Spend control
-
-Open-branch backpressure and per-run ceilings bound output, not subscription or token consumption.
-v2 adds Recon and can process several findings per Explore, increasing the importance of a real
-budget signal.
-
-Decide:
-
-1. Limit unit: turns, elapsed time, observed subscription usage, tokens, or a combination?
-2. Scope: whole night, repo, adapter, or stage?
-3. Adapter signal: what works reliably for both first-party CLIs without switching to metered APIs?
-4. Exhaustion behavior: finish the current read-only stage, finish the current branch, or stop before
-   any further mutation?
-
-Constraints already decided:
-
-- execution stays on first-party CLIs ([ADR 0003](docs/adr/0003-subscription-safe-execution.md));
-- operator limits live in the rulebook ([ADR 0005](docs/adr/0005-configurable-limits-in-rulebook.md));
-- exhaustion must be explicit in ledger/digest, never a silent partial run.
-
 ## 3. Recon exclusion policy
 
 v2 Recon can mark a review dimension inapplicable. A false negative can silently starve that lens
