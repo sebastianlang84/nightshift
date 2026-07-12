@@ -86,11 +86,11 @@ append_run() { # stage agent start dur tokens status item cost
       exit:$status}' >> "$RUNSLOG"
 }
 
-ledger_append() { # item repo fp branch sha outcome [summary] [pr_url] [proof] [verifiability] [dimension]
+ledger_append() { # item repo fp branch sha outcome [summary] [pr_url] [proof] [verifiability] [dimension] [type]
   jq -nc \
     --arg night "$NIGHT" --arg item "$1" --arg repo "$2" --arg fp "$3" \
     --arg branch "$4" --arg sha "$5" --arg outcome "$6" --arg summary "${7:-}" --arg pr "${8:-}" \
-    --arg proof "${9:-}" --arg verif "${10:-}" --arg dim "${11:-}" --arg ts "$(date -Iseconds)" \
+    --arg proof "${9:-}" --arg verif "${10:-}" --arg dim "${11:-}" --arg type "${12:-}" --arg ts "$(date -Iseconds)" \
     '{night:$night,item:$item,repo:$repo,fingerprint:$fp,
       branch:($branch|if .=="" then null else . end),
       sha:($sha|if .=="" then null else . end),
@@ -98,6 +98,7 @@ ledger_append() { # item repo fp branch sha outcome [summary] [pr_url] [proof] [
       proof:($proof|if .=="" then null else . end),
       verifiability:($verif|if .=="" then null else . end),
       dimension:($dim|if .=="" then null else . end),
+      type:($type|if .=="" then null else . end),
       outcome:$outcome,summary:$summary,ts:$ts}' >> "$LEDGER"
 }
 
@@ -700,7 +701,7 @@ $(cat "$id/worknote.md")"
   # Layer 1 hook active for THIS push only (-c), never persisted to the repo config.
   if ! git -c core.hooksPath="$HOOKS_DIR" -C "$wt" push -q -u origin "$branch"; then
     log "  $(basename "$repo"): push failed — not shipped: $branch"
-    ledger_append "$(basename "$id")" "$repo" "$fp" "$branch" "$sha" "push-failed" "$summary" "" "" "$verif" "$dim"
+    ledger_append "$(basename "$id")" "$repo" "$fp" "$branch" "$sha" "push-failed" "$summary" "" "" "$verif" "$dim" "$type"
     git -C "$wt" checkout -q --detach >/dev/null 2>&1 || true
     git -C "$repo" branch -q -D "$branch" >/dev/null 2>&1 \
       || log "  $(basename "$repo"): cleanup warning — local branch remains: $branch"
@@ -710,7 +711,7 @@ $(cat "$id/worknote.md")"
   pr_url=$(open_pr "$repo" "$wt" "$branch" "$id" "$basearg")
   proof=$(jq -r '.proof // ""' "$id/review.md" 2>/dev/null || true)
   verif=$(jq -r '.verifiability // ""' "$id/finding.json" 2>/dev/null || true)
-  ledger_append "$(basename "$id")" "$repo" "$fp" "$branch" "$sha" "shipped" "$(jq -r '.summary // ""' "$id/finding.json")" "$pr_url" "$proof" "$verif" "$dim"
+  ledger_append "$(basename "$id")" "$repo" "$fp" "$branch" "$sha" "shipped" "$(jq -r '.summary // ""' "$id/finding.json")" "$pr_url" "$proof" "$verif" "$dim" "$type"
   echo "$branch"
 }
 
@@ -776,6 +777,25 @@ write_digest() { # made open status
           + (map("- \(.dim): shipped \(.n) · merged \(.m) · dropped \(.d)"
                  + (if (.m+.d)>0 then " · rate \((100*.m/(.m+.d))|floor)%" else "" end)) | join("\n"))
         end' "$LEDGER" 2>/dev/null || true
+    # The same merge-rate signal sliced by verifiability, proof, and finding type — the tuning
+    # feedback for which KINDS of change humans actually merge. Empty slices are omitted.
+    [ -f "$LEDGER" ] && jq -rs '
+      def rate($key; $name):
+        ([.[]|select(.outcome=="verdict" and .branch!=null)] | group_by(.branch) | map(sort_by(.ts)|last)
+          | map(select(.verdict=="merged" or .verdict=="dropped")) | INDEX(.branch)) as $v
+        | [.[]|select(.outcome=="shipped" and .branch!=null)]
+        | group_by(.[$key] // "—")
+        | map({g:(.[0][$key] // "—"), br:(map(.branch)|unique)})
+        | map({g:.g, n:(.br|length),
+               m:(.br|map(select($v[.].verdict=="merged"))|length),
+               d:(.br|map(select($v[.].verdict=="dropped"))|length)})
+        | if length==0 then empty else
+            "\n## Merge-rate by \($name) (all-time)\n"
+            + (map("- \(.g): shipped \(.n) · merged \(.m) · dropped \(.d)"
+                   + (if (.m+.d)>0 then " · rate \((100*.m/(.m+.d))|floor)%" else "" end)) | join("\n"))
+          end ;
+      [ rate("verifiability";"verifiability"), rate("proof";"proof"), rate("type";"finding type") ] | .[]
+      ' "$LEDGER" 2>/dev/null || true
     echo
     if [ "$status" = "backpressure" ]; then
       echo "**FULL STOP — open-branch cap reached.** Harvest (merge/delete) some \`${BRANCH_PREFIX}\` branches to resume."
