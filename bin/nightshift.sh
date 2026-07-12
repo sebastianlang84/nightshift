@@ -154,11 +154,14 @@ last_serviced_epoch() { # repo -> epoch of the last WORK-ITEM nightshift produce
   date -d "$iso" +%s 2>/dev/null || echo 0
 }
 
-# Layer 2 settings for the agent: register the PreToolUse guard so the agent
-# cannot disable the pre-push hook (--no-verify / core.hooksPath override).
+# Layer 2 settings for the agent: register the PreToolUse guard. The matcher MUST
+# cover Bash (anti-bypass of the pre-push hook) AND the file-writing tools
+# (Write/Edit/MultiEdit/NotebookEdit) — otherwise the guard never fires for a Write
+# and the worktree confinement (R8) is dead. The matcher is a regex over tool names.
 write_claude_settings() {
   jq -nc --arg cmd "$HOOKS_DIR/pretooluse-guard.sh" \
-    '{hooks:{PreToolUse:[{matcher:"Bash",hooks:[{type:"command",command:$cmd}]}]}}' \
+    '{hooks:{PreToolUse:[{matcher:"Bash|Write|Edit|MultiEdit|NotebookEdit",
+                          hooks:[{type:"command",command:$cmd}]}]}}' \
     > "$STATE_DIR/claude-settings.json"
 }
 
@@ -335,8 +338,11 @@ repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
   # confined by hooks/pre-push — no writes to any repo config. Layer 2: the PreToolUse guard
   # (blocks disabling Layer 1) via --settings. NIGHTSHIFT_BRANCH_PREFIX is already exported.
   # shellcheck disable=SC2086
+  # NIGHTSHIFT_WORKTREE tells the PreToolUse guard which root to confine Write/Edit to
+  # (the Fix stage has Write/Edit but no Bash; absolute paths would otherwise escape — R8).
   out="$(cd "$wd" && \
     GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="$HOOKS_DIR" \
+    NIGHTSHIFT_WORKTREE="$wd" \
     claude -p "$prompt" --output-format json --settings "$STATE_DIR/claude-settings.json" --tools "$tools" $cm_flags $flags </dev/null 2>/dev/null)" || return 1
   # `claude -p --output-format json` is NOT a stable shape. Sometimes it is a single
   # result object ({result,usage,total_cost_usd}); sometimes a JSON ARRAY of events with

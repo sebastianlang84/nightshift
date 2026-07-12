@@ -77,7 +77,7 @@ Severity = impact × likelihood given the controls above. Status: **Open** / **P
 
 | ID | Risk | Severity | Status |
 |----|------|----------|--------|
-| [R8](#r8) | Write/Edit accept **absolute paths** → code execution as `llmadmin` with no `Bash` | **High** | **Open** |
+| [R8](#r8) | Write/Edit accept **absolute paths** → code execution as `llmadmin` with no `Bash` | **High** | **Mitigated** |
 | [R1](#r1) | Secret exfiltration via prompt-injection → commit content → pushed branch | **High** | **Open** |
 | [R9](#r9) | New **untracked** files bypass the review evidence chain, then get committed | **High** | **Open** |
 | [R2](#r2) | All containment is application-layer, on a `docker`/`sudo` account (host-root blast radius if a layer fails) | **High** | **Partial** |
@@ -172,7 +172,12 @@ That is arbitrary code execution as a `docker`+`sudo` account (→ host root, R2
 C4 never inspects `Write`/`Edit`. This is broader and sharper than R1 (which framed the write only as
 commit-content exfil): "no shell → no code execution" was the first cut's central error.
 
-*Residual: unmitigated. The single highest-severity finding.* Closed by [N1](#n1) (+ [M2](#m2)).
+*Mitigated by [N1](#n1) (implemented): the PreToolUse guard now confines `Write`/`Edit`/`MultiEdit`/
+`NotebookEdit` to the worktree, and `write_claude_settings` registers it for those tools (not just
+`Bash`). Residual: the guard's decision logic is deterministically tested, but the end-to-end path
+under real `claude` — the matcher firing on a `Write` and `NIGHTSHIFT_WORKTREE` reaching the hook
+process — is pending an approved live run (harness ready). [M2](#m2) (OS sandbox) remains
+defense-in-depth.*
 
 ### R9 — Untracked files bypass the review evidence chain <a id="r9"></a>
 Review is shown `git -C "$wd" diff` ([nightshift.sh:219](../../bin/nightshift.sh)) — a plain diff
@@ -255,11 +260,14 @@ Confirm the `PreToolUse` deny I/O shape against the installed Claude Code versio
 the guard (C4) currently notes it as an unverified prototype assumption. Hardens R2/R11.
 
 ### N1 — PreToolUse deny on Write/Edit outside the worktree <a id="n1"></a>
-**Closes R8 — the biggest gap, and cheaper than M2.** Add a second hook in `write_claude_settings`
-([nightshift.sh:127-131](../../bin/nightshift.sh)) with `matcher:"Write|Edit"` pointing at a guard
-that reads `.tool_input.file_path`, `realpath`-normalises it, and denies anything not under `$wd`
-(pass the worktree root via env, same pattern as `NIGHTSHIFT_BRANCH_PREFIX`). Resolve symlinks
-before comparison. No new infrastructure.
+**Closes R8 — the biggest gap, and cheaper than M2. Implemented.** `write_claude_settings` registers
+the guard with `matcher:"Bash|Write|Edit|MultiEdit|NotebookEdit"`, and `pretooluse-guard.sh` reads
+`.tool_input.file_path` (or `.notebook_path`), `realpath -m`-normalises it (resolving `..` and
+symlinks in existing prefixes), and denies any target not equal to or strictly beneath the worktree
+root. The root is the Runner-injected `NIGHTSHIFT_WORKTREE` (primary), the hook payload's `.cwd`, then
+`$PWD` (fallbacks). Containment is trailing-slash-safe, so a prefix-sibling (`…/worktree-evil`) is not
+treated as inside. Adversarial coverage: `tests/test-fix-write-confinement.sh` (worktree writes allowed;
+the runner, `~/.claude`, `/etc`, `..`-traversal, and prefix-siblings denied; Bash anti-bypass intact).
 
 ### N2 — Make confinement assets unwritable by the agent <a id="n2"></a>
 `chattr +i` on `hooks/pre-push`, `hooks/pretooluse-guard.sh`, and `state/claude-settings.json`, or

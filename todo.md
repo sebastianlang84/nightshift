@@ -14,20 +14,15 @@ dimension rotation advances after an empty Explore; the dead `deferred` outcome 
 
 ## Now — P0 correctness and containment
 
-### Confine Claude Fix-stage writes to its worktree
+### Live-verify the Fix-stage Write/Edit confinement (R8)
 
-**Observed:** Claude Fix has `Write`/`Edit`, whose absolute paths are not guarded. It can alter the
-Nightshift runner, hooks, user shell files, or another repository and weaken a future run.
-
-**Done when:**
-
-- the existing `PreToolUse` guard denies `Write` and `Edit` outside the current worktree;
-- adversarial tests cover the Nightshift checkout and another user-owned path;
-- normal worktree edits still succeed;
-- hook spec and risk analysis describe the enforced boundary.
-
-Codex Fix already uses an OS `workspace-write` sandbox; full dedicated-user/container isolation
-remains defense-in-depth.
+The `PreToolUse` guard now confines `Write`/`Edit`/`MultiEdit`/`NotebookEdit` to the worktree and is
+registered for those tools (not just `Bash`); the decision logic is covered by
+`tests/test-fix-write-confinement.sh`. Still unverified end-to-end under real `claude`: that the
+matcher fires on a `Write` and that `NIGHTSHIFT_WORKTREE` reaches the hook process. Run one approved
+adversarial `claude -p` (Fix tool set, `--dangerously-skip-permissions`) that attempts an out-of-tree
+write and confirm the guard denies it — as was done for the Bash anti-bypass on 2026-07-09. Record the
+result in `hook-spec.md`. Full dedicated-user/container isolation remains defense-in-depth.
 
 ## Next — P1 identity, scheduling, and deterministic coverage
 

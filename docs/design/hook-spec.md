@@ -38,18 +38,30 @@ main/develop → reject.
 nightshift-owned hooks directory, so the `pre-push` hook is guaranteed present (it is not part of a
 normal clone).
 
-### Layer 2 — Claude Code `PreToolUse` hook (thin anti-bypass only)
+### Layer 2 — Claude Code `PreToolUse` hook (anti-bypass + write confinement)
 
-Layer 1's one loophole: `git push --no-verify` skips `pre-push` hooks. So the PreToolUse hook does
-*one simple thing* — deny any Bash command that would disable or relocate the hook. Plain string
-checks, no ref parsing:
+The `PreToolUse` guard does two things, dispatched on the tool call it receives:
+
+**(a) Bash — anti-bypass.** Layer 1's one loophole: `git push --no-verify` skips `pre-push` hooks. So
+the guard denies any Bash command that would disable or relocate the hook. Plain string checks, no ref
+parsing:
 
 - deny if the command contains `--no-verify`
 - deny if it sets `core.hooksPath` (e.g. `-c core.hooksPath=…` or `git config … core.hooksPath`)
-- deny other `-c`/config overrides that turn hooks off
+- deny other `-c`/config or `GIT_CONFIG_*` overrides that turn hooks off
 
-The hard work (which ref) is git's job via Layer 1; this layer only stops the agent from switching
-Layer 1 off.
+The hard work (which ref) is git's job via Layer 1; this part only stops the agent switching it off.
+
+**(b) Write/Edit — worktree confinement (R8).** The Fix stage grants `Write`/`Edit` but no `Bash`, and
+those tools accept **absolute paths** — so without a check the agent could edit the runner, hooks,
+`~/.claude`, systemd units, or another repo with no shell at all. The guard reads the target
+(`.tool_input.file_path` / `.notebook_path`), normalises it with `realpath -m` (resolving `..` and
+symlinks in existing prefixes), and denies anything not equal to or strictly beneath the worktree
+root. The root is the Runner-injected `NIGHTSHIFT_WORKTREE` (primary), else the payload `.cwd`, else
+`$PWD`. Containment is trailing-slash-safe (a prefix-sibling like `…/worktree-evil` is *not* inside).
+
+**Matcher.** The guard is registered for `Bash|Write|Edit|MultiEdit|NotebookEdit` — a `matcher:"Bash"`
+alone would never fire on a `Write`, leaving (b) dead.
 
 ## Implementation (prototype) — how the layers are actually activated
 
@@ -81,5 +93,12 @@ the worktree — is re-review §2b (shell/worktree isolation). But the per-stage
 "Read,Grep,Glob"` (no Bash at all) and fix with `Read,Grep,Glob,Write,Edit` (Write/Edit but **no
 Bash**). With no Bash tool in any stage, the agent cannot invoke `rm`/`curl`/`gh`/`git` regardless of
 prompt — the same "capability, not convention" principle as the hook. Verified: a claude run granted
-only read tools could not create a file even under `--dangerously-skip-permissions`. Full OS-level
-sandboxing (read-only FS / no network) stays the strongest tier if ever needed.
+only read tools could not create a file even under `--dangerously-skip-permissions`. The one residual
+write primitive — Fix's `Write`/`Edit` reaching absolute paths outside the worktree — is now closed by
+Layer 2(b) above. Full OS-level sandboxing (read-only FS / no network) stays the strongest tier if
+ever needed.
+
+**Residual verification (unverified).** Layer 2(b)'s decision logic is deterministically tested
+(`tests/test-fix-write-confinement.sh`). The end-to-end path under real `claude` — the matcher firing
+on a `Write`, and `NIGHTSHIFT_WORKTREE` reaching the hook process — is pending an approved live
+adversarial run (as was done for Layer 2(a) on 2026-07-09).
