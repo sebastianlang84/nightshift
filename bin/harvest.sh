@@ -104,15 +104,39 @@ append_verdict() { # item repo fingerprint branch sha verdict reason [source]
       ts:$ts,schema_version:$sv}' >> "$LEDGER"
 }
 
-# reconcile one shipped branch -> echo verdict on stdout
-reconcile() { # repo base branch sha
-  local repo="$1" base="$2" branch="$3" sha="$4"
+# reconcile one shipped branch -> echo merged|open|dropped|skip (ADR 0016).
+# An authoritative ladder derives the verdict; a `skip` means "unknown" — an errored or blind
+# probe must never produce a terminal verdict (fail closed), so the last verdict is left intact.
+reconcile() { # repo base branch sha [pr_url]
+  local repo="$1" base="$2" branch="$3" sha="$4" pr_url="${5:-}"
+  # 1. sha is an ancestor of base (merge-commit / fast-forward) — cheapest definitive test.
   if git -C "$repo" merge-base --is-ancestor "$sha" "$base" 2>/dev/null; then
     echo merged; return
   fi
-  if [ -n "$(git -C "$repo" ls-remote --heads origin "$branch" 2>/dev/null)" ]; then
-    echo open; return
+  # 2. the branch's one-commit patch already landed in base (squash / rebase merge, ADR 0011).
+  #    Needs the sha as a real local object; a gc'd sha falls through to the PR probe below,
+  #    never to 'dropped' on a can't-evaluate. `git cherry` marks a patch-equal commit "- <sha>".
+  if git -C "$repo" cat-file -e "${sha}^{commit}" 2>/dev/null \
+     && git -C "$repo" cherry "$base" "$sha" 2>/dev/null | grep -q '^- '; then
+    echo merged; return
   fi
+  # 3. authoritative PR state — covers a gc'd sha the local tests could not evaluate. Optional:
+  #    only when the shipped row carried a pr_url and `gh` is available/authenticated.
+  if [ -n "$pr_url" ] && command -v gh >/dev/null 2>&1; then
+    local st
+    st="$(gh pr view "$pr_url" --json state -q .state 2>/dev/null)" || st=""
+    case "$st" in
+      MERGED) echo merged; return ;;
+      CLOSED) echo dropped; return ;;
+      OPEN)   echo open;   return ;;
+    esac
+  fi
+  # 4/5. ref on origin -> open; ref gone -> dropped. Distinguish a real 'gone' from a failed
+  #      probe: capture ls-remote's exit status separately from its output and fail closed.
+  local refs rc
+  refs="$(git -C "$repo" ls-remote --heads origin "$branch" 2>/dev/null)"; rc=$?
+  [ "$rc" -ne 0 ] && { echo skip; return; }
+  [ -n "$refs" ] && { echo open; return; }
   echo dropped
 }
 
@@ -154,15 +178,30 @@ fi
 declare -A FETCHED=()
 printf '%-28s %-46s %-8s -> %-8s %s\n' REPO BRANCH WAS NOW ""
 changed=0
-while IFS=$'\t' read -r item repo fp branch sha; do
+while IFS=$'\t' read -r item repo fp branch sha pr_url; do
   [ -z "$branch" ] && continue
+  # Prefetch once per repo, recording reachability. A missing repo path or a failed fetch means
+  # we cannot see git reality — skip every branch in that repo (fail closed) rather than
+  # reconcile against a stale/absent view and stamp false 'dropped's fleet-wide.
   if [ -z "${FETCHED[$repo]:-}" ]; then
-    git -C "$repo" fetch -q origin 2>/dev/null || true
-    FETCHED[$repo]=1
+    if [ -d "$repo/.git" ] && git -C "$repo" fetch -q origin 2>/dev/null; then
+      FETCHED[$repo]=ok
+    else
+      FETCHED[$repo]=fail
+    fi
+  fi
+  if [ "${FETCHED[$repo]}" = fail ]; then
+    printf '%-28s %-46s %-8s -> %-8s %s\n' "$(basename "$repo")" "$branch" "—" "skip" "(repo unreachable — fail closed)"
+    continue
   fi
   base=$(base_for_repo "$repo")
-  now=$(reconcile "$repo" "$base" "$branch" "$sha")
+  now=$(reconcile "$repo" "$base" "$branch" "$sha" "$pr_url")
   IFS=$'\t' read -r was was_src < <(last_verdict_meta "$branch") || true
+  # A probe that could not decide (skip) leaves the recorded verdict untouched.
+  if [ "$now" = skip ]; then
+    printf '%-28s %-46s %-8s -> %-8s %s\n' "$(basename "$repo")" "$branch" "${was:-—}" "skip" "(probe failed — fail closed)"
+    continue
+  fi
   mark=""
   # Human decisions are ground truth. reconcile derives only merged|open|dropped, so it
   # must never overwrite a verdict it cannot itself produce (resolved/wontfix are
@@ -186,7 +225,7 @@ while IFS=$'\t' read -r item repo fp branch sha; do
     changed=$((changed + 1))
   fi
   printf '%-28s %-46s %-8s -> %-8s %s\n' "$(basename "$repo")" "$branch" "${was:-—}" "$now" "$mark"
-done < <(jq -r '.[]|[.item,.repo,.fingerprint,(.branch//""),(.sha//"")]|@tsv' \
+done < <(jq -r '.[]|[.item,.repo,.fingerprint,(.branch//""),(.sha//""),(.pr_url//"")]|@tsv' \
            <(jq -sc '[.[]|select(.outcome=="shipped" and .branch!=null and .sha!=null)]' "$LEDGER"))
 
 echo
