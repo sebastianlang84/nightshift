@@ -87,11 +87,11 @@ append_run() { # stage agent start dur tokens status item cost
       exit:$status}' >> "$RUNSLOG"
 }
 
-ledger_append() { # item repo fp branch sha outcome [summary] [pr_url] [proof] [verifiability] [dimension] [type]
+ledger_append() { # item repo fp branch sha outcome [summary] [pr_url] [proof] [verifiability] [dimension] [type] [code_sig]
   jq -nc \
     --arg night "$NIGHT" --arg item "$1" --arg repo "$2" --arg fp "$3" \
     --arg branch "$4" --arg sha "$5" --arg outcome "$6" --arg summary "${7:-}" --arg pr "${8:-}" \
-    --arg proof "${9:-}" --arg verif "${10:-}" --arg dim "${11:-}" --arg type "${12:-}" --arg ts "$(date -Iseconds)" \
+    --arg proof "${9:-}" --arg verif "${10:-}" --arg dim "${11:-}" --arg type "${12:-}" --arg csig "${13:-}" --arg ts "$(date -Iseconds)" \
     '{night:$night,item:$item,repo:$repo,fingerprint:$fp,
       branch:($branch|if .=="" then null else . end),
       sha:($sha|if .=="" then null else . end),
@@ -100,49 +100,82 @@ ledger_append() { # item repo fp branch sha outcome [summary] [pr_url] [proof] [
       verifiability:($verif|if .=="" then null else . end),
       dimension:($dim|if .=="" then null else . end),
       type:($type|if .=="" then null else . end),
+      code_sig:($csig|if .=="" then null else . end),
       outcome:$outcome,summary:$summary,ts:$ts}' >> "$LEDGER"
 }
 
-# Robust identity for a finding. The agent (claude mode) may omit `fingerprint`
-# despite the prompt; a missing field reads back as the literal "null" via jq -r
-# and would then poison dedup (every fingerprint-less finding collapses onto one
-# key). Use the model's value when present, else synthesise from file:type:line_window,
-# else echo "" so the caller can drop an unusable finding.
-finding_fingerprint() { # finding.json -> fingerprint or ""
+# Runner-canonical finding identity (ADR 0014). Computed by the Runner from NORMALIZED structured
+# fields — NOT trusted from the model's free-form `fingerprint`, which is prose-unstable. Layered:
+#   sorted files : normalized type : semantic anchor (symbol, else a normalized code snippet)
+# Prose summary and line numbers are DELIBERATELY excluded, so the identity survives rewording and
+# line movement; files are sorted so multi-file order is irrelevant. Falls back to the model's
+# fingerprint only when no structured anchor exists at all, else "" so the caller drops the finding.
+finding_fingerprint() { # finding.json -> canonical identity or ""
   jq -r '
-    (.fingerprint // "") as $fp
-    | if ($fp|type)=="string" and ($fp|length)>0 and $fp!="null" then $fp
-      else [(.file // ""),(.type // ""),(.line_window // "")]
-           | map(select(. != "" and . != null))
-           | if length>0 then join(":") else "" end
+    ((.files // [ .file ]) | map(select(. != null and . != "")) | unique) as $files
+    | ((.type // "") | ascii_downcase | gsub("\\s+";"-")) as $type
+    | ((.symbol // "") | gsub("\\s+";"")) as $sym
+    | ((.snippet // "") | ascii_downcase | gsub("\\s+";" ") | gsub("^ +| +$";"")) as $snip
+    | ($files | join(",")) as $fkey
+    | if ($fkey|length)==0 and ($sym|length)==0 then
+        (.fingerprint // "") | if (type=="string" and length>0 and . != "null") then . else "" end
+      else
+        ([$fkey, $type] | map(select(length>0)) | join(":"))
+        + (if ($sym|length)>0 then ":" + $sym
+           elif ($snip|length)>0 then ":#" + $snip
+           else "" end)
       end' "$1" 2>/dev/null || true
 }
 
-already_done() { # fingerprint — ANY prior ledger entry (used by findings-only, report once)
-  [ -n "$1" ] && [ "$1" != null ] || return 1   # never dedup on an unusable key
-  [ -f "$LEDGER" ] || return 1
-  grep -Fq "\"fingerprint\":\"$1\"" "$LEDGER"
+# Content signature of a finding's target (ADR 0014, invalidation). A short hash of the target files'
+# blob shas at HEAD: when the code under a finding changes, the signature changes, and a previously
+# suppressed identity (resolved/abandoned/dropped) becomes eligible again — a `wontfix` alone stays
+# permanent. Empty when there is no locatable target.
+code_sig() { # repo finding.json -> 12-char signature or ""
+  local repo="$1" fj="$2" files sig
+  files=$(jq -r '(.files // [ .file ]) | map(select(. != null and . != "")) | unique | .[]' "$fj" 2>/dev/null || true)
+  [ -n "$files" ] || { echo ""; return; }
+  sig=$(while IFS= read -r f; do
+          [ -n "$f" ] || continue
+          git -C "$repo" rev-parse "HEAD:$f" 2>/dev/null || echo "absent:$f"
+        done <<< "$files" | sha1sum | cut -c1-12)
+  echo "$sig"
 }
-already_acted() { # fingerprint — only shipped/abandoned (used by branch-fix)
+
+# Lifecycle-aware suppression (ADR 0014). A fingerprint is suppressed if it is permanently ignored
+# (a human `wontfix` verdict) OR it has a prior row in the given outcome set whose stored content
+# signature still MATCHES the current code (code_sig equal, or absent on older rows). If the code
+# under the finding has changed since (code_sig differs), it is NOT suppressed — the identity is
+# eligible again. jq match (not a grep regex): fingerprints contain '.'/'/'/':' metacharacters; a
+# slurped any() keeps the verdict order-independent.
+_fp_suppressed() { # fingerprint code_sig outcomes_json
   [ -n "$1" ] && [ "$1" != null ] || return 1   # never dedup on an unusable key
   [ -f "$LEDGER" ] || return 1
-  # jq match, not a grep regex: fingerprints contain '.'/'/'/':' that would be
-  # interpreted as regex metacharacters and could match a *different* fingerprint.
-  # Slurp + any() so the verdict is order-independent (a non-matching *last* line
-  # must not flip jq -e's exit status).
-  jq -se --arg fp "$1" \
-    'any(.[]; .fingerprint==$fp and (.outcome=="shipped" or .outcome=="abandoned"))' \
-    "$LEDGER" >/dev/null 2>&1
+  jq -se --arg fp "$1" --arg csig "$2" --argjson outs "$3" '
+    [.[] | select(.fingerprint==$fp)] as $rows
+    | ($rows | any(.outcome=="verdict" and .verdict=="wontfix")) as $permanent
+    | ($rows | any(
+        ((.outcome as $o | $outs | index($o)) != null)
+        and (((.code_sig // "") == "") or ((.code_sig // "") == $csig)))) as $known
+    | $permanent or $known' "$LEDGER" >/dev/null 2>&1
 }
-already_surfaced() { # fingerprint — a prior human-owned finding exists (a TODO is open)
-  [ -n "$1" ] && [ "$1" != null ] || return 1   # never dedup on an unusable key
-  [ -f "$LEDGER" ] || return 1
-  # Only `finding` outcomes count: a surfaced divergence LATCHES until a human clears it,
-  # so it neither re-surfaces nor gets silently auto-fixed on a later run — and an earlier
-  # `abandoned`/`shipped` must NOT masquerade as "already surfaced" and suppress the TODO.
-  jq -se --arg fp "$1" \
-    'any(.[]; .fingerprint==$fp and .outcome=="finding")' \
-    "$LEDGER" >/dev/null 2>&1
+already_done()     { _fp_suppressed "$1" "${2:-}" '["finding","shipped","abandoned"]'; }  # findings-only: report once
+already_acted()    { _fp_suppressed "$1" "${2:-}" '["shipped","abandoned"]'; }             # branch-fix: acted before
+already_surfaced() { _fp_suppressed "$1" "${2:-}" '["finding"]'; }                         # a human-owned TODO is open
+
+known_work() { # repo -> compact "fingerprint — summary" list of STILL-OPEN items for the explore prompt
+  local repo="$1"
+  [ -f "$LEDGER" ] || return 0
+  # Latest verdict per fingerprint, then keep findings/open-branches whose verdict is NOT a terminal
+  # clear (merged/resolved/wontfix/dropped). Cap the list so the prompt stays bounded.
+  jq -rs --arg r "$repo" '
+    ([.[]|select(.outcome=="verdict" and .fingerprint!=null)] | group_by(.fingerprint)
+      | map(sort_by(.ts)|last) | map({key:.fingerprint, value:.verdict}) | from_entries) as $v
+    | [.[] | select(.repo==$r and (.outcome=="finding" or .outcome=="shipped") and .fingerprint!=null)]
+    | group_by(.fingerprint) | map(sort_by(.ts)|last)
+    | map(select((($v[.fingerprint] // "") | (. == "merged" or . == "resolved" or . == "wontfix" or . == "dropped")) | not))
+    | .[0:40] | map("- " + .fingerprint + " — " + (.summary // "")) | join("\n")' \
+    "$LEDGER" 2>/dev/null || true
 }
 
 last_serviced_epoch() { # repo -> epoch of the last WORK-ITEM nightshift produced for it (0 if never)
@@ -237,6 +270,16 @@ $(cat "$NIGHTSHIFT_HOME/prompts/dimensions/$NIGHTSHIFT_DIMENSION.md")"
 
 ## Repo orientation (from tonight's recon)
 ${NIGHTSHIFT_RECON_NOTES}"
+  fi
+  if [ "$stage" = explore ] && [ -n "${NIGHTSHIFT_KNOWN_WORK:-}" ]; then
+    prompt="$prompt
+
+## Known work — already surfaced or handled (do NOT re-report; keep searching for NEW issues)
+nightshift has already recorded the items below and will suppress a duplicate. Spend your findings
+budget on DISTINCT, new issues. Re-raise one only if it is genuinely unresolved AND worse than
+anything new you can find.
+
+${NIGHTSHIFT_KNOWN_WORK}"
   fi
   if [ "$stage" = recon ] && [ -f "$id/signals.json" ]; then
     prompt="$prompt
@@ -698,10 +741,11 @@ open_pr() { # repo wt branch item_dir base -> echoes PR url ("" if none)
 
 # ---------------------------------------------------------------- finalize ----
 finalize() { # repo worktree item_dir [seq] [base] -> echoes branch name
-  local repo="$1" wt="$2" id="$3" seq="${4:-0}" basearg="${5:-}" fp type dim slug branch sha summary verif
+  local repo="$1" wt="$2" id="$3" seq="${4:-0}" basearg="${5:-}" fp type dim csig slug branch sha summary verif
   fp=$(jq -r '.fingerprint' "$id/finding.json")
   type=$(jq -r '.type // "change"' "$id/finding.json")   # default so the branch slug never reads "null"
   dim=$(jq -r '.dimension // ""' "$id/finding.json")     # the review lens (ADR 0010), leads the slug
+  csig=$(jq -r '.code_sig // ""' "$id/finding.json")     # content signature for invalidation (ADR 0014)
   if [ -n "$dim" ]; then
     slug="$(printf '%s-%s-%s' "$dim" "$type" "$(basename "$repo")" | tr '[:upper:] /' '[:lower:]--' | cut -c1-48)"
   else
@@ -722,7 +766,7 @@ $(cat "$id/worknote.md")"
   # Layer 1 hook active for THIS push only (-c), never persisted to the repo config.
   if ! git -c core.hooksPath="$HOOKS_DIR" -C "$wt" push -q -u origin "$branch"; then
     log "  $(basename "$repo"): push failed — not shipped: $branch"
-    ledger_append "$(basename "$id")" "$repo" "$fp" "$branch" "$sha" "push-failed" "$summary" "" "" "$verif" "$dim" "$type"
+    ledger_append "$(basename "$id")" "$repo" "$fp" "$branch" "$sha" "push-failed" "$summary" "" "" "$verif" "$dim" "$type" "$csig"
     git -C "$wt" checkout -q --detach >/dev/null 2>&1 || true
     git -C "$repo" branch -q -D "$branch" >/dev/null 2>&1 \
       || log "  $(basename "$repo"): cleanup warning — local branch remains: $branch"
@@ -732,7 +776,7 @@ $(cat "$id/worknote.md")"
   pr_url=$(open_pr "$repo" "$wt" "$branch" "$id" "$basearg")
   proof=$(jq -r '.proof // ""' "$id/review.md" 2>/dev/null || true)
   verif=$(jq -r '.verifiability // ""' "$id/finding.json" 2>/dev/null || true)
-  ledger_append "$(basename "$id")" "$repo" "$fp" "$branch" "$sha" "shipped" "$(jq -r '.summary // ""' "$id/finding.json")" "$pr_url" "$proof" "$verif" "$dim" "$type"
+  ledger_append "$(basename "$id")" "$repo" "$fp" "$branch" "$sha" "shipped" "$(jq -r '.summary // ""' "$id/finding.json")" "$pr_url" "$proof" "$verif" "$dim" "$type" "$csig"
   echo "$branch"
 }
 
@@ -878,6 +922,18 @@ write_digest() { # made open status [advice]
       [ -f "$LEDGER" ] && jq -r --arg n "$NIGHT" \
         'select(.night==$n and (.outcome=="abandoned" or .outcome=="push-failed")) | "- " + .repo + " — " + .outcome + ": " + (.summary // .fingerprint)' \
         "$LEDGER" 2>/dev/null || true
+      echo
+      # Carry-forward (ADR 0014): every surfaced finding, across ALL nights, that a human has not yet
+      # cleared (merged/resolved/wontfix/dropped) — so an unresolved TODO stays visible until acted on.
+      echo "## Open findings (all nights — awaiting a human)"
+      [ -f "$LEDGER" ] && jq -rs '
+        ([.[]|select(.outcome=="verdict" and .fingerprint!=null)] | group_by(.fingerprint)
+          | map(sort_by(.ts)|last) | map({key:.fingerprint, value:.verdict}) | from_entries) as $v
+        | [.[]|select(.outcome=="finding" and .fingerprint!=null)]
+        | group_by(.fingerprint) | map(sort_by(.ts)|last)
+        | map(select((($v[.fingerprint] // "") | (. == "merged" or . == "resolved" or . == "wontfix" or . == "dropped")) | not))
+        | map("- " + .repo + " — " + (.summary // .fingerprint) + "  (" + .fingerprint + ", since " + .night + ")")
+        | join("\n")' "$LEDGER" 2>/dev/null || true
     fi
     [ -n "$advice" ] && printf '%s\n' "$advice"
   } > "$f"
@@ -971,6 +1027,9 @@ main() {
     export NIGHTSHIFT_DIMENSION="$dim"
     NIGHTSHIFT_RECON_NOTES="$(jq -r '.notes // ""' "$(recon_cache_path "$repo")" 2>/dev/null || true)"
     export NIGHTSHIFT_RECON_NOTES
+    # Known work (ADR 0014): the repo's still-open findings/branches, injected so Explore does not
+    # spend its findings budget re-reporting an item the Runner would only suppress.
+    NIGHTSHIFT_KNOWN_WORK="$(known_work "$repo")"; export NIGHTSHIFT_KNOWN_WORK
     log "  $(basename "$repo") [$mode]: lens=${dim:-none} · budget=$rfind"
     run_agent explore "$wt" "$id" || true
     considered=$((considered + 1))
@@ -1004,16 +1063,20 @@ main() {
       if [ -z "$fp" ]; then
         log "  $(basename "$repo") [$mode]: finding without a usable fingerprint — skip"; continue
       fi
-      # Persist the resolved fingerprint AND the selected dimension so finalize/ledger read the
-      # same identity and the coverage rotation (ADR 0010) has its signal.
-      fnj=$(jq --arg fp "$fp" --arg d "$dim" '.fingerprint=$fp | .dimension=$d' "$fd/finding.json") && printf '%s' "$fnj" > "$fd/finding.json"
+      # Content signature of the finding's target (ADR 0014): lets a suppressed identity become
+      # eligible again once the underlying code changes. Persist the resolved fingerprint, the
+      # selected dimension, AND the code signature so finalize/ledger/dedup all read one identity.
+      csig=$(code_sig "$repo" "$fd/finding.json")
+      fnj=$(jq --arg fp "$fp" --arg d "$dim" --arg cs "$csig" \
+              '.fingerprint=$fp | .dimension=$d | .code_sig=$cs' "$fd/finding.json") \
+        && printf '%s' "$fnj" > "$fd/finding.json"
       summary=$(jq -r '.summary // ""' "$fd/finding.json")
 
       if [ "$mode" = findings-only ]; then
-        if already_done "$fp"; then
+        if already_done "$fp" "$csig"; then
           log "  $(basename "$repo") [findings-only]: already reported ($fp) — skip"; continue
         fi
-        ledger_append "$(basename "$fd")" "$repo" "$fp" "" "" "finding" "$summary" "" "" "" "$dim"
+        ledger_append "$(basename "$fd")" "$repo" "$fp" "" "" "finding" "$summary" "" "" "" "$dim" "" "$csig"
         findings=$((findings + 1)); progress=1
         log "  $(basename "$repo") [findings-only]: $summary"
         continue
@@ -1030,16 +1093,16 @@ main() {
       esac
       # A surfaced divergence LATCHES: once a human owns it as a TODO, a later run must neither
       # re-surface it nor quietly auto-fix it.
-      if already_surfaced "$fp"; then
+      if already_surfaced "$fp" "$csig"; then
         log "  $(basename "$repo"): previously surfaced — human-owned, not touching ($fp)"; continue
       fi
       if [ "$disp" = surface ]; then
-        ledger_append "$(basename "$fd")" "$repo" "$fp" "" "" "finding" "$summary" "" "" "" "$dim"
+        ledger_append "$(basename "$fd")" "$repo" "$fp" "" "" "finding" "$summary" "" "" "" "$dim" "" "$csig"
         findings=$((findings + 1)); progress=1
         log "  $(basename "$repo") [branch-fix]: surfaced, not auto-fixed: $summary"
         continue
       fi
-      if already_acted "$fp"; then
+      if already_acted "$fp" "$csig"; then
         log "  $(basename "$repo"): already handled ($fp) — skip"; continue
       fi
       # Spend budget: stop BEFORE starting a new fix (the only mutation). Findings already surfaced
@@ -1067,7 +1130,7 @@ main() {
           log "  $(basename "$repo"): shipped -> $b"
         fi
       else
-        ledger_append "$(basename "$fd")" "$repo" "$fp" "" "" "abandoned" "$summary" "" "" "" "$dim"
+        ledger_append "$(basename "$fd")" "$repo" "$fp" "" "" "abandoned" "$summary" "" "" "" "$dim" "" "$csig"
         log "  $(basename "$repo"): abandoned ($fp)"
       fi
       remove_worktree "$repo" "$wt"
@@ -1095,4 +1158,5 @@ main() {
   log "night done: $made shipped this run, $considered considered, $open now open (cap $MAX_OPEN)."
 }
 
-main "$@"
+# Sourced (NIGHTSHIFT_SOURCED=1) by unit tests to exercise pure functions without running the night.
+[ -n "${NIGHTSHIFT_SOURCED:-}" ] || main "$@"

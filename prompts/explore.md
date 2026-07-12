@@ -107,11 +107,19 @@ ranked best-first:
 {"found": true,
  "findings": [
    {"file": "<path>",
+    "files": ["<path>", "..."],
     "type": "bug|typo|doc|cleanup|smell|naming|convention|complexity",
+    "symbol": "<the code entity this finding is about: function/class/const/config-key — the stable anchor>",
     "line_window": "<Lx-Ly>", "claim": "<the single falsifiable proposition>",
     "verify": "<the exact recipe the reviewer runs, e.g. search every reference to the symbol across src, config, CI>",
     "verifiability": "static|static-given-deps|convention|runtime",
     "disposition": "fix|surface", "summary": "<one line>",
-    "fingerprint": "<file>:<type>:<line_window>", "rank": 1, "confidence": 0.0}
+    "rank": 1, "confidence": 0.0}
  ]}
 If nothing clears the bar: {"found": false, "findings": []}
+
+The Runner derives a STABLE identity from `files` (or `file`), `type`, and `symbol` — NOT from your
+prose or line numbers, so those may change freely between runs without creating a duplicate. Always
+give `symbol` when the finding targets a named code entity; for a multi-file finding list every path
+in `files` (order does not matter). A `snippet` field (a short verbatim excerpt) is used as the anchor
+only when no `symbol` applies.
