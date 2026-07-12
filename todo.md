@@ -1,440 +1,122 @@
-# nightshift — todo / future ideas
+# nightshift — active backlog
 
-Running list of enhancements to build later. Not design tensions (those live in OPEN-QUESTIONS.md)
-and not the ratified v1 scope (ADR 0004) — just good ideas parked with enough context to act on.
+Only active, actionable work belongs here. Items are ordered by priority.
 
-## Fable v2-Review — offene Befunde (2026-07-11)
+- Durable decisions: [`docs/adr/`](docs/adr/)
+- Unresolved architectural choices: [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md)
+- Implemented behavior: `README.md`, `CONTEXT.md`, and `docs/design/`
+- Completed work: remove it; Git history and ADRs are the record
 
-Nach dem v2-Commit (cb527e9 — recon, review dimensions, rotation, multi-finding; ADR 0009–0011)
-ließ Sebastian **Fable** (cross-model) die komplette v2 gegen ADRs 0009–0011 + CONTEXT.md reviewen,
-mit **Live-Verifikation im Mock-Sandbox** (gitignored, danach entfernt, Tree unberührt). Safety-
-Architektur hält (siehe „verifiziert intakt" unten); zwei HIGH-Bugs sind live reproduziert. Reihenfolge
-= schwerwiegendste zuerst. **Nichts davon ist gefixt — reine Todo-Erfassung.**
+Last triaged: 2026-07-11 against `origin/main` at `556e996`.
 
-- **[HIGH · correctness/robustness] Fehlgeschlagener `git push` wird als `shipped` verbucht.**
-  `bin/nightshift.sh:564` (push), `:570` (ledger_append), `:807` (caller). `finalize` läuft in
-  `b=$(finalize …)`; Command-Substitution erbt kein `errexit`, also läuft es nach einem Push-Fehler
-  weiter: berechnet SHA, schreibt `outcome:"shipped"` für einen Branch, der auf origin nicht existiert,
-  `made` inkrementiert. **Live bestätigt**: Remote auf `/nonexistent/remote.git` → Run exit 0, Digest
-  „2 shipped … 0 now open", Ledger zwei Phantom-`shipped`-Zeilen. Folgen: (a) `already_acted` dedupt auf
-  diesem Fingerprint für immer → Fix dauerhaft verloren; (b) Harvest reconciled Phantom-Branch als
-  `dropped` → Merge-Rate-Signal korrumpiert; (c) **wenn der pre-push-Confinement-Hook einen Push ablehnt,
-  wird das als Erfolg gemeldet** — genau das Signal, das man sehen will, wird geschluckt. Pre-existing in
-  v1, aber v2 fasst diese Zeilen an und vervielfacht Pushes/Nacht (N Findings × Repos); Commit behauptet
-  „verified end-to-end", aber der Push-Fehlerpfad war nicht abgedeckt. Fix: in `finalize`
-  `git … push … || { log "push failed"; return 1; }`; im Caller `if b=$(finalize …); then … else`
-  → `abandoned` (oder neues `push-failed`-Outcome) ledgern und laut loggen.
+## Now — P0 correctness and containment
 
-- **[HIGH · correctness] Neue Per-Repo-Overrides `findings:`/`dimensions:` durch TSV-Feld-Kollaps kaputt.**
-  `bin/nightshift.sh:41` (`IFS=$'\t' read -r tag a b c d e`), `lib/parse_rulebook.py:88`,
-  `bin/harvest.sh:43`. Tab ist IFS-Whitespace → aufeinanderfolgende Tabs kollabieren, spätere Felder
-  rutschen nach links. **Live bestätigt**: (a) `path + mode + findings: 5` (ohne base) → `base="5"`,
-  `findings=""` — Per-Repo-Cap still ignoriert, resolve_base loggt bogus „base '5' not found";
-  (b) `path + base: develop + dimensions: security,infra` → `findings="security,infra"`, dims verloren →
-  explore-Prompt liest „Emit UP TO security,infra finding(s)", und die defensive Truncation
-  `[ "$n_find" -gt "$rfind" ]` (`:736`) wirft „integer expression expected" (geschluckt) → ADR-0011-
-  Garantie „Runner kappt beim Cap" no-opt, explore-Output shippt komplett, nur durch MAX_OPEN/
-  MAX_RUN_BRANCHES gebremst; (c) harvest.sh liest nur 4 Felder → bei gesetzten Overrides falsche Base-
-  Auflösung → gitflow-Repos bekommen Merge-Verdicts gegen falsche Base (nach develop gemergter Branch
-  bleibt für immer `open`). Live-`rulebook.yaml` nutzt die Keys nicht → heute unkritisch, aber das
-  dokumentierte rulebook.example.yaml-Feature ist ab Tag 1 kaputt. Fix: nicht-kollabierbaren Platzhalter
-  (`-`) für Leerfelder emittieren und in bash übersetzen (oder `key=value`-Paare); harvest.sh im selben
-  Zug auf 6 Felder heben.
+### Confine Claude Fix-stage writes to its worktree
 
-- **[MEDIUM · correctness] Ledger/Telemetrie-Item-Identität auf `f0`/`f1` degradiert.**
-  `bin/nightshift.sh:761, 782, 811` + `finalize` (`basename "$id"` wobei `$id` jetzt `$fd`), Telemetrie
-  via `run_agent` `:179`. v1 schrieb `item:"item-<nanos>"` (eindeutig); v2 reicht `$fd="$id/f$k"` durch,
-  also protokolliert jede Ledger-Zeile und jede runs.jsonl-Zeile `item:"f0"`/`"f1"` (im Sandbox
-  bestätigt). Nicht eindeutig über Repos/Nächte → `harvest.sh verdict <item>` mehrdeutig (matcht neueste
-  von vielen), runs.jsonl-Stage-Zeilen nicht mehr an ihr explore-Item joinbar. Fix:
-  `"$(basename "$id")-f$k"`.
+**Observed:** Claude Fix has `Write`/`Edit`, whose absolute paths are not guarded. It can alter the
+Nightshift runner, hooks, user shell files, or another repository and weaken a future run.
 
-- **[MEDIUM · correctness] Recon-Cache per `basename "$repo"` → gleichnamige Repos kollidieren.**
-  `bin/nightshift.sh:397, 422, 724`. `/a/app` und `/b/app` teilen `state/recon/app.json`. Cached `head`
-  matcht nie den HEAD des anderen Repos → recon läuft jeden Pass neu (Cache-Thrash, Agent-Kosten), und
-  zwischen Refreshes wendet `recon_applicable`/`NIGHTSHIFT_RECON_NOTES` die Applicability-Map + Orientation-
-  Notes von Repo A auf Repo B an → falsche Dimension-Narrowing + irreführender Prompt-Kontext.
-  Fail-open, nicht unsicher, aber falsch. Fix: vollen Pfad in den Cache-Dateinamen hashen
-  (`echo "$repo" | md5sum`) oder vollen Pfad sanitizen.
+**Done when:**
 
-- **[MEDIUM · design/correctness] Rotation rückt bei leerem Lens-Ergebnis nie vor.**
-  `bin/nightshift.sh:403-417` (`select_dimension`/`last_dim_epoch`). Lens-Epoch avanciert nur über
-  `finding|shipped|abandoned`-Ledger-Zeilen. Liefert explore `found:false` unter Lens X, wird nichts
-  geschrieben → X bleibt Epoch 0 und wird per striktem `<`-Tie-break (Rulebook-Reihenfolge) jeden Pass +
-  jede Nacht wieder gewählt. Ein ruhiges Repo bleibt für immer auf `correctness` gepinnt; `security/docs/
-  tests/…` nie erreicht → ADR-0010-Rotation konterkariert, und innerhalb eines Runs wird pro Extra-Pass
-  dieselbe Frage neu gestellt (Agent-Kosten). Fix: leichten „serviced"-Marker pro (repo, dim) auch bei
-  leerem explore schreiben — z.B. `explored`-Outcome-Zeile oder `state/`-Seitendatei, die `last_dim_epoch`
-  konsultiert.
+- the existing `PreToolUse` guard denies `Write` and `Edit` outside the current worktree;
+- adversarial tests cover the Nightshift checkout and another user-owned path;
+- normal worktree edits still succeed;
+- hook spec and risk analysis describe the enforced boundary.
 
-- **[LOW/MEDIUM · robustness] `progress=1` auf Findings-only-Zeilen kann Pass-Loop ohne Findings-Cap die
-  ganze Nacht laufen lassen.** `bin/nightshift.sh:762, 783`. v2 setzt `progress=1` neu, wenn ein Finding
-  auftaucht (v1 nur bei geshippten Branches). Findings zählen weder gegen `MAX_OPEN` noch
-  `MAX_RUN_BRANCHES`, also hält ein nichtdeterministischer explore, der immer neue Fingerprints emittiert,
-  Pass um Pass auf einem Findings-only-Repo → unbegrenzter Token-Burn + Ledger/Digest-Wachstum, nur durchs
-  Abo-Fenster gebremst. Evtl. beabsichtigt („all night"), aber kein Governor für den Findings-only-Pfad.
-  Erwägen: Per-Nacht-Findings-Cap oder Findings aus `progress` ausnehmen.
+Codex Fix already uses an OS `workspace-write` sandbox; full dedicated-user/container isolation
+remains defense-in-depth.
 
-- **[LOW · robustness] Recon-Fallback läuft im Live-Checkout; diverse Recon-Cache-Edge-Cases.**
-  `bin/nightshift.sh:437-446`. (a) Wenn `setup_worktree` fehlschlägt, läuft recon im Live-Checkout des
-  Repos — read-only-Tools (Read/Grep/Glob, kein Bash) sind dann die einzige Isolation; laut Kommentar
-  bewusst, aber dokumentierte Schwächung von „nie im Live-Checkout". (b) `jq … > "$cache"` truncatet vor
-  jq-Lauf → jq-Fehler hinterlässt leeren Cache (self-healing, fail-open, aber Fenster). (c) Leeres
-  `recon.json` (Agent-Fehler) schreibt keinen Cache → recon läuft jeden Pass neu, kein Negative-Caching.
-  (d) Nicht-numerisches `ttl_days` wird still ttl=0 → recon jeden Run. Alle fail-open, keiner unsicher.
+## Next — P1 identity, scheduling, and deterministic coverage
 
-**Safety-Invarianten — verifiziert intakt (Fable):** Push-Confinement (nur `finalize` pusht,
-per-push `-c core.hooksPath` + unveränderter `hooks/pre-push`, `nightshift/*`-Namespace-Check, lehnt
-Deletes/Tags/out-of-prefix ab; recon bekommt read-only-Profil, fix hat kein Bash); Branch-only/Human-
-Merge-Gate (nichts merged/deployt; `open_pr` bleibt opt-in); Worktree-Isolation (sogar verbessert —
-pro Finding frische Worktree ab Base, 2 Defekte → 2 unabhängige Branches, sauber aufgeräumt); der
-Harvest-Isolations-Fix (`STATE_DIR`/`LEDGER`/`RULEBOOK` exakt die Namen, die harvest.sh honoriert,
-`RECON_DIR` unter isoliertem `STATE_DIR`) und der setup-sandbox-Fix (Rulebook nach `$SB/rulebook.yaml`,
-Live-Rulebook unberührt) sind **real und vollständig**. Prompts enthalten keine unsicheren Instruktionen.
-Eine Nuance zur Rückwärtskompatibilität: `recon.enabled` ist per Default an → ein v1-Rulebook bekommt
-eine Extra-Agent-Stage pro Repo/TTL (so von ADR 0010 gewollt, aber nicht wörtlich „defaults keep pre-v2
-behavior"). **Wichtigster Widerspruch:** Commit sagt „verified end-to-end", aber der `shipped`-bei-Push-
-Fehler-Bug ließ sich genau im Sandbox auslösen — die Verifikation deckte den Push-Fehlerpfad nicht ab.
+### Restore globally unique work-item IDs
 
-## Scheduler — nightly 03:00 — DONE (2026-07-09)
+v2 currently records per-finding directory basenames such as `f0` and `f1` in ledger and telemetry.
+Use `<parent-item>-f<N>` so `harvest.sh verdict <item>` and runs-to-item joins remain unambiguous.
+Test multiple repos and multiple findings in one run.
 
-**Shipped.** A systemd *user* timer fires `bin/nightshift-cron.sh` every night at 03:00 local
-(`scheduler/nightshift.{service,timer}`, `Persistent=true` so a missed night runs at next wake,
-`RandomizedDelaySec=120`). The launcher adds the three unattended-run essentials: a single-instance
-`flock`, an explicit PATH (systemd's minimal env can't see `~/.local/bin/{claude,gh}`), and a
-timestamped log under `~/.local/state/nightshift/logs/` (plus journald). Enabled + linger on; first
-live fire Fri 2026-07-10 03:00. Manage with `bin/schedule.sh {install|enable|disable|status|logs|
-dry-run|uninstall}` — this also subsumes the old "schedule management templates/scripts" item.
+### Make recon caches collision-safe
 
-_PR-opening (revised 2026-07-10):_ the Runner *can* open a PR per shipped branch (`gh pr create`,
-GitHub-only) but this is now **opt-in and OFF by default** (`NIGHTSHIFT_OPEN_PR=1` to enable).
-A PR needs per-host API credentials the SSH transport doesn't provide, and the push identity (SSH)
-and PR-API identity (token) are independent — so branch-only is the credential-free baseline and the
-pushed `nightshift/*` branch is the unit of review (each host also prints a one-click "create PR" URL
-on push). See ADR 0004 and "Multi-host PR automation (Lücke 1)". _(Supersedes the 2026-07-09 auto-PR
-"default on" decision.)_
+`state/recon/$(basename "$repo").json` collides for different repositories with the same basename.
+Derive the cache name from a stable hash of the canonical repository path while keeping the repo path
+inside the cache for inspection. Test two same-named repositories.
 
-Open follow-ups on the scheduler (not blocking):
-- **Sleep/suspend:** if the workstation suspends overnight the 03:00 fire is missed; `Persistent=true`
-  catches it at next wake, but a true "wake to run" needs an RTC wake alarm — revisit if it matters.
-- **Adaptive cadence / backoff** (from the nightly-review-pipeline skill): skip repos with no new
-  commits, back off after empty runs. nightshift's open-branch cap already self-throttles, so this is
-  a cost optimisation, not a correctness need.
+### Rotate dimensions after an empty Explore
 
-## codemap structural index — fully autonomous (2026-07-10)
+Rotation currently advances only when a finding/ship/abandon ledger row exists. A clean lens remains
+at epoch zero and is selected forever. Record a lightweight serviced event (or equivalent state)
+after every completed Explore, including `found:false`, without treating it as a finding. Verify that
+two empty passes select two different applicable dimensions.
 
-**Shipped.** explore/review can use `codemap_search`/`codemap_context` (an MCP tool — no Bash needed,
-fits the capability model) to navigate structure instead of reading files blindly. **nightshift keeps
-the index current itself**: before explore, the Runner runs `codemap index --approve --repo <repo>` —
-local + incremental (seconds), so every run the index reflects tonight's code. No manual step, no
-per-repo config, no staleness. `--approve` makes first-time indexing automatic because the rulebook is
-already the human consent surface (you listed these repos). The agent runs in a throwaway worktree
-(no index of its own), so the prompt tells it to query the stable real repo via `repoPath`. codemap
-absent or an index failure → plain Read/Grep/Glob, no change. Kill switch: `NIGHTSHIFT_CODEMAP=0`.
+### Repair finding identity and lifecycle across runs
 
-Verified: MCP tool callable in the locked-down subprocess (`--tools` + `--dangerously-skip-permissions`);
-full e2e where nightshift auto-indexed a sandbox and shipped a fix. Biggest payoff on large repos
-(market-digest, 291 files) where blind reading is weakest and explore cost highest.
+Equivalent defects can receive different prose/line-derived fingerprints. Surfaced work can then be
+rediscovered, while a repeatedly selected known item can crowd out new work. Resolve
+[Open Question 1](OPEN-QUESTIONS.md#1-finding-identity-and-lifecycle) and record the contract in an ADR.
 
-## Review = verify the claim, not judge the diff (2026-07-10)
+Acceptance criteria:
 
-**Shipped.** Reframed the pipeline around Sebastian's point (a review verifies a proposition against
-truth — "is 2x = 4x/2" needs no diff/history) and the cold, first-contact reality (nightshift meets
-most repos for the first time, with no privileged access to intent or history). Fable (cross-model)
-hardened it into a policy:
-- **explore** emits every finding as a FALSIFIABLE `claim` + a `verify` recipe + a `verifiability`
-  class (`static` | `convention` | `runtime`); `confidence` redefined as "how completely provable
-  statically", not vibes. Prefers correctness over craft. Craft is only raised if it cites THIS repo's
-  own standard (else it's generic dogma → dropped).
-- **review** runs the verification recipe against the RESULTING worktree (cwd = post-fix code; Grep is
-  truth), and separates `proof: verified` from `proof: unproven`. Key guard: absence of a grep hit is
-  not proof of absence when dynamic/string references (reflection, registries, CLI dispatch, entry
-  points) are possible — so a clean grep is not blind trust. Unfalsifiable taste → abandon.
-- **runtime findings** can't be statically proven (no Bash/execution) → ship only if safe-when-wrong,
-  as `proof: unproven`, and the Runner stamps **[unverified]** on the PR title + digest so the morning
-  human knows *this one needs tests before merge*. `proof`/`verifiability` now recorded in the ledger.
-- Fixed the latent bug where review.md referenced a `worknote` the Runner never injected (the rewrite
-  drops it — not seeing the producer's self-justification is the point: kills anchoring).
-- **codemap role clarified:** its `repoPath` index is the REAL repo (no fix), so it's stale for "is
-  the symbol still present after the edit" (use cwd Grep/Read for that). BUT for the reference hunt
-  ("who references this name") it IS a valid verification aid — callers are unaffected by the fix, and
-  its FTS surfaces symbol AND string references a `name(` grep misses. review.md uses it as the broad
-  net; the "constructed / external name → unproven" clause still bounds it (no in-repo index proves a
-  negative for runtime-constructed or out-of-repo references).
+- identity survives rewording, line movement, and multi-file ordering;
+- unresolved findings and open branches are supplied to Explore as known work;
+- Explore continues searching instead of returning a known item;
+- unresolved findings remain visible in later digests;
+- human verdicts clear or permanently dismiss findings;
+- merged and dropped branches both release backpressure;
+- deterministic tests cover identity, starvation, carry-forward, and clearing.
 
-Verified: live static e2e (`verifiability:static` → `proof:verified`, no stamp) + unproven-path
-plumbing (digest + PR title stamped `[unverified]`).
+### Make scheduler overrides visible and removable
 
-## Fable Nacht-1-Re-Review — Härtung geshippt (2026-07-10)
+`bin/schedule.sh install|enable|status` must report active files under
+`~/.config/systemd/user/nightshift.timer.d/` and show that effective cadence may differ from the
+committed timer. `uninstall` must remove the directory or explicitly warn that it remains.
 
-Nach dem ersten echten Timer-Lauf (03:00) ließ Sebastian **Fable** (cross-model) die Nachtarbeit
-bewerten: beide offenen PRs (valuelens #1 invertierter Kommentar, market-digest #2 toter Validator)
-unabhängig gegengeprüft → **beide korrekt, gemergt**. Fable fand kein falsches Ergebnis, aber echte
-Prozess-Schwächen. Drei davon sofort eingearbeitet (Prompt-/Runner-only, kein Verhaltensrisiko):
+### Cover the `surface` route end to end
 
-- **`static-given-deps` als neue Verifiability-Klasse.** Fables schärfster Fund: PR #2 war als
-  `proof:verified / static` gestempelt, aber der Dreh- und Angelpunkt („Pydantic v2 läuft Literal vor
-  after-Validator") ist eine **Fremdbibliotheks-Semantik, durch keinen Repo-Grep beweisbar** — richtig
-  aus Glück, nicht aus Beweis. Jetzt: explore stuft solche Claims als `static-given-deps` ein, nennt die
-  Lib + wo die Version gepinnt ist; review MUSS die Semantik an der gepinnten Dependency bestätigen
-  (installierte Package-Source / versionierte Docs lesen), sonst `proof:unproven` (+ `[unverified]`).
-  (explore.md, review.md)
-- **Root-Cause-Widening.** Ledger 2+3 waren dieselbe Ursache (5/150-Drift), auf zwei Files/Branches/
-  Merges zersplittert. Jetzt: explore rahmt eine wiederkehrende Inkonsistenz als EINE Finding über alle
-  Vorkommen (alle Orte in `verify`), review prüft, dass der Fix jeden Zwilling erwischt hat (sonst
-  `revise`) — bounded durch das Change-Budget. (explore.md, review.md)
-- **Evidence-Chain reist mit dem PR.** `open_pr` hängt jetzt Claim + Verifiability/Proof + Verify-Recipe
-  + das, was der Reviewer tatsächlich fand, an den PR-Body → Morgen-Merge = 30-Sekunden-Audit statt
-  Neu-Herleitung, und ein Rubber-Stamp-Review wird sichtbar statt versteckt. (bin/nightshift.sh open_pr)
+Add a deterministic mock result with `disposition:"surface"`. Verify the latch, ledger row,
+worktree removal, absence of a push, digest rendering, and unknown dispositions failing closed.
 
-Verifiziert: `bash -n` + PR-Body-Rendering-Smoke (voller static-given-deps-Fall zeigt die Verification-
-Sektion, Fallback-Typo ohne Felder lässt sie sauber weg). Nicht separat e2e — Prompt-/Body-Wording auf
-der bewiesenen Pipeline. Zwei Fable-Punkte bleiben offen: siehe NEXT (Harvest) + der Ledger-Schema-
-Versions-Punkt dort.
+## Later — P2 robustness and operator experience
 
-## Craft / best-practice review — always on (2026-07-10)
+### Bound findings-only progress loops
 
-**Shipped.** explore + review now cover **craft**, not just correctness: code smells, dead/unused
-code, poor naming, needless complexity, inconsistency with the surrounding style. Grounded in the
-repo's OWN standard (linter/formatter config, CONVENTIONS.md, CONTRIBUTING, surrounding code) — not
-generic dogma — and held to the same smallness/reversibility/single-concern bar (no sweeping refactors,
-no subjective restyle = churn). Finding types widened to
-`bug|typo|doc|cleanup|smell|naming|convention|complexity`. Prompt-only change (explore.md, review.md);
-always on. Verified with a claude e2e that found + fixed a pure-craft issue (unused `import os`, no
-typo/bug present), shipped a correct 1-line diff.
+Findings set `progress=1` but do not consume the open-branch or branch-per-run caps. A nondeterministic
+Findings-only repo can therefore generate unbounded passes. Decide whether findings consume a
+per-run cap or do not keep the pass loop alive; always retain an explicit stop reason.
 
-## DONE (2026-07-10): verdict / harvest recording — the first human feedback loop
+### Harden recon fallback and cache writes
 
-**Built: `bin/harvest.sh`** (Fable's #1-ordered build). Reconciles every shipped-branch ledger row
-against git reality and appends an append-only `verdict` event (never mutates the shipped row). Merge
-detection is by **sha-ancestor** (`git merge-base --is-ancestor <sha> <base>`) — authoritative even after
-the branch ref is deleted, and needs no `gh`/PR API. Verdicts: `merged` / `dropped` (gone, unmerged) /
-`open` (implicit default — only terminal verdicts are written, so nightly re-runs stay quiet and
-idempotent). Findings (branch=null) get a hand verdict: `harvest.sh verdict <sel> <resolved|wontfix|…>`.
-Wired into `main()` at night start (non-fatal) so the morning digest is current; also runnable on demand.
-`schema_version:2` stamped on every verdict row (folds in Fable's schema-drift point — a consumer can
-tell "old schema, field absent" from "genuinely empty"). Digest gained a **harvest scoreboard** line
-(all-time shipped / merged / dropped / open + merge-rate). First run: shipped 4 · merged 1 · dropped 1 ·
-open 2 · 50% — and it corrected the record: `doc-…172110` merged, `doc-…155528` was actually *dropped*
-unmerged (superseded by 1ea086d), not merged as memory had it.
+- Avoid running Recon in the live checkout when worktree setup fails, or document and test the
+  accepted read-only fallback.
+- Write caches atomically so a failed `jq` cannot truncate the prior cache.
+- Add negative caching/backoff for empty or failed Recon results.
+- Validate `ttl_days` instead of silently turning malformed values into constant refreshes.
 
-**Still open (follow-ups, not blockers):**
-- Dashboard read-side (llmstack `dashboard/app/main.py`): show the latest verdict per item so the
-  Nightshift tab distinguishes open / merged / dropped instead of showing every `shipped` alike.
-- Richer stats split (merge-rate by `verifiability` / `proof` / finding `type`) — the churn question by
-  data. Current scoreboard is the headline number only.
-- Findings resolution is still manual (`harvest.sh verdict … resolved`); no auto-detection that a
-  fingerprinted finding was fixed. Fine for now — cheap and explicit beats a fragile re-check.
-- Feed the open-branch backpressure from verdicts (a dropped branch frees a slot just like a merge).
+### Improve harvest visibility
 
-## DONE (2026-07-11): harvest preserves human verdicts (clobber-gap closed)
+- Show the latest verdict per item in the llmstack dashboard.
+- Add merge-rate breakdowns by `verifiability`, `proof`, and finding `type` after enough data exists.
+- Keep automatic finding resolution deferred until identity is stable; manual verdicts remain truth.
 
-**Fixed (ADR 0007):** `reconcile()` derives only `merged|open|dropped`, and the loop
-overwrote whenever the derived value differed from the last recorded one — so a manual
-`dropped` (recorded before the ref was deleted) got flipped back to `open` on the next
-run, and a `resolved`/`wontfix` on a shipped branch would be clobbered too. This produced
-the duplicate/churned verdict rows seen on the dashboard for
-`nightshift/smell-partflow-20260710-223406` (`dropped(manual)` → `open` → `dropped`) and
-erased the human's reason. Now manual verdicts are stamped `source:"manual"` and the loop
-**holds** any human-owned terminal verdict (`resolved`/`wontfix` always; `merged`/`dropped`
-when manual) — except an objective merge (sha in base) still wins. `source` is additive +
-nullable; schema_version stays 2.
+### Document deployment
 
-## Finding dedup across runs — fingerprint is phrasing-dependent (2026-07-10)
+Create one operator document for per-machine bootstrap/updates, local state, branch-only operation
+across Git hosts, and optional PR credentials. Record the v1 constraint "one Nightshift installation
+per target repo" in an ADR because duplicate installations have divergent ledgers.
 
-**Observed, real:** a run re-discovered an issue that was already recorded as an open
-`finding` on a prior night, and this time *shipped* it as a fresh branch — a duplicate.
-Concrete case: the partflow "LLM model defaults diverge" issue was logged as a `finding`
-on 2026-07-10 15:39 (`item-1783690650591702366`), then re-found and pushed on the 22:30
-run as `nightshift/smell-partflow-20260710-223406` (`item-1783715429891218294`) — a
-different item id AND a different fingerprint, so nothing suppressed it. It was dropped by
-hand as redundant.
+### Add an independent branch review mode
 
-**Root cause:** the fingerprint is derived partly from the finding's wording, so the same
-underlying defect described differently across runs produces a *different* fingerprint →
-the existing-work suppression never matches. Prior findings are also not fed into the next
-run's "already known" set at all.
+Review open `nightshift/*` branches in fresh contexts and write read-only merge/do-not-merge
+recommendations to the digest. Never merge or push. Prefer a different model/vendor when configured.
 
-**Direction (not yet built):**
-- Feed open `finding` rows (and open `shipped` branches) into explore as a "already
-  surfaced, do not re-report" list, matched on a location-anchored key (repo + file +
-  symbol/line-range) rather than on the prose fingerprint alone.
-- Or make the fingerprint location-anchored instead of wording-anchored so it is stable
-  across re-phrasings of the same defect.
-- Relates to the harvest follow-ups above (auto-resolve a fixed finding; verdict-driven
-  backpressure) — same missing link: findings currently have no lifecycle feedback into
-  later runs.
+### Add an explicit spend control
 
-**Raised in cost by ADR 0006 (surface disposition):** a `surface` finding now latches
-(`already_surfaced` blocks re-surfacing AND auto-fix until a human clears it). Good for
-correctness, but EXPLORE picks ONE finding per repo per pass and keeps re-selecting the
-most salient divergence — so an unresolved surfaced TODO **starves** every other finding
-in that repo until cleared, and the digest only lists it on the night it was raised
-(`.night==$n` filter). The "already surfaced, find something else" feed above is now the
-fix for a repo-wide outage, not just a duplicate report. Also: the surfaced-finding TODO
-should be carried forward in later digests while unresolved.
+Resolve [Open Question 2](OPEN-QUESTIONS.md#2-spend-control). Existing branch/run caps constrain
+output and review load, not monetary or token spend.
 
-## Fable Nacht-2-Review follow-ups (2026-07-11)
+## Conditional / deferred
 
-From the independent Fable review of ADR 0006 / the surface-disposition commit. Landed
-in the same follow-up: dedup latch (findings 1+2), REVIEW intent-ambiguous backstop hint
-(3), fail-closed disposition parse (7), digest stat label (8), ADR accuracy. Still open:
-- **schedule.sh does not surface an active local drop-in (Fable #4).** `install`/`enable`/
-  `status` say nothing when `~/.config/systemd/user/nightshift.timer.d/*.conf` overrides
-  the committed cadence, so `enable` can silently start an 18:20 timer under a unit whose
-  Description says 03:00; `uninstall` leaves the drop-in dir orphaned to resurrect later.
-  Fix: detect the drop-in and print "NOTE: local override active — effective OnCalendar
-  differs from committed unit"; have `uninstall` remove/warn about the dir.
-- **No deterministic test coverage of the surface branch (Fable #9).** `mock_explore` has
-  no path emitting `disposition:"surface"`, so the mock agent never exercises surface
-  routing (dedup latch, ledger kind, worktree removal, digest). Add a mock trigger
-  mirroring the `teh` typo trigger.
-- **Cross-file divergence fingerprint instability (Fable #10).** A divergence spanning two
-  files anchors to whichever `file` EXPLORE names + a drifting line window → duplicate
-  TODOs; surfaced findings are long-lived so they hit this more. Subsumed by the
-  location-anchored fingerprint direction above.
-
-## Scheduler-Koexistenz mit market-digest — geprüft, unkritisch (2026-07-10)
-
-**Verdikt: kein echtes Issue, kein Blocker.** Geprüft, weil auf dieser Maschine neben nightshift die
-market-digest-Timer laufen. Zeitlicher Überlapp existiert (`market-digest-tm-investing-fetch` feuert
-stündlich `00..08,10..23:00` → auch **03:00:00**; `nightshift` feuert 03:00 +Jitter → real 03:00:15;
-also dieselbe Minute). Aber die Berührungspunkte sind harmlos:
-- **Datei/Git/Working-Tree: keine Kollision.** market-digest steht zwar in nightshifts rulebook, aber
-  der tm-investing-Fetch schreibt nur nach `~/.local/state/market-digest` + `~/ai_stack_data/...`,
-  NICHT ins Git-Working-Tree von `~/dev/market-digest`. Und nightshift arbeitet in einer Wegwerf-Worktree
-  auf festem SHA — davon unberührt. Beide haben eigene `flock`s auf eigenen Lock-Dirs.
-- **Geteiltes Claude-Konto: einzige reale Berührung, mild.** tm-investing ruft `claude` CLI auf
-  (`TM_LLM_BACKEND=claude_cli`, Sonnet-5, Timeout 900s), nightshift ruft `claude` (Opus) zur selben
-  Minute → beide ziehen aus demselben Abo-Rate-Limit. Worst case: nightshifts Explore wird langsamer
-  oder kassiert ein `rate_limit_event` — **genau den Fall fängt der Parser seit f0e1898 ab** (Array-Shape).
-  Kein Korrektheitsbruch. Zwei parallele CLI-Sessions sind fürs Abo normal; teils getrennte Modell-Kapazität.
-
-Optionale billige Versicherung (nicht nötig): nightshift auf `OnCalendar=03:05` schieben, falls das
-Morgen-Log Verlangsamung/Rate-Limits um 03:00 zeigt. 03:00 ist nicht sakrosankt. Erst bei Befund.
-
-## PR / branch review mode — merge-recommendation layer
-
-A separate mode that reviews **all open `nightshift/*` branches (or PRs)** and gives a
-**merge / don't-merge recommendation** per branch — an extra review layer *on top* of the pipeline,
-run with an **independent, empty context** (not the thread that produced the change).
-
-**Value:**
-- *Convenience / harvest:* turns the morning triage from "fetch + diff + judge each branch" into a
-  ranked recommendation list — directly attacks the harvest-friction weak spot (re-review §2d/§5).
-- *Extra safety:* a second, independent judgment before the human merges.
-
-**Design notes for later:**
-- Read-only + advisory: it recommends, never merges or pushes (consistent with "human merges").
-- Fresh/empty context per branch reduces transcript-sycophancy — but same-model review still shares
-  the producer's blind spots (re-review §2, fable wild-idea #8). For true decorrelation, run this
-  layer on a *different model / vendor* (the opt-in API-key path, ADR 0003 allows it).
-- Natural output: append recommendations to the morning digest (or a `reviews/<date>.md`).
-- Could reconcile with the ledger: record the recommendation + (later) the human's actual verdict —
-  the first place a real merge/verdict signal could re-enter the system (re-review §5).
-
-## Capability escalation — can the agent widen its own tools? (2026-07-10)
-
-Question raised: could the agent rewrite its config so a read-only profile gains Write tools? Should the
-config be root-owned?
-
-**Analysis (verified against the runner 2026-07-10):**
-- The `--tools` allowlist is a **CLI argument** the Runner builds fresh per launch, hardcoded per stage
-  (`claude_run` case: fix -> Read,Grep,Glob,Write,Edit; else -> Read,Grep,Glob). It is NOT read from any
-  config file. `claude-settings.json` only wires the PreToolUse Bash guard and grants ZERO tools.
-- So **read-only stages cannot self-escalate**: there is no tools-granting config to edit, and they have
-  no Write/Edit/Bash primitive at all (empirically confirmed under `--dangerously-skip-permissions`). The
-  premise fails twice. Root-owning config is unnecessary for read-only.
-- **Real residual = the FIX stage.** It has Write/Edit (no Bash). Write/Edit take absolute paths and are
-  NOT path-confined to the worktree (the guard matches only `Bash`), and the agent runs as the same uid
-  that owns `bin/nightshift.sh` + `hooks/*` + `state/`. So a fix agent could overwrite the Runner or the
-  hook scripts on disk to weaken a FUTURE run (not its own — args are fixed at exec): e.g. add Bash to the
-  fix profile, or blank `hooks/pre-push`. Both confinement layers are Write-reachable this way.
-
-**Options (proportionate first):**
-- **Path-confine Write/Edit like Bash** — a PreToolUse guard that rejects Write/Edit to any path outside
-  the current worktree (`$wd`). Same mechanism as the existing Bash guard, extended. Turns "fix can write
-  anywhere" into "fix writes only its throwaway worktree." This is the right-sized fix and it also stops
-  fix from touching `~/.bashrc`, target-repo non-git files, etc.
-- **Root-own the control files** (`bin/nightshift.sh`, `hooks/`, `claude-settings.json`; mode 0644) as
-  quick defense-in-depth — blocks the specific runner/hook-tamper vector. Caveats: `state/` must stay
-  user-writable (runtime writes); `git pull` updates then need sudo; and it is a speed bump, not a jail
-  (fix can still write any other wasti-owned file). Do NOT root-own the whole tree.
-- **Full containment** (robust): run the fix agent as a dedicated unprivileged user or in bwrap/container
-  with control files mounted read-only and `$HOME` isolated. Heaviest; revisit if fix-mode graduates
-  beyond trusted local repos.
-- Note the git-push confinement (Layer 1 pre-push hook + Layer 2 guard) is unaffected for the CURRENT
-  run; the concern is strictly a fix agent editing those files to weaken the NEXT run. The path-confine
-  guard closes exactly that.
-
-## Deployment topology — the tool vs. the repos it tends (2026-07-09)
-
-nightshift-the-tool lives in ONE git repo (github.com/sebastianlang84/nightshift), but is meant to
-run on **several machines**, each tending that machine's **local** repos — which live on different
-hosts (GitHub, Bitbucket e.g. `~/partflow`, GitLab, or bare/local). The control repo's host has
-nothing to do with the target repos' hosts.
-
-**Already handled (verified 2026-07-09; re-verified 2026-07-10):**
-- Everything machine-specific is git-ignored — `rulebook.yaml`, `state/` (ledger/runs), `digests/`,
-  `worktrees/`, `sandbox/`. So `git pull` to update the tool never clobbers local config/state.
-  Re-checked 2026-07-10: `.gitignore` lists `/state/ /runs/ /digests/ /sandbox/ /worktrees/ rulebook.yaml`,
-  `git ls-files state/` is empty (ledger untracked), `git check-ignore` confirms all — so the same-repo,
-  many-machines checkout is safe: each install's ledger/rulebook stays local and un-versioned.
-- `NIGHTSHIFT_HOME` is self-derived from the script path — no hardcoded location; clone anywhere.
-- The core loop is host-agnostic (pure git over SSH: fetch/branch/push `nightshift/*`). The pre-push
-  confinement is pure git and works against any remote.
-
-**Still to handle:**
-- **Document the deployment model** (README or `docs/design/deployment.md`) + graduate to an ADR:
-  per-machine bootstrap = install `claude`+`jq` (+PR CLI) → clone → write `rulebook.yaml` → `schedule.sh
-  install/enable`. Tool updates = `git pull` per machine.
-- **One machine per target repo (v1 constraint).** The ledger is local per install; if the same repo
-  is tended from two machines, ledgers diverge → duplicate findings/branches. State the constraint;
-  a shared/remote ledger is out of v1 scope (memory-model.md).
-- **Host-aware PR automation** — see next item; today PRs are GitHub-only, so Bitbucket/GitLab targets
-  get bare branches regardless of where the control repo lives.
-
-## Multi-host PR automation (Lücke 1, 2026-07-09)
-
-`open_pr` only recognises `*github.com*` and shells out to `gh pr create`. On Bitbucket/GitLab remotes
-it logs "no GitHub remote — PR skipped" and pushes a bare `nightshift/*` branch. So on `~/partflow`
-(Bitbucket) the morning triage is branch-based, not PR-based.
-- **Decided 2026-07-10: accept bare branches for now.** `NIGHTSHIFT_OPEN_PR` now defaults to 0, so no
-  misleading "PR skipped" log and no credential needed; triage is branch-based across all hosts. Each
-  host prints a one-click "create PR" URL on push (could be captured into the digest — small, no creds).
-  Re-open the implement path (Bitbucket REST / GitLab, host-dispatched) only if/when API PRs are wanted
-  and per-host credentials are provisioned.
-- If implemented: keep it best-effort (branch is already pushed; a PR-API failure must not fail the run),
-  mirroring the current GitHub path.
-
-## Cost ceiling (2026-07-09)
-
-No dollar/turn budget cap exists — the only caps are open-branch backpressure + per-run branch count
-(ADR 0005). Observed: one findings-only explore on the real partflow codebase cost **~$4.60 / 357s**
-(vs $0.18 on the toy sandbox) because explore reads many files under `--max-turns 25`. branch-fix over
-several repos/night could run to tens of dollars.
-- Consider a rulebook knob: per-stage `max_turns`, and/or a `ccusage`/`claude-token-lens` spend stop
-  (ADR 0003 already names usage-window observation as the budget backstop — wire it in).
-
-## Pre-go-live checklist (open from the 2026-07-09 readiness review)
-
-The claude production path is now proven end-to-end (findings-only on partflow, accurate finding, zero
-remote writes). Before enabling the live nightly timer on a real repo:
-- **Verify Layer 2 under `--dangerously-skip-permissions`** — DONE (2026-07-09). Adversarial test:
-  registered `hooks/pretooluse-guard.sh` as a PreToolUse hook exactly as the Runner does, launched
-  `claude 2.1.197` with the production env+flags, had it attempt `git ... commit --no-verify ...`. The
-  guard **fired** — verbatim deny "nightshift: git --no-verify would bypass the pre-push confinement
-  hook"; a control command ran, the `--no-verify` one did not. So Layer 1 (git hook) + Layer 2 (guard)
-  both hold in the unattended mode. Residual closed.
-- **Server-side branch restrictions** — now defense-in-depth, not the sole backstop (Layer 2 proven).
-  Still worth adding GitHub branch protection on `main` (with `enforce_admins`, else the agent's own
-  admin creds bypass it) per target repo. Per-repo, per-host.
-- **Graduate a repo to `branch-fix`** only with explicit human OK — it is the first real `nightshift/*`
-  push to a shared remote. (The 4 live repos are already branch-fix in rulebook.yaml — human-approved.)
-- **Enable the scheduler** — DONE; timer armed, first live fire Fri 2026-07-10 03:00.
-
-_Also 2026-07-09:_ caught + fixed a latent parser bug — `claude -p --output-format json` returns an
-ARRAY on 2.1.197 (result object as an element, when a rate_limit_event is present), but the Runner
-parsed object-only (`.result`) → every explore would have reported `found:false` (silent no-op, no
-branches). Now normalises both shapes (commit f0e1898); proven with a real-claude e2e that found+fixed
-4 README typos and pushed a `nightshift/*` branch, with zero live-state pollution (commit e833979).
+- **Wake from suspend:** only if catch-up-on-wake is operationally insufficient.
+- **Adaptive cadence:** only if measured empty-run cost justifies more scheduler state.
+- **Bitbucket/GitLab PR APIs:** only when credentials and operator demand exist; branches remain the
+  credential-free baseline.
+- **Full containment:** dedicated user, `bwrap`, or container if path confinement is insufficient.
+- **Server branch protection:** per-host operator defense-in-depth, not a Nightshift code task.

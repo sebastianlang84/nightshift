@@ -1,88 +1,67 @@
-# Open questions
+# nightshift — open design decisions
 
-The design tensions we still need to resolve. Move each to an ADR once decided.
+Only unresolved choices with lasting architectural consequences belong here. Once decided, record
+the decision in an ADR and remove the section. Implementation work belongs in [`todo.md`](todo.md).
 
-## 1. Selection — how does the steward choose work? (explore vs. exploit)
-**RESOLVED (ADR 0004): north star = value-per-night**, not coverage. Selector optimises expected
-value; "do nothing" is a success outcome. Signals/scoring detail deferred to build.
-Pure random is wasteful; pure signal-driven (churn, missing tests, TODO/FIXME, open backlog)
-misses new ground. What is the balance, and what signals feed it? The ledger is the anti-repeat
-mechanism. **North star to settle first:** value-per-night (few high-value changes) vs. coverage
-(systematically touch everything) — this largely determines the selection design.
-_Reference: oss-autopilot's repo score (1–10) + threshold + skip-rules is a concrete model to adapt
-(see prior-art.md). This selector + the ledger (§2) is the novel core we are building (ADR 0002)._
+## 1. Finding identity and lifecycle
 
-## 2. Memory — what exactly does the ledger store, and where?
-Proposed: append-only `(repo, target, action, outcome, PR, SHA, timestamp)`, plus an explicit
-"attempted & abandoned" set so the same false positive is not retried nightly. Entries go stale
-when a file's SHA changes. Central store vs. per-repo? File format (JSONL vs. sqlite)?
-_References: Aeon uses `MEMORY.md` + reflect/flush; nodeglobal/agents uses SQLite; Ralph-loop uses
-the filesystem/git/TODO as the substrate. Pick per format decision above._
-**Elaborated:** [`docs/design/memory-model.md`](docs/design/memory-model.md) — two-tier
-(episodic JSONL + semantic Markdown), self-authored backlog, reflect/compaction. *(That two-tier
-design is now superseded for v1 — see the banner on that note and the resolution below.)*
-**Partly resolved** by [`docs/design/documentation-system.md`](docs/design/documentation-system.md):
-v1 is **central**, one append-only `ledger.jsonl`, per-repo views *derived* (not stored); semantic
-tier and reflect/compaction dropped from v1. Still open: staleness rule (finding-hash / file-SHA).
+Nightshift must recognize the same defect across rewording, line movement, and multi-file
+descriptions. The current model-produced fingerprint is unstable, and the append-only ledger does
+not yet express a complete carry/clear/invalidate lifecycle.
 
-## 3. The rulebook — scope and format
-**RESOLVED (ADR 0004): minimal `rulebook.yaml`** — allowed repos, per-repo `mode`
-(`findings-only`|`branch-fix`), limits. Hard prohibitions live in the hook, not here.
-Repo whitelist + per-repo mode (review-only vs. fix-PR), prohibitions (no main, no secrets/CI/deps,
-no deletes), tool allowlist, change-size limits (max lines/files per PR, max PRs/night). Declarative
-(YAML) with human ownership. How much should the agent be trusted to interpret vs. hard-enforced?
-**Elaborated:** [`docs/design/constitution-and-rulebook.md`](docs/design/constitution-and-rulebook.md)
-— three layers (constitution / rulebook / hard-enforcement), precedence, the four pillars.
+Decide:
 
-## 4. Budget model — the real break from a per-task timer
-**RESOLVED (ADR 0004, amended 2026-07-09 + ADR 0005): no per-night cap.** Throughput is governed
-solely by open-branch backpressure (`max_open_branches`); the earlier per-night production count
-(`max_branches_per_night`) was reverted and removed. Per-run bounds + a per-run runaway ceiling
-(`max_branches_per_run`, backstop not policy) + auto-compact off apply; usage-window observation is a
-backstop. Supersedes MartinLoop as gate.
-Instead of a timer per task: one outer loop `{pick work item → bounded run → record outcome}` that
-repeats until the time/quota window is spent. Inner runs stay bounded (no drift); the outer loop
-consumes the night. How do we detect "window exhausted" per harness (adapter concern)?
-_Refined by ADR 0003: detect the window via usage observation (`ccusage`, `claude-token-lens`), not
-a metered API client. MartinLoop can supply the per-run budget/verify gate (ADR 0002)._
-**Elaborated:** [`docs/design/execution-modes.md`](docs/design/execution-modes.md) — the outer loop
-as single/chain/parallel modes, plus the self-chaining governor (hard spawn caps in the runner).
+1. Stable identity: normalized locations and type, symbol/semantic target, content signature, or a
+   layered combination?
+2. Multi-file canonicalization: how is file order made irrelevant?
+3. Lifecycle: which verdicts mean unresolved, cleared, or permanently ignored?
+4. Exploration: how does the model receive known work and keep searching rather than spend its
+   result budget on an item the runner suppresses?
+5. Invalidation: when does a code change make an old identity eligible again?
 
-## 5. Anti-churn — the value bar
-**RESOLVED (ADR 0004): the value bar is *soft* in v1** — agent justification + confidence, the Review
-stage, and smallness limits — acceptable because output is branch-isolated and never merged (a bad
-change is a branch you delete). No calibrated critic / shadow-nights needed.
-Biggest risk: "steady improvement" becomes steady noise (trivial diffs that cost review time). The
-steward must be allowed to do **nothing** when nothing is worth it (adaptive backoff survives).
-What is the value bar, and how is it enforced?
-**Elaborated:** [`docs/design/self-evaluation.md`](docs/design/self-evaluation.md) — the pre-flight
-critic enforces the value bar before a PR ships (abandon + backlog if below bar). *(Superseded by the
-RESOLVED decision above — the critic-as-gate is cut; the value bar is soft. See that note's banner.)*
+Constraints already decided:
 
-## 6. Morning digest
-**RESOLVED (ADR 0004): derived `digests/<date>.md`, file-only in v1.** Reports shipped branches
-*and* considered-but-abandoned (the "do-nothing report"); empty nights still get one.
-The human should wake to a **summary of the night**, not 30 raw PRs. What does the digest contain,
-and where does it live?
+- the v1 ledger is central and append-only;
+- human verdicts outrank reconciliation ([ADR 0007](docs/adr/0007-human-verdicts-outrank-machine-reconcile.md));
+- surfaced ambiguity remains human-owned until cleared ([ADR 0006](docs/adr/0006-surface-intent-ambiguous-divergences.md));
+- wording and drifting line numbers alone are insufficient identity.
 
-## 7. Trust ramp
-**RESOLVED (ADR 0004): manual, via the rulebook `mode` knob** — a repo starts `findings-only`, the
-human edits the YAML to graduate it to `branch-fix`. No auto-graduation in v1.
-Start review-only, graduate to fixes as confidence grows. Is this per-repo config, or automatic
-based on ledger outcomes?
-**Elaborated:** [`docs/design/self-evaluation.md`](docs/design/self-evaluation.md) — trust-ramp via
-the retrospective loop (autonomy earned from measured acceptance). *(Superseded by the RESOLVED
-decision above — the retrospective/auto trust-ramp is cut; the ramp is the manual `mode` knob. See
-that note's banner.)*
+## 2. Spend control
 
-## 8. Reuse vs. supersede `nightly-review-pipeline`
-**RESOLVED (ADR 0004): borrow patterns, supersede memory + PR flow.** Borrow worktree isolation, the
-`claude -p` orchestration shape, and the review lenses; supersede the per-repo task-file memory (→
-central ledger) and the draft-PR flow (→ branches). No code dependency — it is a skill, not a library.
-Does nightshift call the existing pipeline as its "fix" tool, or absorb/replace it? See CONTEXT.md.
+Open-branch backpressure and per-run ceilings bound output, not subscription or token consumption.
+v2 adds Recon and can process several findings per Explore, increasing the importance of a real
+budget signal.
 
-## 9. Adopt vs. build — RESOLVED (ADR 0002)
-Prior-art survey done (`docs/prior-art.md`): no off-the-shelf fit. **Decision: build only the brain**
-(cross-repo self-prioritization + ledger), **borrow the body** (`claude -p`/Ralph-loop runtime,
-MartinLoop budget/verify gate, oss-autopilot scoring, and the existing `nightly-review-pipeline`
-fix flow). Open sub-question moved to §8. Next: verify licenses/maturity of the borrowed pieces.
+Decide:
+
+1. Limit unit: turns, elapsed time, observed subscription usage, tokens, or a combination?
+2. Scope: whole night, repo, adapter, or stage?
+3. Adapter signal: what works reliably for both first-party CLIs without switching to metered APIs?
+4. Exhaustion behavior: finish the current read-only stage, finish the current branch, or stop before
+   any further mutation?
+
+Constraints already decided:
+
+- execution stays on first-party CLIs ([ADR 0003](docs/adr/0003-subscription-safe-execution.md));
+- operator limits live in the rulebook ([ADR 0005](docs/adr/0005-configurable-limits-in-rulebook.md));
+- exhaustion must be explicit in ledger/digest, never a silent partial run.
+
+## 3. Recon exclusion policy
+
+v2 Recon can mark a review dimension inapplicable. A false negative can silently starve that lens
+until HEAD/TTL invalidates the cache.
+
+Decide whether Recon may exclude dimensions or only reprioritize them. If exclusion remains, define
+the maximum exclusion lifetime, operator override, and visibility required in the digest.
+
+Constraints already decided:
+
+- configured per-repo dimensions override the global set;
+- selection must always retain at least one fallback dimension;
+- Recon is advisory orientation, not authority over repository policy (ADR 0010).
+
+## Resolved decisions
+
+Selection, rulebook shape, branch backpressure, anti-churn, morning digest, trust ramp, pipeline
+reuse, build-vs-adopt, repo ordering, dimension rotation, and multi-finding output are resolved in
+ADRs 0002–0011 and are intentionally not duplicated here.

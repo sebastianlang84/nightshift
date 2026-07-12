@@ -61,11 +61,11 @@ output, the run pipeline, budget cap, and the force-push hook — is
 
 ## Relationship to `nightly-review-pipeline`
 
-A separate Claude Code skill (`~/.claude/skills/nightly-review-pipeline`) already implements the
+A separate Claude Code skill (`~/.claude/skills/nightly-review-pipeline`) provided the original
 "hands": a safe review → test → draft-PR flow with isolated worktrees, dedup, and findings written
-into a repo's task file. nightshift is the "brain" on top: self-direction, memory, and policy. The
-open question is whether nightshift *reuses* that pipeline as a tool or supersedes it — see
-`OPEN-QUESTIONS.md`.
+into a repo's task file. Nightshift borrows its worktree, orchestration, and review patterns but has
+no code dependency on the skill; it supersedes the per-repo memory and PR-first flow with its central
+ledger and branch-first workflow ([ADR 0004](docs/adr/0004-v1-scope-branch-isolated-steward.md)).
 
 ## Vocabulary
 

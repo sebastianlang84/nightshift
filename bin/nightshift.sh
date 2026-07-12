@@ -4,7 +4,7 @@
 # Outer loop: select a repo -> Explore -> Fix<->Review (capped) -> Finalize
 # (push a nightshift/* branch) -> record. Enforces the nightly branch cap and the
 # global open-branch backpressure. The agent invocation sits behind run_agent()
-# (ADR 0001 adapter seam): NIGHTSHIFT_AGENT=mock (tested) | claude (experimental).
+# (ADR 0001 adapter seam): NIGHTSHIFT_AGENT=mock | claude | codex.
 set -euo pipefail
 
 NIGHTSHIFT_HOME="${NIGHTSHIFT_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -168,16 +168,79 @@ write_codemap_mcp() {
 run_agent() { # stage workdir item_dir
   local stage="$1" workdir="$2" item_dir="$3" start end status=0 tokens="" cost=""
   start=$(date +%s)
-  if [ "$NIGHTSHIFT_AGENT" = mock ]; then
-    "mock_$stage" "$workdir" "$item_dir" || status=$?
-  else
-    claude_run "$stage" "$workdir" "$item_dir" || status=$?
+  case "$NIGHTSHIFT_AGENT" in
+    mock)   "mock_$stage" "$workdir" "$item_dir" || status=$? ;;
+    claude) claude_run "$stage" "$workdir" "$item_dir" || status=$? ;;
+    codex)  codex_run "$stage" "$workdir" "$item_dir" || status=$? ;;
+    *) log "unknown NIGHTSHIFT_AGENT=$NIGHTSHIFT_AGENT (expected mock, claude, or codex)"; status=2 ;;
+  esac
+  if [ "$NIGHTSHIFT_AGENT" != mock ]; then
     tokens=$(cat "$item_dir/.tokens_$stage" 2>/dev/null || true)
     cost=$(cat "$item_dir/.cost_$stage" 2>/dev/null || true)
   fi
   end=$(date +%s)
   append_run "$stage" "$NIGHTSHIFT_AGENT" "$start" "$((end - start))" "$tokens" "$status" "$(basename "$item_dir")" "$cost"
   return "$status"
+}
+
+stage_prompt() { # stage workdir item_dir -> prompt on stdout
+  local stage="$1" wd="$2" id="$3" prompt
+  prompt="$(cat "$NIGHTSHIFT_HOME/prompts/$stage.md")
+
+## Context
+Repo working directory: $wd"
+  case "$stage" in
+    explore|fix) prompt="$prompt
+
+## Change-size guidance (soft — not a hard cap)
+Prefer a change under ${MAX_FILES:-15} files and ${MAX_LINES:-400} lines. Larger is acceptable only
+if it is genuinely ONE coherent, reviewable improvement — never bundle unrelated changes." ;;
+  esac
+  if [ "$stage" = explore ]; then
+    prompt="$prompt
+
+## Findings budget
+Emit UP TO ${NIGHTSHIFT_FINDINGS_N:-1} finding(s) this pass — the top of your ranked shortlist, each a
+DISTINCT root cause (the repeated-inconsistency rule still collapses twins into ONE finding). Rank them
+so the most valuable is first; the runner ships in that order and truncates at the cap. Fewer is fine —
+never pad. If nothing clears the value bar, return found:false with an empty findings array."
+  fi
+  if [ "$stage" = explore ] && [ -n "${NIGHTSHIFT_DIMENSION:-}" ] && \
+     [ -f "$NIGHTSHIFT_HOME/prompts/dimensions/$NIGHTSHIFT_DIMENSION.md" ]; then
+    prompt="$prompt
+
+## Tonight's lens: ${NIGHTSHIFT_DIMENSION}
+Aim your scan through the lens below. Rank findings WITHIN it — but a screaming, out-of-lens
+correctness bug you happen to see may still take a slot; the lens focuses attention, it does not
+blind you to a live bug.
+
+$(cat "$NIGHTSHIFT_HOME/prompts/dimensions/$NIGHTSHIFT_DIMENSION.md")"
+  fi
+  if [ "$stage" = explore ] && [ -n "${NIGHTSHIFT_RECON_NOTES:-}" ]; then
+    prompt="$prompt
+
+## Repo orientation (from tonight's recon)
+${NIGHTSHIFT_RECON_NOTES}"
+  fi
+  if [ "$stage" = recon ] && [ -f "$id/signals.json" ]; then
+    prompt="$prompt
+
+### recon_signals (deterministic filesystem probe — refine these into per-dimension applicability)
+$(cat "$id/signals.json")"
+  fi
+  case "$stage" in
+    fix|review) prompt="$prompt
+
+### finding.json
+$(cat "$id/finding.json")" ;;
+  esac
+  if [ "$stage" = review ]; then
+    prompt="$prompt
+
+### git diff (working tree)
+$(git -C "$wd" diff)"
+  fi
+  printf '%s' "$prompt"
 }
 
 # ---- mock adapter (deterministic; the tested path) ----
@@ -245,61 +308,7 @@ claude_run() { # stage workdir item_dir
     fix) tools="${NIGHTSHIFT_FIX_TOOLS:-Read,Grep,Glob,Write,Edit}" ;;
     *)   tools="${NIGHTSHIFT_READONLY_TOOLS:-Read,Grep,Glob}" ;;
   esac
-  prompt="$(cat "$NIGHTSHIFT_HOME/prompts/$stage.md")
-
-## Context
-Repo working directory: $wd"
-  case "$stage" in
-    explore|fix) prompt="$prompt
-
-## Change-size guidance (soft — not a hard cap)
-Prefer a change under ${MAX_FILES:-15} files and ${MAX_LINES:-400} lines. Larger is acceptable only
-if it is genuinely ONE coherent, reviewable improvement — never bundle unrelated changes." ;;
-  esac
-  if [ "$stage" = explore ]; then
-    prompt="$prompt
-
-## Findings budget
-Emit UP TO ${NIGHTSHIFT_FINDINGS_N:-1} finding(s) this pass — the top of your ranked shortlist, each a
-DISTINCT root cause (the repeated-inconsistency rule still collapses twins into ONE finding). Rank them
-so the most valuable is first; the runner ships in that order and truncates at the cap. Fewer is fine —
-never pad. If nothing clears the value bar, return found:false with an empty findings array."
-  fi
-  if [ "$stage" = explore ] && [ -n "${NIGHTSHIFT_DIMENSION:-}" ] && \
-     [ -f "$NIGHTSHIFT_HOME/prompts/dimensions/$NIGHTSHIFT_DIMENSION.md" ]; then
-    prompt="$prompt
-
-## Tonight's lens: ${NIGHTSHIFT_DIMENSION}
-Aim your scan through the lens below. Rank findings WITHIN it — but a screaming, out-of-lens
-correctness bug you happen to see may still take a slot; the lens focuses attention, it does not
-blind you to a live bug.
-
-$(cat "$NIGHTSHIFT_HOME/prompts/dimensions/$NIGHTSHIFT_DIMENSION.md")"
-  fi
-  if [ "$stage" = explore ] && [ -n "${NIGHTSHIFT_RECON_NOTES:-}" ]; then
-    prompt="$prompt
-
-## Repo orientation (from tonight's recon)
-${NIGHTSHIFT_RECON_NOTES}"
-  fi
-  if [ "$stage" = recon ] && [ -f "$id/signals.json" ]; then
-    prompt="$prompt
-
-### recon_signals (deterministic filesystem probe — refine these into per-dimension applicability)
-$(cat "$id/signals.json")"
-  fi
-  case "$stage" in
-    fix|review) prompt="$prompt
-
-### finding.json
-$(cat "$id/finding.json")" ;;
-  esac
-  if [ "$stage" = review ]; then
-    prompt="$prompt
-
-### git diff (working tree)
-$(git -C "$wd" diff)"
-  fi
+  prompt="$(stage_prompt "$stage" "$wd" "$id")"
   # codemap structural index — only when the Runner flagged THIS repo as indexed, and only for the
   # navigation stages (explore/review). It is an MCP tool, so it needs no Bash. The worktree has no
   # index, so the agent must query the stable real repo via repoPath (injected below).
@@ -338,6 +347,51 @@ repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
     recon)   python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/recon.json" ;;
   esac
   return 0
+}
+
+# ---- codex adapter (first-party CLI headless, ADR 0003) ----
+# Recon/Explore/Review run read-only. Fix can write and execute commands only inside the disposable
+# worktree, with network disabled. The Runner still owns branch/commit/push.
+codex_run() { # stage workdir item_dir
+  local stage="$1" wd="$2" id="$3" prompt sandbox events model effort
+  local -a args=(--ask-for-approval never exec --ephemeral --ignore-user-config --ignore-rules
+    --strict-config --json -o "$id/$stage.out")
+  prompt="$(stage_prompt "$stage" "$wd" "$id")"
+  case "$stage" in
+    fix) sandbox=workspace-write ;;
+    *)   sandbox=read-only ;;
+  esac
+  args+=(--sandbox "$sandbox")
+  [ "$stage" != fix ] || args+=(-c 'sandbox_workspace_write.network_access=false')
+  model="${NIGHTSHIFT_CODEX_MODEL:-}"
+  [ -z "$model" ] || args+=(--model "$model")
+  effort="${NIGHTSHIFT_CODEX_REASONING_EFFORT:-}"
+  [ -z "$effort" ] || args+=(-c "model_reasoning_effort=\"$effort\"")
+
+  if [ -n "${NIGHTSHIFT_CODEMAP_REPO:-}" ] && { [ "$stage" = explore ] || [ "$stage" = review ]; }; then
+    args+=(-c 'mcp_servers.codemap.command="codemap-mcp"')
+    prompt="$prompt
+
+## Structural index (codemap)
+A codemap index of this repo is available. Prefer codemap_search / codemap_context to locate relevant
+code instead of reading files blindly. Your cwd is a throwaway worktree with NO index — ALWAYS pass
+repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
+  fi
+
+  events="$id/.codex_events_$stage"
+  if ! (cd "$wd" && printf '%s' "$prompt" | \
+    GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="$HOOKS_DIR" \
+    codex "${args[@]}" - > "$events"); then
+    return 1
+  fi
+  jq -sr '[.[] | select(.type=="turn.completed") | .usage.output_tokens // empty] | last // empty' \
+    "$events" > "$id/.tokens_$stage" 2>/dev/null || true
+  case "$stage" in
+    explore) python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/finding.json" ;;
+    fix)     cp "$id/$stage.out" "$id/worknote.md" ;;
+    review)  python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/review.md" ;;
+    recon)   python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/recon.json" ;;
+  esac
 }
 
 # --------------------------------------------------------------- selection ----
