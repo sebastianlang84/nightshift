@@ -147,26 +147,49 @@ manual_verdict() { # selector verdict [reason]
     merged|dropped|resolved|wontfix|open) ;;
     *) echo "verdict must be one of: merged dropped resolved wontfix open" >&2; exit 2 ;;
   esac
-  # find the newest shipped/finding row matching selector by item, branch, or fingerprint
-  local row
-  row=$(jq -sc --arg s "$sel" \
+  # all shipped/finding rows matching the selector by item, branch, or fingerprint
+  local matches
+  matches=$(jq -sc --arg s "$sel" \
     '[.[]|select(.outcome=="shipped" or .outcome=="finding")
-         |select(.item==$s or .branch==$s or .fingerprint==$s)]|last' "$LEDGER")
-  if [ "$row" = null ] || [ -z "$row" ]; then
+         |select(.item==$s or .branch==$s or .fingerprint==$s)]' "$LEDGER")
+  if [ "$matches" = "[]" ]; then
     echo "no shipped/finding ledger row matches '$sel'" >&2; exit 1
   fi
-  local item repo fp branch sha
+  # Don't silently guess: if the selector spans more than one branch, warn and show them; the
+  # newest still wins (matching prior behaviour), but the operator can now see the mis-target.
+  local ndistinct
+  ndistinct=$(jq -r '[.[]|.branch]|unique|length' <<<"$matches")
+  if [ "$ndistinct" -gt 1 ]; then
+    echo "warning: '$sel' matches $ndistinct distinct branches; applying to the newest —" >&2
+    jq -r '.[]|"  \(.branch // "(finding)")  [\(.item)]"' <<<"$matches" | sort -u >&2
+  fi
+  local row item repo fp branch sha
+  row=$(jq -c 'last' <<<"$matches")
   item=$(jq -r '.item' <<<"$row"); repo=$(jq -r '.repo' <<<"$row")
   fp=$(jq -r '.fingerprint' <<<"$row"); branch=$(jq -r '.branch // ""' <<<"$row")
   sha=$(jq -r '.sha // ""' <<<"$row")
+  # Idempotent: don't append a duplicate identical manual verdict on the same branch.
+  local was was_src
+  IFS=$'\t' read -r was was_src < <(last_verdict_meta "$branch") || true
+  if [ -n "$branch" ] && [ "$was" = "$verdict" ] && [ "$was_src" = manual ]; then
+    printf 'unchanged: %s is already %s (manual) — nothing appended\n' "$branch" "$verdict"
+    return 0
+  fi
   append_verdict "$item" "$repo" "$fp" "$branch" "$sha" "$verdict" "$reason" manual
-  printf 'recorded verdict: %s = %s%s\n' "$sel" "$verdict" "${reason:+ ($reason)}"
+  printf 'recorded verdict: %s = %s%s [item=%s repo=%s]\n' \
+    "${branch:-$sel}" "$verdict" "${reason:+ ($reason)}" "$item" "$(basename "$repo")"
 }
 
 # --------------------------------------------------------------------- main ----
 DRYRUN=0
 load_rulebook
 [ -f "$LEDGER" ] || { echo "no ledger at $LEDGER — nothing to harvest"; exit 0; }
+# Validate the whole ledger up front. Every read below is `jq -s` (slurp); a single corrupt
+# line would abort jq inside a process substitution, invisible to `set -e`, turning harvest
+# into a silent no-op that exits 0 and quietly stops reconciling. Fail loud instead — the same
+# fail-closed contract load_rulebook already honours for a broken rulebook.
+jq -e . "$LEDGER" >/dev/null 2>&1 \
+  || { echo "ledger is not valid JSONL ($LEDGER) — aborting harvest" >&2; exit 1; }
 
 if [ "${1:-}" = verdict ]; then
   shift; [ "$#" -ge 2 ] || { echo "usage: harvest.sh verdict <selector> <verdict> [reason]" >&2; exit 2; }
