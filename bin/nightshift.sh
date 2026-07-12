@@ -560,15 +560,21 @@ remove_worktree() {                                                    # repo wt
 # local bare remote / sandbox), missing gh, or a gh failure all just skip the PR;
 # the branch is already pushed either way. Echoes the PR url ("" if none). All
 # progress/errors go to stderr so stdout stays clean for the caller.
-open_pr() { # repo wt branch item_dir -> echoes PR url ("" if none)
-  local repo="$1" wt="$2" branch="$3" id="$4" base url
+open_pr() { # repo wt branch item_dir base -> echoes PR url ("" if none)
+  local repo="$1" wt="$2" branch="$3" id="$4" base="${5:-}" url
   [ "$NIGHTSHIFT_OPEN_PR" = 1 ] || return 0
   case "$(git -C "$repo" remote get-url origin 2>/dev/null || true)" in
     *github.com*) ;;
     *) log "  no GitHub remote — branch pushed, PR skipped"; return 0 ;;
   esac
   command -v gh >/dev/null 2>&1 || { log "  gh not found — branch pushed, no PR"; return 0; }
-  base="$(base_ref "$repo")"; base="${base#origin/}"; [ "$base" = HEAD ] && base=main
+  # The PR base MUST be the ref the branch was actually cut from (rulebook `base:`,
+  # e.g. develop) — NOT an auto-detected origin/main. Re-deriving with base_ref here
+  # ignored the configured base and opened every PR against main, so a develop-based
+  # one-line fix showed develop's whole divergence as its diff. Fall back to auto-
+  # detect only if the caller passed nothing.
+  [ -n "$base" ] || base="$(base_ref "$repo")"
+  base="${base#origin/}"; [ "$base" = HEAD ] && base=main
   # A runtime/behavioral finding the reviewer could not statically prove ships flagged, so the
   # morning human knows this one needs tests before merge and the verified ones do not.
   local mark=""
@@ -602,8 +608,8 @@ open_pr() { # repo wt branch item_dir -> echoes PR url ("" if none)
 }
 
 # ---------------------------------------------------------------- finalize ----
-finalize() { # repo worktree item_dir [seq] -> echoes branch name
-  local repo="$1" wt="$2" id="$3" seq="${4:-0}" fp type dim slug branch sha summary verif
+finalize() { # repo worktree item_dir [seq] [base] -> echoes branch name
+  local repo="$1" wt="$2" id="$3" seq="${4:-0}" basearg="${5:-}" fp type dim slug branch sha summary verif
   fp=$(jq -r '.fingerprint' "$id/finding.json")
   type=$(jq -r '.type // "change"' "$id/finding.json")   # default so the branch slug never reads "null"
   dim=$(jq -r '.dimension // ""' "$id/finding.json")     # the review lens (ADR 0010), leads the slug
@@ -634,7 +640,7 @@ $(cat "$id/worknote.md")"
     return 1
   fi
   local pr_url proof
-  pr_url=$(open_pr "$repo" "$wt" "$branch" "$id")
+  pr_url=$(open_pr "$repo" "$wt" "$branch" "$id" "$basearg")
   proof=$(jq -r '.proof // ""' "$id/review.md" 2>/dev/null || true)
   verif=$(jq -r '.verifiability // ""' "$id/finding.json" 2>/dev/null || true)
   ledger_append "$(basename "$id")" "$repo" "$fp" "$branch" "$sha" "shipped" "$(jq -r '.summary // ""' "$id/finding.json")" "$pr_url" "$proof" "$verif" "$dim"
@@ -874,7 +880,7 @@ main() {
       done
       b=""
       if [ "$verdict" = ship ]; then
-        if b=$(finalize "$repo" "$wt" "$fd" "$made"); then
+        if b=$(finalize "$repo" "$wt" "$fd" "$made" "$base"); then
           made=$((made + 1)); progress=1
           log "  $(basename "$repo"): shipped -> $b"
         fi
