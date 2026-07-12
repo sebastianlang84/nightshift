@@ -267,6 +267,19 @@ mock_explore() { # workdir item_dir — emits the v2 container {found, findings:
       disposition:"fix",verifiability:"static",summary:"typo \"retrun\" -> \"return\" in app.py comment",
       fingerprint:"app.py:typo:L1-L10",rank:2,confidence:0.9}]')
   fi
+  # An intent-ambiguous divergence (ADR 0006): the reviewer can prove it but cannot know which side is
+  # authoritative, so it must SURFACE as a human-owned finding, never auto-fix. Deterministic trigger.
+  if [ -f "$wd/NOTES.md" ] && grep -q 'AMBIGUOUS' "$wd/NOTES.md"; then
+    arr=$(printf '%s' "$arr" | jq -c '. + [{file:"NOTES.md",type:"divergence",line_window:"L1-L5",
+      disposition:"surface",verifiability:"static",summary:"ambiguous divergence in NOTES.md — needs a human",
+      fingerprint:"NOTES.md:divergence:L1-L5",rank:1,confidence:0.8}]')
+  fi
+  # An UNRECOGNISED disposition must fail closed (surface, not auto-fix). Deterministic trigger.
+  if [ -f "$wd/WEIRD.md" ] && grep -q 'FROB' "$wd/WEIRD.md"; then
+    arr=$(printf '%s' "$arr" | jq -c '. + [{file:"WEIRD.md",type:"other",line_window:"L1-L3",
+      disposition:"frobnicate",verifiability:"static",summary:"unknown disposition must fail closed",
+      fingerprint:"WEIRD.md:other:L1-L3",rank:1,confidence:0.8}]')
+  fi
   jq -nc --argjson f "$arr" '{found:($f|length>0),findings:$f}' > "$id/finding.json"
 }
 mock_fix() { # workdir item_dir — applies the fix for THIS finding (dispatched on .file)
