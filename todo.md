@@ -14,14 +14,6 @@ confinement (R8), the `surface` route + bounded findings-only loops, hardened re
 digest merge-rate breakdowns, the deployment guide (ADR 0012), independent branch review, the
 wall-clock spend budget (ADR 0013), and stable finding identity + lifecycle (ADR 0014).
 
-## Later — P2 operator experience
-
-### Surface harvest verdicts in the llmstack dashboard
-
-Show the latest verdict per item in the llmstack dashboard. This lives in the **`~/llmstack` repo**,
-not here — the nightshift-side data (ledger `verdict` rows + digest merge-rate breakdowns) already
-exists; only the dashboard view is outstanding.
-
 ## Open questions (not yet actionable — decide, then ADR)
 
 - [Recon exclusion policy](OPEN-QUESTIONS.md#3-recon-exclusion-policy): may Recon *exclude* a
