@@ -27,10 +27,11 @@ DIGEST_DIR="${NIGHTSHIFT_DIGEST_DIR:-$NIGHTSHIFT_HOME/digests}"
 LEDGER="$STATE_DIR/ledger.jsonl"
 RUNSLOG="$STATE_DIR/runs.jsonl"
 RECON_DIR="$STATE_DIR/recon"   # per-repo recon caches (ADR 0010); derived, disposable, HEAD/TTL-invalidated
+SCAN_DIR="$STATE_DIR/dim-scans"  # per (repo,dim) explore markers so rotation advances even on an empty Explore
 # Worktrees live OUTSIDE the control repo, so nightshift can target its own repo
 # without nesting a worktree inside a working tree.
 WORKTREES_DIR="${NIGHTSHIFT_WORKTREES:-${TMPDIR:-/tmp}/nightshift-worktrees}"
-mkdir -p "$STATE_DIR" "$RUNS_DIR" "$DIGEST_DIR" "$WORKTREES_DIR"
+mkdir -p "$STATE_DIR" "$RUNS_DIR" "$DIGEST_DIR" "$WORKTREES_DIR" "$SCAN_DIR"
 
 log() { echo "[nightshift] $*" >&2; }
 
@@ -443,14 +444,23 @@ repo_dimensions() { # repo -> applicable dimensions, space-separated, in priorit
   echo "${DIMENSIONS[*]}"
 }
 
-last_dim_epoch() { # repo dim -> epoch of the last WORK-ITEM ledger row for this (repo,dim), 0 if never
-  local repo="$1" dim="$2" iso
-  [ -f "$LEDGER" ] || { echo 0; return; }
-  iso=$(jq -rs --arg r "$repo" --arg d "$dim" \
-    '[.[]|select(.repo==$r and .dimension==$d and (.outcome=="finding" or .outcome=="shipped" or .outcome=="abandoned"))|.ts]
-     | max // empty' "$LEDGER" 2>/dev/null || true)
-  [ -n "$iso" ] || { echo 0; return; }
-  date -d "$iso" +%s 2>/dev/null || echo 0
+dim_scan_marker() { # repo dim -> marker file path (basename + path hash keeps same-named repos distinct)
+  printf '%s/%s-%s__%s' "$SCAN_DIR" "$(basename "$1")" "$(printf '%s' "$1" | sha1sum | cut -c1-8)" "$2"
+}
+last_dim_epoch() { # repo dim -> epoch this (repo,dim) was last SERVICED — a work-item row OR an Explore scan
+  # A lens can Explore and find nothing; counting only work-item outcomes left its epoch at 0
+  # forever, so the argmin in select_dimension re-picked it every run and starved the others.
+  # The Explore scan marker (touched every pass, outcome or not) is what makes rotation advance.
+  local repo="$1" dim="$2" iso lepoch=0 mepoch=0 marker
+  if [ -f "$LEDGER" ]; then
+    iso=$(jq -rs --arg r "$repo" --arg d "$dim" \
+      '[.[]|select(.repo==$r and .dimension==$d and (.outcome=="finding" or .outcome=="shipped" or .outcome=="abandoned"))|.ts]
+       | max // empty' "$LEDGER" 2>/dev/null || true)
+    [ -n "$iso" ] && lepoch=$(date -d "$iso" +%s 2>/dev/null || echo 0)
+  fi
+  marker="$(dim_scan_marker "$repo" "$dim")"
+  [ -f "$marker" ] && mepoch=$(stat -c %Y "$marker" 2>/dev/null || echo 0)
+  [ "$mepoch" -gt "$lepoch" ] && echo "$mepoch" || echo "$lepoch"
 }
 
 recon_cache_path() { # repo -> cache path; basename for readability + a path hash so two repos
@@ -810,6 +820,9 @@ main() {
     log "  $(basename "$repo") [$mode]: lens=${dim:-none} · budget=$rfind"
     run_agent explore "$wt" "$id" || true
     considered=$((considered + 1))
+    # Mark this (repo,dim) as serviced NOW — regardless of what Explore found — so the rotation
+    # advances to the next lens next run even when this pass surfaced nothing (ADR 0010).
+    [ -n "$dim" ] && touch "$(dim_scan_marker "$repo" "$dim")" 2>/dev/null || true
     # Explore emits the v2 container {found, findings:[…]} or (back-compat) a single finding object
     # {found:true,file,…}. Normalise to a findings array, cap it at the repo's N, then remove the
     # explore worktree — explore is read-only; every fix gets its OWN fresh worktree so diffs never
