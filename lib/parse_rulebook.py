@@ -83,7 +83,12 @@ def main(path: str) -> None:
     print(f"max_findings_per_item\t{limits.get('max_findings_per_item', '1')}")
     # Recon stage: on by default; cache invalidated on HEAD change or after ttl_days.
     print(f"recon_enabled\t{recon.get('enabled', 'true')}")
-    print(f"recon_ttl_days\t{recon.get('ttl_days', '7')}")
+    # A malformed ttl_days silently became 0 in bash arithmetic → the cache was never fresh →
+    # recon re-ran every pass. Require a positive integer so the misconfig fails loudly instead.
+    ttl = recon.get("ttl_days", "7")
+    if not ttl.isdecimal() or int(ttl) < 1:
+        raise SystemExit("recon.ttl_days must be a positive integer")
+    print(f"recon_ttl_days\t{ttl}")
     # Global review-dimension set; ORDER is the cold-start / tie priority in the Runner.
     for d in dims:
         print(f"dimension\t{d}")

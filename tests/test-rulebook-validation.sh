@@ -33,4 +33,19 @@ if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/rulebook2.yaml" >"$TMP/stdout" 2>
 fi
 grep -q "limits.max_fix_iterations must be a positive integer" "$TMP/stderr"
 
+# A malformed recon.ttl_days silently became 0 in bash arithmetic (constant recon refresh) — reject it.
+cat > "$TMP/rulebook3.yaml" <<'EOF'
+recon:
+  ttl_days: soon
+repos:
+  - path: /srv/example
+    mode: branch-fix
+EOF
+
+if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/rulebook3.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
+  echo "parser accepted a non-numeric ttl_days" >&2
+  exit 1
+fi
+grep -q "recon.ttl_days must be a positive integer" "$TMP/stderr"
+
 echo "test-rulebook-validation: ok"

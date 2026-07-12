@@ -28,6 +28,9 @@ LEDGER="$STATE_DIR/ledger.jsonl"
 RUNSLOG="$STATE_DIR/runs.jsonl"
 RECON_DIR="$STATE_DIR/recon"   # per-repo recon caches (ADR 0010); derived, disposable, HEAD/TTL-invalidated
 SCAN_DIR="$STATE_DIR/dim-scans"  # per (repo,dim) explore markers so rotation advances even on an empty Explore
+# A recon that produces nothing is negative-cached with THIS backoff (short vs the good-cache ttl_days),
+# so a transient failure retries soon but repeated failures don't re-run the expensive recon every pass.
+RECON_FAIL_BACKOFF_S="${NIGHTSHIFT_RECON_FAIL_BACKOFF_S:-21600}"  # 6h
 # Worktrees live OUTSIDE the control repo, so nightshift can target its own repo
 # without nesting a worktree inside a working tree.
 WORKTREES_DIR="${NIGHTSHIFT_WORKTREES:-${TMPDIR:-/tmp}/nightshift-worktrees}"
@@ -522,15 +525,18 @@ select_dimension() { # repo -> the least-recently-serviced APPLICABLE dimension 
 
 ensure_recon() { # repo -> refresh the recon cache if missing / HEAD changed / older than ttl_days (ADR 0010)
   [ "${RECON_ENABLED:-true}" != false ] || return 0
-  local repo="$1" cache head chead cts cepoch now ttl id wt base
+  local repo="$1" cache head chead cts cepoch now ttl win cfailed id wt base tmp
   cache="$(recon_cache_path "$repo")"; mkdir -p "$RECON_DIR"
   head=$(git -C "$repo" rev-parse HEAD 2>/dev/null || echo "")
   if [ -f "$cache" ]; then
     chead=$(jq -r '.head // ""' "$cache" 2>/dev/null || echo "")
     cts=$(jq -r '.ts // ""' "$cache" 2>/dev/null || echo "")
+    cfailed=$(jq -r '.recon_failed // false' "$cache" 2>/dev/null || echo false)
     cepoch=0; [ -n "$cts" ] && cepoch=$(date -d "$cts" +%s 2>/dev/null || echo 0)
     now=$(date +%s); ttl=$(( ${RECON_TTL_DAYS:-7} * 86400 ))
-    if [ "$chead" = "$head" ] && [ "$cepoch" -gt 0 ] && [ "$(( now - cepoch ))" -lt "$ttl" ]; then
+    # A negative (failed) cache uses the short backoff, a good cache the full ttl.
+    win="$ttl"; [ "$cfailed" = true ] && win="$RECON_FAIL_BACKOFF_S"
+    if [ "$chead" = "$head" ] && [ "$cepoch" -gt 0 ] && [ "$(( now - cepoch ))" -lt "$win" ]; then
       return 0   # cache is fresh — recon costs zero this run
     fi
   fi
@@ -547,10 +553,24 @@ ensure_recon() { # repo -> refresh the recon cache if missing / HEAD changed / o
     log "  $(basename "$repo"): recon worktree failed — skipping recon (never the live checkout)"
     return 0
   fi
+  # Write atomically (temp + rename): a failed/partial jq must never truncate a good prior cache.
+  tmp="$cache.tmp.$$"
   if [ -s "$id/recon.json" ]; then
-    jq -c --arg h "$head" --arg r "$repo" --arg ts "$(date -Iseconds)" \
-      '. + {repo:$r, head:$h, ts:$ts}' "$id/recon.json" > "$cache" 2>/dev/null \
-      || log "  $(basename "$repo"): recon cache write failed — continuing without recon"
+    if jq -c --arg h "$head" --arg r "$repo" --arg ts "$(date -Iseconds)" \
+         '. + {repo:$r, head:$h, ts:$ts}' "$id/recon.json" > "$tmp" 2>/dev/null; then
+      mv -f "$tmp" "$cache"
+    else
+      rm -f "$tmp"; log "  $(basename "$repo"): recon cache write failed — keeping prior cache"
+    fi
+  else
+    # Negative cache: recon produced nothing. Empty dimensions ⇒ recon_applicable treats every lens as
+    # applicable (safe degrade); recon_failed + the short backoff stop it re-running every pass.
+    if jq -nc --arg h "$head" --arg r "$repo" --arg ts "$(date -Iseconds)" \
+         '{repo:$r, head:$h, ts:$ts, recon_failed:true, dimensions:{}, notes:""}' > "$tmp" 2>/dev/null; then
+      mv -f "$tmp" "$cache"; log "  $(basename "$repo"): recon produced no result — negative-cached (backoff ${RECON_FAIL_BACKOFF_S}s)"
+    else
+      rm -f "$tmp"
+    fi
   fi
 }
 
