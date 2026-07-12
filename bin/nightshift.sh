@@ -118,7 +118,7 @@ already_done() { # fingerprint — ANY prior ledger entry (used by findings-only
   [ -f "$LEDGER" ] || return 1
   grep -Fq "\"fingerprint\":\"$1\"" "$LEDGER"
 }
-already_acted() { # fingerprint — only shipped/abandoned/deferred (used by branch-fix)
+already_acted() { # fingerprint — only shipped/abandoned (used by branch-fix)
   [ -n "$1" ] && [ "$1" != null ] || return 1   # never dedup on an unusable key
   [ -f "$LEDGER" ] || return 1
   # jq match, not a grep regex: fingerprints contain '.'/'/'/':' that would be
@@ -126,7 +126,7 @@ already_acted() { # fingerprint — only shipped/abandoned/deferred (used by bra
   # Slurp + any() so the verdict is order-independent (a non-matching *last* line
   # must not flip jq -e's exit status).
   jq -se --arg fp "$1" \
-    'any(.[]; .fingerprint==$fp and (.outcome=="shipped" or .outcome=="abandoned" or .outcome=="deferred"))' \
+    'any(.[]; .fingerprint==$fp and (.outcome=="shipped" or .outcome=="abandoned"))' \
     "$LEDGER" >/dev/null 2>&1
 }
 already_surfaced() { # fingerprint — a prior human-owned finding exists (a TODO is open)
@@ -743,7 +743,7 @@ write_digest() { # made open status
       echo
       echo "## Considered but not shipped"
       [ -f "$LEDGER" ] && jq -r --arg n "$NIGHT" \
-        'select(.night==$n and (.outcome=="abandoned" or .outcome=="deferred" or .outcome=="push-failed")) | "- " + .repo + " — " + .outcome + ": " + (.summary // .fingerprint)' \
+        'select(.night==$n and (.outcome=="abandoned" or .outcome=="push-failed")) | "- " + .repo + " — " + .outcome + ": " + (.summary // .fingerprint)' \
         "$LEDGER" 2>/dev/null || true
     fi
   } > "$f"
