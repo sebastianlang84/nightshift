@@ -707,16 +707,13 @@ ensure_recon() { # repo -> refresh the recon cache if missing / HEAD changed / o
 }
 
 open_branch_count() { # unmerged nightshift/* across all repos (reconciles against reality, §3e)
-  local total=0 i path n
+  local total=0 i path base n
   for i in "${!REPO_PATHS[@]}"; do
     path="${REPO_PATHS[$i]}"
     [ -d "$path/.git" ] || continue
     git -C "$path" fetch -q origin 2>/dev/null || true
-    if git -C "$path" show-ref -q --verify refs/remotes/origin/main 2>/dev/null; then
-      n=$(git -C "$path" branch -r --no-merged origin/main 2>/dev/null | grep -c "origin/${BRANCH_PREFIX}" || true)
-    else
-      n=$(git -C "$path" ls-remote --heads origin "${BRANCH_PREFIX}*" 2>/dev/null | wc -l | tr -d ' ')
-    fi
+    base="$(resolve_base "$path" "${REPO_BASES[$i]:-}")"
+    n=$(git -C "$path" branch -r --no-merged "$base" 2>/dev/null | grep -c "origin/${BRANCH_PREFIX}" || true)
     total=$((total + n))
   done
   echo "$total"
