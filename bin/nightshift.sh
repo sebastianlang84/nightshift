@@ -360,6 +360,16 @@ repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
 # ---- codex adapter (first-party CLI headless, ADR 0003) ----
 # Recon/Explore/Review run read-only. Fix can write and execute commands only inside the disposable
 # worktree, with network disabled. The Runner still owns branch/commit/push.
+#
+# Fix-stage confinement — the two adapters differ, deliberately, and NOT symmetrically:
+#   claude: capability-restricted to Read,Grep,Glob,Write,Edit — NO Bash, so it cannot run any
+#           command (git or otherwise). But Write/Edit paths are NOT confined to the worktree yet
+#           (tracked P0 in todo.md), so an absolute-path write out of tree is currently unguarded.
+#   codex:  OS-level `--sandbox workspace-write` — CAN exec commands (incl. git) but only inside the
+#           worktree, and network is off. Out-of-tree writes are blocked by the sandbox.
+# Neither can push (the Runner owns push; the pre-push hook + PreToolUse guard hold regardless), so
+# neither is exploitable to reach main — but their fix-stage boundaries are enforced by different
+# mechanisms (tool capability vs OS sandbox) with different residual gaps. See risk-analysis.md.
 codex_run() { # stage workdir item_dir
   local stage="$1" wd="$2" id="$3" prompt sandbox events model effort
   local -a args=(--ask-for-approval never exec --ephemeral --ignore-user-config --ignore-rules

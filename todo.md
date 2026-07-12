@@ -7,7 +7,10 @@ Only active, actionable work belongs here. Items are ordered by priority.
 - Implemented behavior: `README.md`, `CONTEXT.md`, and `docs/design/`
 - Completed work: remove it; Git history and ADRs are the record
 
-Last triaged: 2026-07-11 against `origin/main` at `556e996`.
+Last triaged: 2026-07-12 against `main` after the Fable v2 review. Resolved that pass: rulebook
+parse errors now fail closed (no more silent fleet truncation); `open_pr` targets the configured
+base; recon never falls back to the live checkout; recon caches and work-item IDs are collision-safe;
+dimension rotation advances after an empty Explore; the dead `deferred` outcome is gone.
 
 ## Now — P0 correctness and containment
 
@@ -27,25 +30,6 @@ Codex Fix already uses an OS `workspace-write` sandbox; full dedicated-user/cont
 remains defense-in-depth.
 
 ## Next — P1 identity, scheduling, and deterministic coverage
-
-### Restore globally unique work-item IDs
-
-v2 currently records per-finding directory basenames such as `f0` and `f1` in ledger and telemetry.
-Use `<parent-item>-f<N>` so `harvest.sh verdict <item>` and runs-to-item joins remain unambiguous.
-Test multiple repos and multiple findings in one run.
-
-### Make recon caches collision-safe
-
-`state/recon/$(basename "$repo").json` collides for different repositories with the same basename.
-Derive the cache name from a stable hash of the canonical repository path while keeping the repo path
-inside the cache for inspection. Test two same-named repositories.
-
-### Rotate dimensions after an empty Explore
-
-Rotation currently advances only when a finding/ship/abandon ledger row exists. A clean lens remains
-at epoch zero and is selected forever. Record a lightweight serviced event (or equivalent state)
-after every completed Explore, including `found:false`, without treating it as a finding. Verify that
-two empty passes select two different applicable dimensions.
 
 ### Repair finding identity and lifecycle across runs
 
@@ -82,10 +66,8 @@ Findings set `progress=1` but do not consume the open-branch or branch-per-run c
 Findings-only repo can therefore generate unbounded passes. Decide whether findings consume a
 per-run cap or do not keep the pass loop alive; always retain an explicit stop reason.
 
-### Harden recon fallback and cache writes
+### Harden recon cache writes
 
-- Avoid running Recon in the live checkout when worktree setup fails, or document and test the
-  accepted read-only fallback.
 - Write caches atomically so a failed `jq` cannot truncate the prior cache.
 - Add negative caching/backoff for empty or failed Recon results.
 - Validate `ttl_days` instead of silently turning malformed values into constant refreshes.
