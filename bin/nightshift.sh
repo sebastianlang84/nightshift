@@ -840,7 +840,11 @@ main() {
       if [ "$open" -ge "$MAX_OPEN" ]; then
         log "  open-branch cap reached ($open/$MAX_OPEN) — stop"; stop_reason=backpressure; break
       fi
-      fd="$id/f$k"; mkdir -p "$fd"
+      # Per-finding dir as a SIBLING of the item dir ("item-<nanos>-f<k>"), not a child ("f<k>").
+      # The ledger/telemetry `item` field is basename "$fd"; a bare "f0"/"f1" collided across items
+      # and runs, making harvest `verdict <item>` and runs->ledger joins ambiguous. The sibling name
+      # is globally unique, so every downstream join keys cleanly.
+      fd="$id-f$k"; mkdir -p "$fd"
       printf '%s' "$farr" | jq -c ".[$k]" > "$fd/finding.json"
       fp=$(finding_fingerprint "$fd/finding.json")
       if [ -z "$fp" ]; then
