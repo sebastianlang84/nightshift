@@ -37,7 +37,14 @@ log() { echo "[nightshift] $*" >&2; }
 # ---------------------------------------------------------------- rulebook ----
 declare -a REPO_PATHS=() REPO_MODES=() REPO_BASES=() REPO_FINDINGS=() REPO_DIMS=() DIMENSIONS=()
 load_rulebook() {
-  local tag a b c d e rb_run_branches=""
+  local tag a b c d e rb_run_branches="" parsed
+  # Capture the parser's output AND its exit status. Reading it directly via
+  # `done < <(python3 …)` hides a nonzero exit from `set -euo pipefail`, so a
+  # mid-stream parse error (e.g. a bad `findings:` on repo #2) silently truncated
+  # the repo set — the bad repo AND every valid repo after it were dropped and the
+  # run proceeded on a partial fleet. Fail closed instead: abort the whole run.
+  parsed="$(python3 "$NIGHTSHIFT_HOME/lib/parse_rulebook.py" "$RULEBOOK")" \
+    || { log "rulebook parse failed ($RULEBOOK) — aborting run"; exit 1; }
   while IFS=$'\t' read -r tag a b c d e; do
     case "$tag" in
       prefix)                BRANCH_PREFIX="$a" ;;
@@ -52,7 +59,7 @@ load_rulebook() {
       dimension)             DIMENSIONS+=("$a") ;;
       repo)                  REPO_PATHS+=("${a#path=}"); REPO_MODES+=("${b#mode=}"); REPO_BASES+=("${c#base=}"); REPO_FINDINGS+=("${d#findings=}"); REPO_DIMS+=("${e#dimensions=}") ;;
     esac
-  done < <(python3 "$NIGHTSHIFT_HOME/lib/parse_rulebook.py" "$RULEBOOK")
+  done <<< "$parsed"
   MAX_FINDINGS="${MAX_FINDINGS:-1}"
   RECON_ENABLED="${RECON_ENABLED:-true}"; RECON_TTL_DAYS="${RECON_TTL_DAYS:-7}"
   # Fallback dimension set if the rulebook declares none, so rotation still works out of the box.

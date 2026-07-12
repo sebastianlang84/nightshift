@@ -69,7 +69,13 @@ def main(path: str) -> None:
     # (precedence: rulebook -> NIGHTSHIFT_MAX_RUN_BRANCHES -> default). The others have
     # no env counterpart, so the parser owns their defaults directly.
     print(f"max_branches_per_run\t{limits.get('max_branches_per_run', '')}")
-    print(f"max_fix_iterations\t{limits.get('max_fix_iterations', '3')}")
+    # A hand-set 0 would make the fix<->review loop never run — every finding then
+    # abandons silently. Require >= 1 so the misconfig fails loudly (with the runner's
+    # fail-closed parse handling) instead of doing nothing.
+    mfi = limits.get("max_fix_iterations", "3")
+    if not mfi.isdecimal() or int(mfi) < 1:
+        raise SystemExit("limits.max_fix_iterations must be a positive integer")
+    print(f"max_fix_iterations\t{mfi}")
     print(f"max_files\t{limits.get('max_files_per_change', '15')}")
     print(f"max_lines\t{limits.get('max_lines_per_change', '400')}")
     # Findings emitted per repo per pass. Default 1 keeps a rulebook that omits the key at the

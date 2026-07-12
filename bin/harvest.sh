@@ -39,12 +39,16 @@ SCHEMA_VERSION=2
 
 declare -a REPO_PATHS=() REPO_BASES=()
 load_rulebook() {
-  local tag a b c d e
+  local tag a b c d e parsed
+  # Capture output + exit status; a parse error via process substitution is invisible
+  # to `set -euo pipefail` and would reconcile on a truncated repo set. Fail closed.
+  parsed="$(python3 "$NIGHTSHIFT_HOME/lib/parse_rulebook.py" "$RULEBOOK")" \
+    || { echo "rulebook parse failed ($RULEBOOK) — aborting harvest" >&2; exit 1; }
   while IFS=$'\t' read -r tag a b c d e; do
     case "$tag" in
       repo) REPO_PATHS+=("${a#path=}"); REPO_BASES+=("${c#base=}") ;;
     esac
-  done < <(python3 "$NIGHTSHIFT_HOME/lib/parse_rulebook.py" "$RULEBOOK")
+  done <<< "$parsed"
 }
 
 # --- base resolution, mirrored from bin/nightshift.sh (resolve_base / base_ref) ---
