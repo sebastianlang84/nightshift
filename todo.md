@@ -12,18 +12,6 @@ parse errors now fail closed (no more silent fleet truncation); `open_pr` target
 base; recon never falls back to the live checkout; recon caches and work-item IDs are collision-safe;
 dimension rotation advances after an empty Explore; the dead `deferred` outcome is gone.
 
-## Now — P0 correctness and containment
-
-### Live-verify the Fix-stage Write/Edit confinement (R8)
-
-The `PreToolUse` guard now confines `Write`/`Edit`/`MultiEdit`/`NotebookEdit` to the worktree and is
-registered for those tools (not just `Bash`); the decision logic is covered by
-`tests/test-fix-write-confinement.sh`. Still unverified end-to-end under real `claude`: that the
-matcher fires on a `Write` and that `NIGHTSHIFT_WORKTREE` reaches the hook process. Run one approved
-adversarial `claude -p` (Fix tool set, `--dangerously-skip-permissions`) that attempts an out-of-tree
-write and confirm the guard denies it — as was done for the Bash anti-bypass on 2026-07-09. Record the
-result in `hook-spec.md`. Full dedicated-user/container isolation remains defense-in-depth.
-
 ## Next — P1 identity, scheduling, and deterministic coverage
 
 ### Repair finding identity and lifecycle across runs

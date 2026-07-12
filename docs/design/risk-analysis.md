@@ -172,11 +172,10 @@ That is arbitrary code execution as a `docker`+`sudo` account (→ host root, R2
 C4 never inspects `Write`/`Edit`. This is broader and sharper than R1 (which framed the write only as
 commit-content exfil): "no shell → no code execution" was the first cut's central error.
 
-*Mitigated by [N1](#n1) (implemented): the PreToolUse guard now confines `Write`/`Edit`/`MultiEdit`/
+*Mitigated by [N1](#n1) (implemented): the PreToolUse guard confines `Write`/`Edit`/`MultiEdit`/
 `NotebookEdit` to the worktree, and `write_claude_settings` registers it for those tools (not just
-`Bash`). Residual: the guard's decision logic is deterministically tested, but the end-to-end path
-under real `claude` — the matcher firing on a `Write` and `NIGHTSHIFT_WORKTREE` reaching the hook
-process — is pending an approved live run (harness ready). [M2](#m2) (OS sandbox) remains
+`Bash`). Verified end-to-end under real `claude` on 2026-07-12 (guard denied an out-of-tree `Write`;
+see hook-spec.md), in addition to the deterministic unit tests. [M2](#m2) (OS sandbox) remains
 defense-in-depth.*
 
 ### R9 — Untracked files bypass the review evidence chain <a id="r9"></a>

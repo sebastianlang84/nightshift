@@ -98,7 +98,11 @@ write primitive — Fix's `Write`/`Edit` reaching absolute paths outside the wor
 Layer 2(b) above. Full OS-level sandboxing (read-only FS / no network) stays the strongest tier if
 ever needed.
 
-**Residual verification (unverified).** Layer 2(b)'s decision logic is deterministically tested
-(`tests/test-fix-write-confinement.sh`). The end-to-end path under real `claude` — the matcher firing
-on a `Write`, and `NIGHTSHIFT_WORKTREE` reaching the hook process — is pending an approved live
-adversarial run (as was done for Layer 2(a) on 2026-07-09).
+**Verified end-to-end (2026-07-12).** Beyond the deterministic unit tests
+(`tests/test-fix-write-confinement.sh`), a live adversarial run confirmed the integration path: real
+`claude` (2.1.205) launched exactly as the Runner does — Fix tool set, the guard registered with the
+production matcher, `NIGHTSHIFT_WORKTREE` injected — was told to write two files, one inside the
+worktree and one just outside. The inside write succeeded; the outside write was denied by the guard,
+which emitted `nightshift: Write/Edit outside the worktree is not allowed (resolved: …)` and left no
+file. This proves the matcher fires on a `Write` and that `NIGHTSHIFT_WORKTREE` reaches the hook
+process (mirrors the Layer 2(a) verification of 2026-07-09).
