@@ -493,12 +493,16 @@ ensure_recon() { # repo -> refresh the recon cache if missing / HEAD changed / o
   fi
   id="$RUNS_DIR/recon-$(date +%s%N)"; mkdir -p "$id"
   "$NIGHTSHIFT_HOME/lib/recon_signals.sh" "$repo" > "$id/signals.json" 2>/dev/null || echo '{}' > "$id/signals.json"
-  # Recon is read-only; run it in a throwaway worktree (isolation), falling back to the repo path.
+  # Recon is read-only, but the "never the live checkout" invariant is absolute: if the
+  # isolated worktree can't be created, SKIP recon rather than pointing a stage at the
+  # operator's working tree. Recon degrades gracefully — no cache written this run means
+  # recon_applicable() treats every dimension as applicable, so nothing is starved.
   base="$(base_ref "$repo")"; wt="$WORKTREES_DIR/$(basename "$id")"
   if setup_worktree "$repo" "$wt" "$base"; then
     run_agent recon "$wt" "$id" || true; remove_worktree "$repo" "$wt"
   else
-    run_agent recon "$repo" "$id" || true
+    log "  $(basename "$repo"): recon worktree failed — skipping recon (never the live checkout)"
+    return 0
   fi
   if [ -s "$id/recon.json" ]; then
     jq -c --arg h "$head" --arg r "$repo" --arg ts "$(date -Iseconds)" \
