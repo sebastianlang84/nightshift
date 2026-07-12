@@ -255,6 +255,15 @@ $(cat "$id/finding.json")" ;;
 ### git diff (working tree)
 $(git -C "$wd" diff)"
   fi
+  if [ "$stage" = advise ]; then
+    prompt="$prompt
+
+### finding.json (what this branch claims to address)
+$(cat "$id/finding.json" 2>/dev/null || echo '{}')
+
+### git diff (three-dot: base...branch — independent of base drift)
+$(git -C "$wd" diff "${NIGHTSHIFT_ADVISE_BASE:-HEAD}...HEAD" 2>/dev/null || true)"
+  fi
   printf '%s' "$prompt"
 }
 
@@ -300,6 +309,15 @@ mock_fix() { # workdir item_dir — applies the fix for THIS finding (dispatched
 mock_review() { # workdir item_dir
   local _wd="$1" id="$2"
   jq -nc '{verdict:"ship",reason:"Typo fix; single file, reversible, no behaviour change — clears the smallness bar."}' > "$id/review.md"
+}
+mock_advise() { # workdir item_dir — deterministic second-opinion from the branch's finding type
+  local _wd="$1" id="$2" type
+  type=$(jq -r '.type // ""' "$id/finding.json" 2>/dev/null || echo "")
+  if [ "$type" = typo ]; then
+    jq -nc '{recommendation:"merge",reason:"Typo fix; trivial, reversible, no behaviour change."}' > "$id/advice.json"
+  else
+    jq -nc '{recommendation:"do-not-merge",reason:"Non-trivial change; a human should judge intent."}' > "$id/advice.json"
+  fi
 }
 mock_recon() { # workdir item_dir — deterministic applicability straight from recon_signals.json
   local _wd="$1" id="$2" sig
@@ -376,6 +394,7 @@ repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
     fix)     cp "$id/$stage.out" "$id/worknote.md" ;;
     review)  python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/review.md" ;;
     recon)   python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/recon.json" ;;
+    advise)  python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/advice.json" ;;
   esac
   return 0
 }
@@ -432,6 +451,7 @@ repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
     fix)     cp "$id/$stage.out" "$id/worknote.md" ;;
     review)  python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/review.md" ;;
     recon)   python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/recon.json" ;;
+    advise)  python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/advice.json" ;;
   esac
 }
 
@@ -715,9 +735,51 @@ $(cat "$id/worknote.md")"
   echo "$branch"
 }
 
+# ------------------------------------------------- independent branch review ----
+# Opt-in (NIGHTSHIFT_BRANCH_REVIEW=1): a FRESH read-only agent gives a second opinion — merge /
+# do-not-merge — on every open nightshift/* branch, written into the morning digest. It NEVER merges
+# or pushes (read-only tool profile + git-confinement hold). Prefer a different model/vendor with
+# NIGHTSHIFT_ADVISOR_AGENT (e.g. codex when the night ran on claude); the advisor's model is its own
+# adapter env (NIGHTSHIFT_CODEX_MODEL / NIGHTSHIFT_CLAUDE_FLAGS). Emits a markdown section on stdout
+# ("" if disabled or no open branches).
+advise_branches() {
+  [ "${NIGHTSHIFT_BRANCH_REVIEW:-0}" = 1 ] || return 0
+  # Dynamic-scope override: run_agent reads the global NIGHTSHIFT_AGENT; a local here rebinds it for
+  # every advise call without disturbing the night's own adapter.
+  local NIGHTSHIFT_AGENT="${NIGHTSHIFT_ADVISOR_AGENT:-$NIGHTSHIFT_AGENT}"
+  local i path base branches ref name id wt rec reason out=""
+  for i in "${!REPO_PATHS[@]}"; do
+    path="${REPO_PATHS[$i]}"; [ -d "$path/.git" ] || continue
+    git -C "$path" fetch -q origin 2>/dev/null || true
+    base="$(resolve_base "$path" "${REPO_BASES[$i]:-}")"
+    branches=$(git -C "$path" branch -r --no-merged "$base" 2>/dev/null | tr -d ' ' | grep "^origin/${BRANCH_PREFIX}" || true)
+    [ -n "$branches" ] || continue
+    while IFS= read -r ref; do
+      [ -n "$ref" ] || continue
+      name="${ref#origin/}"
+      id="$RUNS_DIR/advise-$(date +%s%N)"; mkdir -p "$id"
+      # Best-effort finding context from the ledger's shipped row for this branch.
+      jq -sc --arg b "$name" '([.[]|select(.outcome=="shipped" and .branch==$b)]|last) // {}
+        | {summary:(.summary//""),fingerprint:(.fingerprint//""),type:(.type//""),dimension:(.dimension//"")}' \
+        "$LEDGER" 2>/dev/null > "$id/finding.json" || echo '{}' > "$id/finding.json"
+      wt="$WORKTREES_DIR/$(basename "$id")"
+      if ! setup_worktree "$path" "$wt" "$ref"; then rm -rf "$id"; continue; fi
+      local NIGHTSHIFT_ADVISE_BASE="$base"   # seen by stage_prompt via dynamic scope
+      run_agent advise "$wt" "$id" || true
+      remove_worktree "$path" "$wt"
+      rec=$(jq -r '.recommendation // "?"' "$id/advice.json" 2>/dev/null || echo "?")
+      reason=$(jq -r '.reason // ""'        "$id/advice.json" 2>/dev/null || echo "")
+      out="$out- \`$name\` ($(basename "$path")): **$rec** — $reason"$'\n'
+    done <<< "$branches"
+  done
+  [ -n "$out" ] || return 0
+  printf '\n## Independent branch review (advisor: %s)\n_Read-only second opinion; never merges or pushes._\n\n%s' \
+    "$NIGHTSHIFT_AGENT" "$out"
+}
+
 # ------------------------------------------------------------------- digest ----
-write_digest() { # made open status
-  local made="$1" open="$2" status="$3" f="$DIGEST_DIR/$NIGHT.md" runs dur
+write_digest() { # made open status [advice]
+  local made="$1" open="$2" status="$3" advice="${4:-}" f="$DIGEST_DIR/$NIGHT.md" runs dur
   {
     echo "# nightshift digest — $NIGHT"
     echo
@@ -815,6 +877,7 @@ write_digest() { # made open status
         'select(.night==$n and (.outcome=="abandoned" or .outcome=="push-failed")) | "- " + .repo + " — " + .outcome + ": " + (.summary // .fingerprint)' \
         "$LEDGER" 2>/dev/null || true
     fi
+    [ -n "$advice" ] && printf '%s\n' "$advice"
   } > "$f"
   log "digest -> $f"
 }
@@ -1004,7 +1067,8 @@ main() {
   done
 
   open=$(open_branch_count)
-  write_digest "$made" "$open" "$stop_reason"
+  local advice; advice="$(advise_branches)"
+  write_digest "$made" "$open" "$stop_reason" "$advice"
   log "night done: $made shipped this run, $considered considered, $open now open (cap $MAX_OPEN)."
 }
 

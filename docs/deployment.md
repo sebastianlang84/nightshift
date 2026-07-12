@@ -84,6 +84,10 @@ never push outside `nightshift/*` (see [`docs/design/hook-spec.md`](design/hook-
   delete. Deleting/merging frees the open-branch cap so the next night resumes.
 - **Record verdicts** the machine can't derive with `bin/harvest.sh verdict <selector> <verdict>`;
   harvest also reconciles merged/dropped branches automatically each run.
+- **Independent branch review (opt-in):** set `NIGHTSHIFT_BRANCH_REVIEW=1` to have a fresh read-only
+  agent add a merge / do-not-merge second opinion for every open branch to the digest. Set
+  `NIGHTSHIFT_ADVISOR_AGENT` (e.g. `codex` when the night runs on `claude`) for a different vendor's
+  eyes. It never merges or pushes. Costs extra tokens, so it is off by default.
 - **Logs:** `bin/schedule.sh logs [N]` or `journalctl --user -u nightshift.service`.
 
 ## Teardown
