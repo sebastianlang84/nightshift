@@ -143,26 +143,45 @@ code_sig() { # repo finding.json -> 12-char signature or ""
   echo "$sig"
 }
 
-# Lifecycle-aware suppression (ADR 0014). A fingerprint is suppressed if it is permanently ignored
+# Lifecycle-aware suppression (ADR 0014). A repo-scoped fingerprint is suppressed if it is permanently ignored
 # (a human `wontfix` verdict) OR it has a prior row in the given outcome set whose stored content
 # signature still MATCHES the current code (code_sig equal, or absent on older rows). If the code
 # under the finding has changed since (code_sig differs), it is NOT suppressed — the identity is
 # eligible again. jq match (not a grep regex): fingerprints contain '.'/'/'/':' metacharacters; a
 # slurped any() keeps the verdict order-independent.
-_fp_suppressed() { # fingerprint code_sig outcomes_json
-  [ -n "$1" ] && [ "$1" != null ] || return 1   # never dedup on an unusable key
+_fp_suppressed() { # repo fingerprint code_sig outcomes_json
+  [ -n "$2" ] && [ "$2" != null ] || return 1   # never dedup on an unusable key
   [ -f "$LEDGER" ] || return 1
-  jq -se --arg fp "$1" --arg csig "$2" --argjson outs "$3" '
-    [.[] | select(.fingerprint==$fp)] as $rows
+  jq -se --arg repo "$1" --arg fp "$2" --arg csig "$3" --argjson outs "$4" '
+    . as $all
+    | ([$all[] | select(.fingerprint==$fp and .repo!=null) | .repo] | unique) as $owners
+    | [$all[] | select(.fingerprint==$fp and
+        (.repo==$repo or (.repo==null and $owners==[$repo])))] as $rows
     | ($rows | any(.outcome=="verdict" and .verdict=="wontfix")) as $permanent
     | ($rows | any(
         ((.outcome as $o | $outs | index($o)) != null)
         and (((.code_sig // "") == "") or ((.code_sig // "") == $csig)))) as $known
     | $permanent or $known' "$LEDGER" >/dev/null 2>&1
 }
-already_done()     { _fp_suppressed "$1" "${2:-}" '["finding","shipped","abandoned"]'; }  # findings-only: report once
-already_acted()    { _fp_suppressed "$1" "${2:-}" '["shipped","abandoned"]'; }             # branch-fix: acted before
-already_surfaced() { _fp_suppressed "$1" "${2:-}" '["finding"]'; }                         # a human-owned TODO is open
+_suppressed_for() { # outcomes_json repo fingerprint code_sig; legacy: outcomes_json fingerprint code_sig
+  local outs="$1" repo fp csig
+  shift
+  if [ "$#" -eq 3 ]; then
+    repo="$1"; fp="$2"; csig="$3"
+  else
+    fp="${1:-}"; csig="${2:-}"
+    # Keep the sourced helper's old two-argument form safe: infer a repo only when the ledger
+    # identifies exactly one owner. A colliding fingerprint is deliberately not suppressed.
+    repo=$(jq -rs --arg fp "$fp" \
+      '[.[] | select(.fingerprint==$fp and .repo!=null) | .repo] | unique
+       | if length==1 then .[0] else empty end' "$LEDGER" 2>/dev/null || true)
+    [ -n "$repo" ] || return 1
+  fi
+  _fp_suppressed "$repo" "$fp" "$csig" "$outs"
+}
+already_done()     { _suppressed_for '["finding","shipped","abandoned"]' "$@"; }  # findings-only: report once
+already_acted()    { _suppressed_for '["shipped","abandoned"]' "$@"; }             # branch-fix: acted before
+already_surfaced() { _suppressed_for '["finding"]' "$@"; }                         # a human-owned TODO is open
 
 known_work() { # repo -> compact "fingerprint — summary" list of STILL-OPEN items for the explore prompt
   local repo="$1"
@@ -170,9 +189,13 @@ known_work() { # repo -> compact "fingerprint — summary" list of STILL-OPEN it
   # Latest verdict per fingerprint, then keep findings/open-branches whose verdict is NOT a terminal
   # clear (merged/resolved/wontfix/dropped). Cap the list so the prompt stays bounded.
   jq -rs --arg r "$repo" '
-    ([.[]|select(.outcome=="verdict" and .fingerprint!=null)] | group_by(.fingerprint)
+    . as $rows
+    | ([ $rows[] | select(.outcome=="verdict" and .fingerprint!=null)
+         | . as $verdict
+         | ([ $rows[] | select(.fingerprint==$verdict.fingerprint and .repo!=null) | .repo] | unique) as $owners
+         | select(.repo==$r or (.repo==null and $owners==[$r])) ] | group_by(.fingerprint)
       | map(sort_by(.ts)|last) | map({key:.fingerprint, value:.verdict}) | from_entries) as $v
-    | [.[] | select(.repo==$r and (.outcome=="finding" or .outcome=="shipped") and .fingerprint!=null)]
+    | [$rows[] | select(.repo==$r and (.outcome=="finding" or .outcome=="shipped") and .fingerprint!=null)]
     | group_by(.fingerprint) | map(sort_by(.ts)|last)
     | map(select((($v[.fingerprint] // "") | (. == "merged" or . == "resolved" or . == "wontfix" or . == "dropped")) | not))
     | .[0:40] | map("- " + .fingerprint + " — " + (.summary // "")) | join("\n")' \
@@ -1020,11 +1043,12 @@ write_digest() { # made open status [advice]
       # cleared (merged/resolved/wontfix/dropped) — so an unresolved TODO stays visible until acted on.
       echo "## Open findings (all nights — awaiting a human)"
       [ -f "$LEDGER" ] && jq -rs '
-        ([.[]|select(.outcome=="verdict" and .fingerprint!=null)] | group_by(.fingerprint)
-          | map(sort_by(.ts)|last) | map({key:.fingerprint, value:.verdict}) | from_entries) as $v
+        ([.[]|select(.outcome=="verdict" and .fingerprint!=null)] | group_by([.repo, .fingerprint])
+          | map(sort_by(.ts)|last)
+          | map({key:([.repo, .fingerprint] | tojson), value:.verdict}) | from_entries) as $v
         | [.[]|select(.outcome=="finding" and .fingerprint!=null)]
-        | group_by(.fingerprint) | map(sort_by(.ts)|last)
-        | map(select((($v[.fingerprint] // "") | (. == "merged" or . == "resolved" or . == "wontfix" or . == "dropped")) | not))
+        | group_by([.repo, .fingerprint]) | map(sort_by(.ts)|last)
+        | map(select((($v[([.repo, .fingerprint] | tojson)] // "") | (. == "merged" or . == "resolved" or . == "wontfix" or . == "dropped")) | not))
         | map("- " + .repo + " — " + (.summary // .fingerprint) + "  (" + .fingerprint + ", since " + .night + ")")
         | join("\n")' "$LEDGER" 2>/dev/null || true
     fi
@@ -1174,7 +1198,7 @@ main() {
       summary=$(jq -r '.summary // ""' "$fd/finding.json")
 
       if [ "$mode" = findings-only ]; then
-        if already_done "$fp" "$csig"; then
+        if already_done "$repo" "$fp" "$csig"; then
           log "  $(basename "$repo") [findings-only]: already reported ($fp) — skip"; continue
         fi
         ledger_append "$(basename "$fd")" "$repo" "$fp" "" "" "finding" "$summary" "" "" "" "$dim" "" "$csig"
@@ -1194,7 +1218,7 @@ main() {
       esac
       # A surfaced divergence LATCHES: once a human owns it as a TODO, a later run must neither
       # re-surface it nor quietly auto-fix it.
-      if already_surfaced "$fp" "$csig"; then
+      if already_surfaced "$repo" "$fp" "$csig"; then
         log "  $(basename "$repo"): previously surfaced — human-owned, not touching ($fp)"; continue
       fi
       if [ "$disp" = surface ]; then
@@ -1203,7 +1227,7 @@ main() {
         log "  $(basename "$repo") [branch-fix]: surfaced, not auto-fixed: $summary"
         continue
       fi
-      if already_acted "$fp" "$csig"; then
+      if already_acted "$repo" "$fp" "$csig"; then
         log "  $(basename "$repo"): already handled ($fp) — skip"; continue
       fi
       # Spend budget: stop BEFORE starting a new fix (the only mutation). Findings already surfaced
