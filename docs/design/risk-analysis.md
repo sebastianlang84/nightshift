@@ -58,10 +58,10 @@ These are implemented and active today. Each is enforced by mechanism, not by pr
 
 **Consequence — and its limit.** The *destructive-git* class is structurally blocked: no merge, no
 push outside `nightshift/*`, no direct repo access. But "no `Bash`" was **over-read** in the first
-cut as "no code execution." It is not: `Write`/`Edit` accept **absolute paths** and are unconfined
-(the settings only guard `Bash`, [nightshift.sh:127-131](../../bin/nightshift.sh)), so the agent can
-write anywhere `llmadmin` can — including files that later execute ([R8](#r8), [R10](#r10)). The real
-risk lives in the **write primitive**, not in a shell.
+cut as "no code execution." `Write`/`Edit` accept **absolute paths**, so they required their own
+boundary: the implemented PreToolUse guard now confines them to the Runner-injected worktree
+([R8](#r8), [N1](#n1)). The historical lesson remains that the risk lived in the **write primitive**,
+not in a shell; the no-`Bash` allowlist alone was insufficient.
 
 **Codex adapter delta.** `--ignore-user-config` and `--ignore-rules` prevent host-global Codex
 configuration and exec-policy rules from silently changing unattended behavior. Read-only stages
@@ -162,15 +162,14 @@ Bounded by `--max-turns`, `max_fix_iterations`, `max_open_branches` (hard halt a
 *Residual: low.* The value-based throttle in autonomy-and-shutoff.md would tighten it further.
 
 ### R8 — Write/Edit accept absolute paths → code execution as `llmadmin` <a id="r8"></a>
-The fix stage grants `Write,Edit` ([nightshift.sh:195](../../bin/nightshift.sh)); the process only
-does `cd "$wd"` ([nightshift.sh:239](../../bin/nightshift.sh)) and the agent settings guard **only**
-`Bash` ([nightshift.sh:127-131](../../bin/nightshift.sh)). `Write`/`Edit` take absolute paths, so a
-prompt-injected fix stage can write anywhere `llmadmin` can — `~/.bashrc`, `~/.ssh/authorized_keys`,
-`~/.config/systemd/user/*.service`, `~/.claude/settings.json`, or a fake binary in `~/.local/bin/`.
-That is arbitrary code execution as a `docker`+`sudo` account (→ host root, R2) reached with **no
-`Bash` at all**. C1 removes only the shell; C2's worktree confines nothing against absolute paths;
-C4 never inspects `Write`/`Edit`. This is broader and sharper than R1 (which framed the write only as
-commit-content exfil): "no shell → no code execution" was the first cut's central error.
+The fix stage grants `Write,Edit`, and `Write`/`Edit` take absolute paths. Before N1, merely doing
+`cd "$wd"` did not confine them: a prompt-injected fix stage could write anywhere `llmadmin` could —
+`~/.bashrc`, `~/.ssh/authorized_keys`, `~/.config/systemd/user/*.service`,
+`~/.claude/settings.json`, or a fake binary in `~/.local/bin/`. That exposed arbitrary code
+execution as a `docker`+`sudo` account (→ host root, R2) with **no `Bash` at all**. C1 removed only
+the shell, while C2's worktree did not by itself constrain absolute tool paths. This was broader and
+sharper than R1 (which framed the write only as commit-content exfil): "no shell → no code
+execution" was the first cut's central error.
 
 *Mitigated by [N1](#n1) (implemented): the PreToolUse guard confines `Write`/`Edit`/`MultiEdit`/
 `NotebookEdit` to the worktree, and `write_claude_settings` registers it for those tools (not just
@@ -305,17 +304,15 @@ primary containment.
 
 With C1–C8, the *destructive-git* class (repo destruction, force-push to `main`, auto-merge, push
 outside `nightshift/*`) is structurally blocked. The independent review corrected the rest: **"no
-`Bash`" is not "no code execution."** The material residual risk is **arbitrary code execution as the
-`llmadmin` account** via the unconfined `Write`/`Edit` primitive (R8), optionally self-triggering
-through the Runner's PATH (R10) — reached with no shell at all. Secret exfiltration (R1) and the
-review-evidence gap (R9) sit alongside it. All of this is amplified by R2: the containment, though
-individually sound, is single-tier and sits on a `docker`/`sudo` (host-root-capable) account.
-For Codex, workspace sandboxing narrows the arbitrary-write exposure, while permitted in-worktree
-commands and the missing per-stage turn cap are adapter-specific residuals.
+`Bash`" is not "no code execution."** N1 now neutralises the direct R8 path by confining Claude's
+`Write`/`Edit` tools to the worktree. The material residuals are secret exfiltration (R1), the
+review-evidence gap (R9), and single-tier containment on a `docker`/`sudo` (host-root-capable)
+account (R2); the Runner PATH chain (R10) remains relevant as defense-in-depth if the application
+guard fails. For Codex, workspace sandboxing narrows arbitrary-write exposure, while permitted
+in-worktree commands and the missing per-stage turn cap are adapter-specific residuals.
 
-Ordered response: **N1** (deny Write/Edit outside the worktree) is the cheapest, highest-leverage
-step and should land first — it neutralises R8 without new infrastructure. **N3** and **N4** close the
-review-evidence and PATH-hijack chains. **M1** (dedicated unprivileged account) then collapses the R2
-blast radius. Until N1/N3/N4 + M1 are in place, unattended operation on the shared host carries a
-real, understood **code-execution** risk — not merely an exfiltration risk — that the daytime-testing
-phase is expected to keep bounded by attention, not by architecture.
+Ordered response after the implemented **N1**: **N3** and **N4** close the review-evidence and
+PATH-hijack chains. **M1** (dedicated unprivileged account) then collapses the R2 blast radius. Until
+N3/N4 + M1 are in place, unattended operation on the shared host still carries understood
+exfiltration, review-integrity, and defense-in-depth gaps that the daytime-testing phase is expected
+to keep bounded by attention, not by architecture.
