@@ -166,7 +166,7 @@ review_branch() { # repo base branchref
 review_repo() { # repo [branchref]
   local repo="$1" only="${2:-}"
   [ -d "$repo/.git" ] || { printf '\n=== %s ===\n(skip: not a git repo)\n' "$repo"; return 0; }
-  git -C "$repo" fetch -q origin 2>/dev/null || true
+  git -C "$repo" fetch --prune -q origin 2>/dev/null || true   # --prune: don't review branches already deleted on origin
   local base; base="$(base_for_repo "$repo")"
 
   if [ -n "$only" ]; then

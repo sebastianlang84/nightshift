@@ -711,7 +711,9 @@ open_branch_count() { # unmerged nightshift/* across all repos (reconciles again
   for i in "${!REPO_PATHS[@]}"; do
     path="${REPO_PATHS[$i]}"
     [ -d "$path/.git" ] || continue
-    git -C "$path" fetch -q origin 2>/dev/null || true
+    # --prune: without it, a branch deleted on origin lingers as a stale remote-tracking ref and
+    # `--no-merged` keeps counting it, inflating backpressure and blocking runs on phantom slots.
+    git -C "$path" fetch --prune -q origin 2>/dev/null || true
     base="$(resolve_base "$path" "${REPO_BASES[$i]:-}")"
     n=$(git -C "$path" branch -r --no-merged "$base" 2>/dev/null | grep -c "origin/${BRANCH_PREFIX}" || true)
     total=$((total + n))
@@ -859,7 +861,7 @@ advise_branches() {
   local i path base branches ref name id wt rec reason out=""
   for i in "${!REPO_PATHS[@]}"; do
     path="${REPO_PATHS[$i]}"; [ -d "$path/.git" ] || continue
-    git -C "$path" fetch -q origin 2>/dev/null || true
+    git -C "$path" fetch --prune -q origin 2>/dev/null || true   # --prune: drop stale refs so review skips phantom branches
     base="$(resolve_base "$path" "${REPO_BASES[$i]:-}")"
     branches=$(git -C "$path" branch -r --no-merged "$base" 2>/dev/null | tr -d ' ' | grep "^origin/${BRANCH_PREFIX}" || true)
     [ -n "$branches" ] || continue

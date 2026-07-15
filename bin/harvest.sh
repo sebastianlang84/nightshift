@@ -234,7 +234,7 @@ while IFS=$'\t' read -r item repo fp branch sha pr_url; do
   # we cannot see git reality — skip every branch in that repo (fail closed) rather than
   # reconcile against a stale/absent view and stamp false 'dropped's fleet-wide.
   if [ -z "${FETCHED[$repo]:-}" ]; then
-    if [ -d "$repo/.git" ] && git -C "$repo" fetch -q origin 2>/dev/null; then
+    if [ -d "$repo/.git" ] && git -C "$repo" fetch --prune -q origin 2>/dev/null; then
       FETCHED[$repo]=ok
     else
       FETCHED[$repo]=fail
