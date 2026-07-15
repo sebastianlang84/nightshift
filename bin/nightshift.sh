@@ -457,8 +457,8 @@ repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
 #
 # Fix-stage confinement — the two adapters differ, deliberately, and NOT symmetrically:
 #   claude: capability-restricted to Read,Grep,Glob,Write,Edit — NO Bash, so it cannot run any
-#           command (git or otherwise). But Write/Edit paths are NOT confined to the worktree yet
-#           (tracked P0 in todo.md), so an absolute-path write out of tree is currently unguarded.
+#           command (git or otherwise). Its PreToolUse guard confines Write/Edit paths to the
+#           Runner-injected worktree root, including absolute paths.
 #   codex:  OS-level `--sandbox workspace-write` — CAN exec commands (incl. git) but only inside the
 #           worktree, and network is off. Out-of-tree writes are blocked by the sandbox.
 # Neither can push (the Runner owns push; the pre-push hook + PreToolUse guard hold regardless), so
