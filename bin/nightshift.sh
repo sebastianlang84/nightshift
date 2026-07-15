@@ -318,10 +318,14 @@ $(cat "$id/signals.json")"
 $(cat "$id/finding.json")" ;;
   esac
   if [ "$stage" = review ]; then
+    # Stage first, then show the STAGED diff so review sees exactly what finalize commits
+    # (`git add -A` in finalize). A plain `git diff` reports tracked modifications only and
+    # omits new untracked files, letting a fix-created file ship unreviewed (R9 / fix N3).
+    git -C "$wd" add -A
     prompt="$prompt
 
-### git diff (working tree)
-$(git -C "$wd" diff)"
+### git diff (staged — exactly what finalize will commit)
+$(git -C "$wd" diff --staged)"
   fi
   if [ "$stage" = advise ]; then
     prompt="$prompt
