@@ -1,8 +1,14 @@
 [Unit]
 Description=nightshift — unattended overnight code-review-and-fix steward
 Documentation=https://github.com/sebastianlang84/nightshift
-After=network-online.target
-Wants=network-online.target
+# No After/Wants=network-online.target here: this is a systemd *user* unit (installed by
+# bin/schedule.sh via `systemctl --user`; see docs/deployment.md). network-online.target is
+# only ever activated in the *system* manager, by its implementer services
+# (NetworkManager-wait-online.service / systemd-networkd-wait-online.service). The per-user
+# manager has no such implementer, so ordering on it here is a silent no-op that would
+# falsely imply the run waits for connectivity. The launcher shells out to network-dependent
+# CLIs (claude/gh); their own retries/failures surface a missing network, and linger keeps
+# the timer honest across logout — but systemd cannot network-gate a user unit.
 
 [Service]
 Type=oneshot
