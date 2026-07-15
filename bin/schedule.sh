@@ -70,7 +70,7 @@ case "$cmd" in
     ;;
   dry-run)
     # Prove the launcher + orchestrator wiring now, with the mock agent (no quota, no PRs).
-    NIGHTSHIFT_AGENT="${NIGHTSHIFT_AGENT:-mock}" "$NIGHTSHIFT_HOME/bin/nightshift-cron.sh"
+    NIGHTSHIFT_AGENT=mock "$NIGHTSHIFT_HOME/bin/nightshift-cron.sh"
     ;;
   uninstall)
     systemctl --user disable --now nightshift.timer 2>/dev/null || true
