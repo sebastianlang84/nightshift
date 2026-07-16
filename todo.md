@@ -15,7 +15,14 @@ digest merge-rate breakdowns, the deployment guide (ADR 0012), independent branc
 wall-clock spend budget (ADR 0013), stable finding identity + lifecycle (ADR 0014), and recon
 yield-weighting / never-exclude with the empty-scope feedback loop (ADR 0015).
 
-_No active implementation work at present._
+- **Empty branch shipped when the target repo has a blocking pre-commit hook.** If a repo's
+  `pre-commit` hook exits non-zero (e.g. pi-authenticator's git-workflow CHANGELOG gate), the Fix-stage
+  `git commit` aborts, but the Runner still pushes — the branch ref == base, so it carries no commit.
+  It then reconciles as `merged` (its SHA is an ancestor of base), inflating the scoreboard with phantom
+  ships. Observed 2026-07-16: `nightshift/tests-bug-pi-authenticator-20260716-{212320-0,212458-1}` (both
+  empty, pending deletion). Fix: after the Fix-stage commit, assert `git rev-list base..HEAD` is non-empty before
+  pushing (skip + log otherwise); consider committing with `--no-verify` inside the throwaway worktree,
+  since Nightshift's confinement is the pretooluse-guard (hook-spec.md), not the target repo's hooks.
 
 ## Conditional / deferred
 
