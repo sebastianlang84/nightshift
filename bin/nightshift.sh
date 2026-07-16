@@ -25,6 +25,10 @@ NIGHT="$(date +%Y-%m-%d)"
 RUNS_DIR="${NIGHTSHIFT_RUNS_DIR:-$NIGHTSHIFT_HOME/runs}/$NIGHT"
 DIGEST_DIR="${NIGHTSHIFT_DIGEST_DIR:-$NIGHTSHIFT_HOME/digests}"
 LEDGER="$STATE_DIR/ledger.jsonl"
+# Derived, disposable index of the last service epoch per (repo,dimension). One aggregating jq
+# pass over the append-only ledger, memoized on the ledger's mtime, so last_dim_epoch's nested
+# repo×dimension callers stop re-slurping the whole ledger on every cell (see last_dim_epoch).
+LEDGER_EPOCH_INDEX="$STATE_DIR/.ledger-epoch.idx"
 RUNSLOG="$STATE_DIR/runs.jsonl"
 RECON_DIR="$STATE_DIR/recon"   # per-repo recon caches (ADR 0010); derived, disposable, HEAD/TTL-invalidated
 SCAN_DIR="$STATE_DIR/dim-scans"  # per (repo,dim) explore markers so rotation advances even on an empty Explore
@@ -579,16 +583,42 @@ repo_dimensions() { # repo -> applicable dimensions, space-separated, in priorit
 dim_scan_marker() { # repo dim -> marker file path (basename + path hash keeps same-named repos distinct)
   printf '%s/%s-%s__%s' "$SCAN_DIR" "$(basename "$1")" "$(printf '%s' "$1" | sha1sum | cut -c1-8)" "$2"
 }
+refresh_ledger_epoch_index() { # rebuild LEDGER_EPOCH_INDEX (repo\tdim\tepoch) iff the ledger changed
+  # last_dim_epoch runs once per (repo,dimension) cell inside nested loops — select_dimension's
+  # dimension loop and write_digest's repo×dimension coverage matrix — so a per-call `jq -rs` slurp
+  # re-parses the whole append-only, never-pruned ledger O(R*D) times a night. Instead derive the
+  # per-key max service ts in ONE jq pass and cache it, invalidated on the ledger's mtime (the file
+  # is command-substitution-safe state, since callers run last_dim_epoch in a subshell). The per-key
+  # max is exactly what the old per-call query returned, so the staleness ranking is unchanged.
+  if [ ! -f "$LEDGER" ]; then rm -f "$LEDGER_EPOCH_INDEX" 2>/dev/null || true; return 0; fi
+  # Fresh index (exists and the ledger is not newer) → reuse; nested cells cost a lookup, not a scan.
+  { [ -f "$LEDGER_EPOCH_INDEX" ] && [ ! "$LEDGER" -nt "$LEDGER_EPOCH_INDEX" ]; } && return 0
+  local raw tmp repo dim iso
+  # On a jq failure keep any existing index and retry next call — never cache an empty index over a
+  # good one (matches the old per-call `|| true`, which fell back to epoch 0 only for that one call).
+  raw=$(jq -rs '
+    [.[]|select(.repo!=null and .dimension!=null
+                and (.outcome=="finding" or .outcome=="shipped" or .outcome=="abandoned"))]
+    | group_by([.repo,.dimension]) | map(max_by(.ts) | [.repo,.dimension,.ts])
+    | .[] | @tsv' "$LEDGER" 2>/dev/null) || return 0
+  tmp="$(mktemp "$STATE_DIR/.ledger-epoch.idx.XXXXXX")"
+  {
+    while IFS=$'\t' read -r repo dim iso; do
+      [ -n "$iso" ] || continue
+      printf '%s\t%s\t%s\n' "$repo" "$dim" "$(date -d "$iso" +%s 2>/dev/null || echo 0)"
+    done <<< "$raw"
+  } > "$tmp"
+  mv -f "$tmp" "$LEDGER_EPOCH_INDEX"
+}
 last_dim_epoch() { # repo dim -> epoch this (repo,dim) was last SERVICED — a work-item row OR an Explore scan
   # A lens can Explore and find nothing; counting only work-item outcomes left its epoch at 0
   # forever, so the argmin in select_dimension re-picked it every run and starved the others.
   # The Explore scan marker (touched every pass, outcome or not) is what makes rotation advance.
-  local repo="$1" dim="$2" iso lepoch=0 mepoch=0 marker
-  if [ -f "$LEDGER" ]; then
-    iso=$(jq -rs --arg r "$repo" --arg d "$dim" \
-      '[.[]|select(.repo==$r and .dimension==$d and (.outcome=="finding" or .outcome=="shipped" or .outcome=="abandoned"))|.ts]
-       | max // empty' "$LEDGER" 2>/dev/null || true)
-    [ -n "$iso" ] && lepoch=$(date -d "$iso" +%s 2>/dev/null || echo 0)
+  local repo="$1" dim="$2" lepoch=0 mepoch=0 marker
+  refresh_ledger_epoch_index
+  if [ -f "$LEDGER_EPOCH_INDEX" ]; then
+    lepoch=$(awk -F'\t' -v r="$repo" -v d="$dim" '$1==r && $2==d {print $3; exit}' "$LEDGER_EPOCH_INDEX")
+    [ -n "$lepoch" ] || lepoch=0
   fi
   marker="$(dim_scan_marker "$repo" "$dim")"
   [ -f "$marker" ] && mepoch=$(stat -c %Y "$marker" 2>/dev/null || echo 0)
