@@ -226,6 +226,21 @@ fi
 
 # prefetch each repo once
 declare -A FETCHED=()
+
+# Precompute the latest verdict+source per branch in ONE ledger pass. last_verdict_meta
+# slurps the whole append-only ledger on every call; calling it once per shipped branch in
+# the reconcile loop below was O(shipped_branches x ledger_rows) — quadratic as history
+# accumulates (the ledger is append-only, never pruned). Branch names are globally unique
+# (timestamp+seq+dim), so no branch is reconciled twice and this map is behaviour-identical
+# to the per-call scan. group_by preserves input order, so .[-1] is the last-appended verdict.
+declare -A LAST_VERDICT=()
+while IFS=$'\t' read -r _b _v _s; do
+  [ -n "$_b" ] && LAST_VERDICT["$_b"]="$_v"$'\t'"$_s"
+done < <(jq -rs '[.[]|select(.outcome=="verdict" and (.branch//"")!="")]
+                 | group_by(.branch)[]
+                 | .[-1]
+                 | "\(.branch)\t\(.verdict // "")\t\(.source // "")"' "$LEDGER" 2>/dev/null)
+
 printf '%-28s %-46s %-8s -> %-8s %s\n' REPO BRANCH WAS NOW ""
 changed=0
 while IFS=$'\t' read -r item repo fp branch sha pr_url; do
@@ -246,7 +261,7 @@ while IFS=$'\t' read -r item repo fp branch sha pr_url; do
   fi
   base=$(base_for_repo "$repo")
   now=$(reconcile "$repo" "$base" "$branch" "$sha" "$pr_url")
-  IFS=$'\t' read -r was was_src < <(last_verdict_meta "$branch") || true
+  IFS=$'\t' read -r was was_src <<< "${LAST_VERDICT[$branch]:-}" || true
   # A probe that could not decide (skip) leaves the recorded verdict untouched.
   if [ "$now" = skip ]; then
     printf '%-28s %-46s %-8s -> %-8s %s\n' "$(basename "$repo")" "$branch" "${was:-—}" "skip" "(probe failed — fail closed)"
