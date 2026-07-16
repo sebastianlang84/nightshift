@@ -13,7 +13,11 @@ export NIGHTSHIFT_HOME
 # Nightly runs are real work by default; the mock is only for --dry-run testing.
 export NIGHTSHIFT_AGENT="${NIGHTSHIFT_AGENT:-claude}"
 # Make the tools nightshift invokes findable under systemd's minimal PATH.
-export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
+# System dirs come FIRST so a binary planted under ~/.local/bin (which a write
+# primitive could reach) cannot shadow the Runner's unqualified jq/git/gh/
+# python3/codemap calls — see docs/design/risk-analysis.md R10/N4. Agent tools
+# that live only under ~/.local/bin (claude/codex/gh) are still resolved there.
+export PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:${PATH:-}"
 
 LOG_DIR="${NIGHTSHIFT_LOG_DIR:-$HOME/.local/state/nightshift/logs}"
 mkdir -p "$LOG_DIR"
