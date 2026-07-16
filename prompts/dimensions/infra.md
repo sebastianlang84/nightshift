@@ -15,7 +15,13 @@ Hunt for:
 - systemd units: wrong `WorkingDirectory`/`ExecStart` path, missing `Restart=`, a unit
   that starts before its dependency;
 - env plumbing: a variable read in code but never set in compose/CI/unit, a value
-  duplicated across files that has drifted, a required var with no default and no doc.
+  duplicated across files that has drifted, a required var with no default and no doc;
+- observability wiring (config only): missing or unbounded log rotation (`logging:`
+  driver/options), a healthcheck or liveness endpoint referenced by a unit/compose but
+  never defined in the service, an error path that swallows instead of logging, a
+  metrics/monitoring service a sibling stack in THIS repo has that this one lacks;
+- release/deploy automation: a deploy or release script referencing a missing file,
+  target, tag scheme, or secret; a version/tag step that cannot run as written.
 
 Proof standard for this lens:
 - Most findings are `static-given-deps`: the defect is visible in the file, but the
