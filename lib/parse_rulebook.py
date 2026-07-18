@@ -63,6 +63,19 @@ def main(path: str) -> None:
         if cur:
             repos.append(cur)
 
+    # The pre-push hook appends `*` to this value. Without a trailing slash, a
+    # prefix such as `m` also authorizes `main`; require a distinct branch
+    # namespace and reject whitespace that would corrupt the TSV transport.
+    if (
+        not prefix.endswith("/")
+        or prefix.startswith("/")
+        or "//" in prefix
+        or any(ch.isspace() for ch in prefix)
+    ):
+        raise SystemExit(
+            "branch_prefix must name a dedicated namespace ending in '/'"
+        )
+
     print(f"prefix\t{prefix}")
     print(f"max_open\t{limits.get('max_open_branches', '2')}")
     # Emitted empty when absent so bash can apply the env override before its default

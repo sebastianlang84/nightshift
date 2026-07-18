@@ -48,4 +48,19 @@ if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/rulebook3.yaml" >"$TMP/stdout" 2>
 fi
 grep -q "recon.ttl_days must be a positive integer" "$TMP/stderr"
 
+# A bare prefix broadens the hook glob (for example, m* includes main). Require a
+# slash-terminated namespace so the wildcard can only match branches beneath it.
+cat > "$TMP/rulebook4.yaml" <<'EOF'
+branch_prefix: m
+repos:
+  - path: /srv/example
+    mode: branch-fix
+EOF
+
+if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/rulebook4.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
+  echo "parser accepted a branch prefix without a dedicated namespace" >&2
+  exit 1
+fi
+grep -q "branch_prefix must name a dedicated namespace ending in '/'" "$TMP/stderr"
+
 echo "test-rulebook-validation: ok"
