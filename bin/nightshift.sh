@@ -763,14 +763,22 @@ ensure_recon() { # repo -> refresh the recon cache if missing / HEAD changed / o
   fi
 }
 
-open_branch_count() { # unmerged nightshift/* across all repos (reconciles against reality, §3e)
-  local total=0 i path base n
+refresh_open_branch_refs() { # reconcile remote-tracking refs once per pass, not once per cap check
+  local i path
   for i in "${!REPO_PATHS[@]}"; do
     path="${REPO_PATHS[$i]}"
     [ -d "$path/.git" ] || continue
     # --prune: without it, a branch deleted on origin lingers as a stale remote-tracking ref and
     # `--no-merged` keeps counting it, inflating backpressure and blocking runs on phantom slots.
     git -C "$path" fetch --prune -q origin 2>/dev/null || true
+  done
+}
+
+open_branch_count() { # count unmerged nightshift/* from the already-refreshed refs (§3e)
+  local total=0 i path base n
+  for i in "${!REPO_PATHS[@]}"; do
+    path="${REPO_PATHS[$i]}"
+    [ -d "$path/.git" ] || continue
     base="$(resolve_base "$path" "${REPO_BASES[$i]:-}")"
     n=$(git -C "$path" branch -r --no-merged "$base" 2>/dev/null | grep -c "origin/${BRANCH_PREFIX}" || true)
     total=$((total + n))
@@ -1126,7 +1134,7 @@ main() {
   fi
   log "agent=$NIGHTSHIFT_AGENT prefix=$BRANCH_PREFIX · cap: max $MAX_OPEN unmerged ${BRANCH_PREFIX} branches · run ceiling $MAX_RUN_BRANCHES · fix iters $MAX_FIX_ITER"
 
-  local made=0 considered=0 findings=0 repo mode cfgbase id fp fnj iter verdict wt base b summary open pass=0 progress ship_progress stop_reason=ok disp rfind farr n_find k fd dim
+  local made=0 considered=0 findings=0 repo mode cfgbase id fp fnj iter verdict wt base b summary open="" pass=0 progress ship_progress stop_reason=ok disp rfind farr n_find k fd dim
   # No per-night production cap. The ONLY cap is the count of OPEN (unmerged) nightshift/* branches:
   # work continues while fewer than max_open_branches are unmerged; merging/closing frees slots and
   # work resumes; when merging stops it fills to the cap and stops. "All night" continuous operation
@@ -1134,6 +1142,9 @@ main() {
   while true; do
     [ "$made" -ge "$MAX_RUN_BRANCHES" ] && { log "safety ceiling ($MAX_RUN_BRANCHES) reached — stop"; break; }
     if over_budget; then log "time budget (${MAX_RUN_SECONDS}s) exhausted — stop"; stop_reason=budget; break; fi
+    # Reconcile once at the pass boundary. All inner cap checks reuse this total; successful pushes
+    # increment it below, eliminating a fleet-wide network fetch for every repo and finding.
+    refresh_open_branch_refs
     open=$(open_branch_count)
     if [ "$open" -ge "$MAX_OPEN" ]; then
       log "open-branch cap reached ($open/$MAX_OPEN) — stop; merge/close some to free slots"
@@ -1146,7 +1157,6 @@ main() {
     progress=0; ship_progress=0
   while IFS=$'\t' read -r repo mode cfgbase; do
     [ -n "$repo" ] || continue
-    open=$(open_branch_count)
     [ "$open" -ge "$MAX_OPEN" ] && { log "open-branch cap reached ($open/$MAX_OPEN) — stop"; stop_reason=backpressure; break; }
 
     id="$RUNS_DIR/item-$(date +%s%N)"; mkdir -p "$id"
@@ -1210,7 +1220,6 @@ main() {
     fi
 
     for (( k=0; k<n_find; k++ )); do
-      open=$(open_branch_count)
       if [ "$open" -ge "$MAX_OPEN" ]; then
         log "  open-branch cap reached ($open/$MAX_OPEN) — stop"; stop_reason=backpressure; break
       fi
@@ -1287,7 +1296,7 @@ main() {
       b=""
       if [ "$verdict" = ship ]; then
         if b=$(finalize "$repo" "$wt" "$fd" "$made" "$base"); then
-          made=$((made + 1)); progress=1; ship_progress=1
+          made=$((made + 1)); open=$((open + 1)); progress=1; ship_progress=1
           log "  $(basename "$repo"): shipped -> $b"
         fi
       else
@@ -1313,7 +1322,8 @@ main() {
     fi
   done
 
-  open=$(open_branch_count)
+  # A zero-length run (for example an already-exhausted time budget) has not reached a pass boundary.
+  if [ -z "$open" ]; then refresh_open_branch_refs; open=$(open_branch_count); fi
   local advice; advice="$(advise_branches)"
   write_digest "$made" "$open" "$stop_reason" "$advice"
   log "night done: $made shipped this run, $considered considered, $open now open (cap $MAX_OPEN)."
