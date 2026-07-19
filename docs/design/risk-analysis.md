@@ -90,6 +90,7 @@ Severity = impact × likelihood given the controls above. Status: **Open** / **P
 | [R6](#r6) | Unrestricted network egress from the agent process | Low–Medium | **Open** |
 | [R13](#r13) | Predictable state paths (lock, worktrees) in world-writable `/tmp` on a shared VM | Low–Medium | **Open** |
 | [R7](#r7) | Quota/cost runaway | Low | **Mitigated** |
+| [R14](#r14) | Non-canonical ledger + real origin → shipped rows silently dropped from the ledger harvest reads | Low–Medium | **Mitigated** |
 
 ---
 
@@ -224,6 +225,29 @@ run (DoS — `exec 9>` under `set -e`). Debian's `fs.protected_symlinks` blunts 
 symlink-truncate, but isolation then rests on a kernel sysctl rather than a private `0700` dir.
 
 *Residual: multi-tenant interference with nightshift's own state.* Closed by [N5](#n5).
+
+### R14 — Non-canonical ledger + real origin silently drops ground-truth signal <a id="r14"></a>
+The ledger location (`NIGHTSHIFT_STATE_DIR`) and origin are independent. A run whose ledger is not
+the canonical `$NIGHTSHIFT_HOME/state` while origin stays on the real forge pushes a `nightshift/*`
+branch to the real origin while its `shipped` row lands in the isolated ledger — discarded when that
+dir is cleaned up. The canonical ledger `harvest` reads never learns the branch exists; it resurfaces
+only as an orphan (ADR 0016) holding a cap slot. Observed 2026-07-19: two real branches on origin,
+zero ledger rows on the only checkout. Host evidence shows the run was **fully divorced** from this
+environment (foreign home / other host); the precise vector is not determinable. **Not a security
+exposure** — a data-integrity/observability gap in the ground-truth loop.
+
+Two-layer mitigation:
+- **Prevention** — `guard_state_remote_incoherence` ([nightshift.sh](../../bin/nightshift.sh), ADR
+  [0017](../adr/0017-warn-on-state-remote-incoherence.md)): a run-start **abort** (override
+  `NIGHTSHIFT_ALLOW_SPLIT_STATE=1`) when the ledger is non-canonical and origin is a network remote.
+  Covers only runs that execute in this checkout.
+- **Repair** — harvest **adopts** orphans ([harvest.sh](../../bin/harvest.sh), ADR
+  [0018](../adr/0018-harvest-adopts-orphan-branches.md)): synthesizes the lost `shipped` row so the
+  verdict becomes recordable. Acts on what is really on origin, so it covers orphans from **any**
+  source, including the foreign-run vector the guard cannot see.
+
+*Residual: adopted rows carry no dimension/type/proof provenance (genuinely unknown), so they are
+uncategorized in merge-rate breakdowns; and the guard is bypassable with the override flag.*
 
 ---
 

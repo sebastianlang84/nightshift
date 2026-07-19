@@ -1110,9 +1110,52 @@ over_budget() { # 0 (true) iff a time budget is set and the run has reached it
   [ "$(( $(date +%s) - ${RUN_START:-0} ))" -ge "$MAX_RUN_SECONDS" ]
 }
 
+# -------------------------------------------------- state/remote coherence ----
+# ADR 0017. A run whose ledger is not the canonical one harvest reads ($NIGHTSHIFT_HOME/state)
+# while pushing to a NETWORK remote silently drops its `shipped` rows: the branch lands on the real
+# forge, but the row lands in the isolated ledger harvest never reads, so the branch resurfaces
+# later only as an orphan (ADR 0016) — its verdict recoverable only by harvest's adoption sweep
+# (ADR 0018). A legitimate isolated e2e run pushes to a LOCAL bare remote (a filesystem path, not a
+# host) and never trips this. This is the run-start half of the defense; adoption is the backstop.
+is_network_remote() { # url -> 0 iff it targets a remote host (git's own "colon before first slash" rule)
+  case "$1" in
+    file://*) return 1 ;;   # explicitly local
+    *://*)    return 0 ;;   # https:// ssh:// git:// — scheme with host
+  esac
+  # scp-like: a ':' before the first '/' means host:path (SSH), including ssh-config aliases with
+  # no user@ (e.g. `github.com-me:org/repo`). A ':' only AFTER a slash is part of a local path.
+  case "$1" in
+    */*) case "${1%%/*}" in *:*) return 0 ;; *) return 1 ;; esac ;;
+    *:*) return 0 ;;        # no slash at all but has ':' → host:repo
+    *)   return 1 ;;        # bare filesystem path (e.g. the sandbox bare remote)
+  esac
+}
+guard_state_remote_incoherence() { # hard-stop (override NIGHTSHIFT_ALLOW_SPLIT_STATE=1); ADR 0017
+  [ -n "${NIGHTSHIFT_STATE_DIR:-}" ] || return 0        # ledger not redirected — nothing to check
+  local canon_r state_r
+  canon_r="$(realpath -m "$NIGHTSHIFT_HOME/state" 2>/dev/null || echo "$NIGHTSHIFT_HOME/state")"
+  state_r="$(realpath -m "$STATE_DIR"             2>/dev/null || echo "$STATE_DIR")"
+  [ "$state_r" = "$canon_r" ] && return 0               # IS the canonical ledger harvest reads — coherent
+  local i path url hits=""
+  for i in "${!REPO_PATHS[@]}"; do
+    path="${REPO_PATHS[$i]}"
+    url="$(git -C "$path" remote get-url origin 2>/dev/null || true)"
+    [ -n "$url" ] && is_network_remote "$url" && hits+=" $(basename "$path")"
+  done
+  [ -n "$hits" ] || return 0                            # no network remote among targets — no exposure
+  local msg="ledger ($state_r) is not the canonical one harvest reads ($canon_r) while origin is a network remote for:${hits}. Shipped rows would land in this isolated ledger — pushed branches would surface later only as orphans (adopt via harvest)."
+  if [ "${NIGHTSHIFT_ALLOW_SPLIT_STATE:-}" = 1 ]; then
+    log "WARNING (NIGHTSHIFT_ALLOW_SPLIT_STATE=1): $msg"
+    return 0
+  fi
+  log "ABORT: $msg Re-run with NIGHTSHIFT_ALLOW_SPLIT_STATE=1 to proceed anyway, or use the canonical state dir / a local sandbox remote."
+  exit 1
+}
+
 # --------------------------------------------------------------------- main ----
 main() {
   load_rulebook
+  guard_state_remote_incoherence
   write_claude_settings
   write_codemap_mcp
   # Resolve the night's wall-clock budget: env (seconds, also the test hook) wins, else the rulebook's

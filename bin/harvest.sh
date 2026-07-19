@@ -142,11 +142,30 @@ reconcile() { # repo base branch sha [pr_url]
   echo dropped
 }
 
-# Orphan sweep (ADR 0016): a <prefix>* branch on origin that the ledger has no row for can never
-# receive a verdict (reconcile iterates ledger `shipped` rows), yet it still occupies an
-# open-branch cap slot. Such a branch means a shipped record was lost — an isolated-state run
-# that pushed to the real origin, or a crash between push and ledger_append. Report them so they
-# are never invisible; the operator adopts (review + merge) or deletes on origin. Read-only.
+# Adopt an orphan (ADR 0018): synthesize the lost `shipped` row so the branch re-enters the
+# reconcile loop and its verdict becomes recordable. The branch name is the only surviving
+# provenance (dim/type/repo/timestamp/seq are embedded but not machine-reparsed here); the real
+# sha comes from ls-remote. fingerprint/dimension/type/verifiability are unknown → null; `adopted`
+# and `source` mark the row so it is never mistaken for a first-hand shipped record. Idempotent:
+# once written, the branch is in the ledger's `known` set and is never adopted twice.
+adopt_orphan() { # repo branch sha
+  jq -nc \
+    --arg item "orphan-adopt" --arg repo "$1" --arg branch "$2" --arg sha "$3" \
+    --arg ts "$(date -Iseconds)" --arg night "$(date +%F)" --argjson sv "$SCHEMA_VERSION" \
+    '{night:$night,item:$item,repo:$repo,fingerprint:null,
+      branch:$branch,sha:($sha|if .=="" then null else . end),pr_url:null,
+      outcome:"shipped",source:"orphan-adopt",adopted:true,
+      summary:"adopted orphan branch (lost shipped row restored)",
+      ts:$ts,schema_version:$sv}' >> "$LEDGER"
+}
+
+# Orphan sweep (ADR 0016) + adoption (ADR 0018): a <prefix>* branch on origin that the ledger has no
+# row for can never receive a verdict (reconcile iterates ledger `shipped` rows), yet it still
+# occupies an open-branch cap slot. Such a branch means a shipped record was lost — an isolated-state
+# run that pushed to the real origin, or a crash between push and ledger_append. We ADOPT it: write a
+# synthetic `shipped` row so the NEXT reconcile derives merged/open/dropped normally (idempotent).
+# --dry-run reports only. This is the backstop the run-start guard (ADR 0017) cannot be — it repairs
+# orphans from ANY origin (other checkout, other host) because it acts on what is really on origin.
 sweep_orphans() {
   local i repo known n=0 sha ref b
   known="$(jq -rs '[.[]|select((.branch//"")!="")|.branch]|unique|.[]' "$LEDGER" 2>/dev/null || true)"
@@ -159,11 +178,22 @@ sweep_orphans() {
       b="${ref#refs/heads/}"
       grep -qxF "$b" <<<"$known" && continue
       [ "$n" -eq 0 ] && printf 'orphan %s* branches on origin (pushed, no ledger row):\n' "$BRANCH_PREFIX"
-      printf '  %-28s %s\n' "$(basename "$repo")" "$b"
+      if [ "$DRYRUN" -eq 1 ]; then
+        printf '  %-28s %-46s %s\n' "$(basename "$repo")" "$b" "(would adopt)"
+      else
+        adopt_orphan "$repo" "$b" "$sha"
+        printf '  %-28s %-46s %s\n' "$(basename "$repo")" "$b" "(adopted -> shipped)"
+      fi
       n=$((n + 1))
     done < <(git -C "$repo" ls-remote --heads origin "${BRANCH_PREFIX}*" 2>/dev/null || true)
   done
-  [ "$n" -gt 0 ] && printf '  -> %d orphan(s): each holds a cap slot. Adopt (review + merge) or delete on origin.\n' "$n"
+  if [ "$n" -gt 0 ]; then
+    if [ "$DRYRUN" -eq 1 ]; then
+      printf '  -> %d orphan(s) would be adopted (synthetic shipped row); re-run without --dry-run.\n' "$n"
+    else
+      printf '  -> %d orphan(s) adopted: verdicts derive on the next harvest. Merge or delete on origin as usual.\n' "$n"
+    fi
+  fi
   return 0
 }
 

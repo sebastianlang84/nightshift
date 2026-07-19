@@ -57,4 +57,25 @@ sect="$(sed -n '/orphan nightshift.* branches on origin/,$p' "$TMP/out")"
 grep -q "nightshift/orphan" <<<"$sect" || { echo "orphan branch not reported" >&2; cat "$TMP/out" >&2; exit 1; }
 grep -q "nightshift/known"  <<<"$sect" && { echo "known branch wrongly reported as orphan" >&2; cat "$TMP/out" >&2; exit 1; }
 
+# --- ADR 0018: the orphan is ADOPTED — a synthetic shipped row now exists for it ---------------
+grep -q "(adopted -> shipped)" "$TMP/out" || { echo "orphan not marked adopted" >&2; cat "$TMP/out" >&2; exit 1; }
+adopted="$(jq -sc '[.[]|select(.branch=="nightshift/orphan" and .outcome=="shipped" and .adopted==true)]|length' "$LEDGER")"
+[ "$adopted" = 1 ] || { echo "expected exactly 1 adopted shipped row for the orphan, got $adopted" >&2; exit 1; }
+
+# idempotent: a second harvest must NOT adopt again (the branch is now in the known set)
+STATE_DIR="$TMP/state" LEDGER="$LEDGER" RULEBOOK="$TMP/rulebook.yaml" \
+  bash "$ROOT/bin/harvest.sh" > "$TMP/out2" 2>&1 || { echo "2nd harvest failed" >&2; cat "$TMP/out2" >&2; exit 1; }
+again="$(jq -sc '[.[]|select(.branch=="nightshift/orphan" and .adopted==true)]|length' "$LEDGER")"
+[ "$again" = 1 ] || { echo "adoption not idempotent: $again adopted rows after 2nd run" >&2; exit 1; }
+sect2="$(sed -n '/orphan nightshift.* branches on origin/,$p' "$TMP/out2")"
+grep -q "nightshift/orphan" <<<"$sect2" && { echo "orphan re-reported after adoption (should be known)" >&2; cat "$TMP/out2" >&2; exit 1; }
+
+# --dry-run reports but writes nothing
+mkbranch nightshift/orphan2 >/dev/null
+STATE_DIR="$TMP/state" LEDGER="$LEDGER" RULEBOOK="$TMP/rulebook.yaml" \
+  bash "$ROOT/bin/harvest.sh" --dry-run > "$TMP/out3" 2>&1 || { echo "dry-run harvest failed" >&2; cat "$TMP/out3" >&2; exit 1; }
+grep -q "would adopt" "$TMP/out3" || { echo "dry-run did not report would-adopt" >&2; cat "$TMP/out3" >&2; exit 1; }
+w="$(jq -sc '[.[]|select(.branch=="nightshift/orphan2")]|length' "$LEDGER")"
+[ "$w" = 0 ] || { echo "dry-run wrote a ledger row for orphan2 ($w) — must be read-only" >&2; exit 1; }
+
 echo "test-harvest-orphan-sweep: ok"
