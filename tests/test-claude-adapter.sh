@@ -63,12 +63,16 @@ done
 # the only source for runs.jsonl's `model_id` — plus the cumulative input/cache counters. A second,
 # smaller model is present so the adapter must attribute the stage to the heaviest consumer, and the
 # keys are deliberately camelCase (modelUsage) vs snake_case (usage), as the CLI emits them.
+# Both entries carry a DIFFERENT contextWindow and costUSD, so `context_window`/`model_cost_usd` must
+# come from the SAME entry `model_id` was attributed to — picking either arbitrarily fails below.
 emit_object() { # result-string  -> top-level result-object shape
   jq -nc --arg r "$1" '{type:"result",result:$r,
     usage:{input_tokens:11,cache_read_input_tokens:1300,cache_creation_input_tokens:200,output_tokens:7},
-    modelUsage:{"claude-haiku-4-5-20251001":{inputTokens:5,outputTokens:1},
+    modelUsage:{"claude-haiku-4-5-20251001":{inputTokens:5,outputTokens:1,
+                                             contextWindow:200000,costUSD:0.0001},
                 "claude-opus-5":{inputTokens:11,outputTokens:7,
-                                 cacheReadInputTokens:1300,cacheCreationInputTokens:200}},
+                                 cacheReadInputTokens:1300,cacheCreationInputTokens:200,
+                                 contextWindow:1000000,costUSD:0.0099}},
     total_cost_usd:0.01}'
 }
 
@@ -106,10 +110,14 @@ branch=$(git --git-dir="$TMP/remote.git" for-each-ref --format='%(refname:short)
 git --git-dir="$TMP/remote.git" show "$branch:README.md" | grep -q 'This is the demo.'
 # Telemetry: `model` stays the ADAPTER name, `model_id` carries the model that actually served the
 # stage (the heaviest consumer in modelUsage, NOT the small side model), and the input/cache counters
-# are recorded so context-window sizing is measurable. Asserted on EVERY line, so one stage losing
-# its usage sidecar fails the test.
+# are recorded so context-window sizing is measurable. `context_window` (1000000, the attributed
+# model's window — NOT the side model's 200000) records which variant actually ran, and
+# `model_cost_usd` is that model's slice of the run-wide `cost_usd`. Asserted on EVERY line, so one
+# stage losing its usage sidecar fails the test.
 jq -se 'all(.model=="claude" and .model_id=="claude-opus-5" and .tokens==7 and .input_tokens==11
             and .cache_read_tokens==1300 and .cache_creation_tokens==200
-            and .cost_usd==0.01 and .exit==0)' "$TMP/state/runs.jsonl" >/dev/null
+            and .context_window==1000000
+            and .cost_usd==0.01 and .model_cost_usd==0.0099 and .exit==0)' \
+  "$TMP/state/runs.jsonl" >/dev/null
 jq -e 'select(.outcome=="shipped" and .branch!=null)' "$TMP/state/ledger.jsonl" >/dev/null
 echo "test-claude-adapter: ok"
