@@ -105,6 +105,7 @@ git --git-dir="$TMP/remote.git" show "$branch:README.md" | grep -q 'This is the 
 # EVERY line, so one stage losing its usage sidecar fails the test.
 jq -se 'all(.model=="codex" and .model_id=="gpt-5-codex-test" and .tokens==7 and .input_tokens==1300
             and .cache_read_tokens==1200 and .cache_creation_tokens==null
-            and .cost_usd==null and .exit==0)' "$TMP/state/runs.jsonl" >/dev/null
+            and .context_window==null and .cost_usd==null and .model_cost_usd==null
+            and .exit==0)' "$TMP/state/runs.jsonl" >/dev/null
 jq -e 'select(.outcome=="shipped" and .branch!=null)' "$TMP/state/ledger.jsonl" >/dev/null
 echo "test-codex-adapter: ok"

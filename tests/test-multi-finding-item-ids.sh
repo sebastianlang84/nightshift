@@ -56,7 +56,9 @@ jq -e 'select(.item=="f0" or .item=="f1")' "$TMP/state/runs.jsonl" >/dev/null 2>
 # The mock agent reports no usage at all, so per-stage model/token telemetry must degrade to null on
 # every line — present as fields, never invented, and never able to break the telemetry write.
 jq -se 'all(.model=="mock" and .model_id==null and .tokens==null and .input_tokens==null
-            and .cache_read_tokens==null and .cache_creation_tokens==null and .cost_usd==null)' \
+            and .cache_read_tokens==null and .cache_creation_tokens==null
+            and .context_window==null and .cost_usd==null and .model_cost_usd==null
+            and has("context_window") and has("model_cost_usd"))' \
   "$TMP/state/runs.jsonl" >/dev/null \
   || { echo "mock telemetry did not degrade to null model/token fields" >&2; exit 1; }
 

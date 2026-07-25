@@ -84,9 +84,12 @@ load_rulebook() {
 # it. The model that ACTUALLY served the stage is the separate `model_id` field ("claude-opus-5",
 # "claude-opus-4-8[1m]", "gpt-5-codex", …), self-reported by the CLI; null whenever the CLI reports
 # none (mock, older CLI shapes). `tokens` remains OUTPUT tokens for backwards compatibility; the
-# input/cache counters are what make context-window sizing (200k vs [1m]) measurable — they are
-# per-stage CUMULATIVE over every request the stage made, so they bound (never equal) the peak
-# context of a single request. See docs/design/documentation-system.md.
+# input/cache counters are per-stage CUMULATIVE over every request the stage made, so they bound
+# (never equal) the peak context of a single request. `context_window` answers the 200k-vs-[1m]
+# question outright — it is the window the served model actually ran with, reported by the CLI, not
+# inferred from those sums. `cost_usd` is the whole stage invocation; `model_cost_usd` is the slice
+# attributed to `model_id`, which differs only when a stage touched more than one model.
+# See docs/design/documentation-system.md.
 append_run() { # stage agent start dur status item usage_json
   local usage="${7:-}"
   [ -n "$usage" ] || usage='{}'
@@ -104,7 +107,9 @@ append_run() { # stage agent start dur status item usage_json
       input_tokens:($usage.input_tokens|n),
       cache_read_tokens:($usage.cache_read_tokens|n),
       cache_creation_tokens:($usage.cache_creation_tokens|n),
+      context_window:($usage.context_window|n),
       cost_usd:($usage.cost_usd|n),
+      model_cost_usd:($usage.model_cost_usd|n),
       exit:$status}' >> "$RUNSLOG"
 }
 
@@ -501,17 +506,26 @@ repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
   # adapter name alone cannot answer "which model ran, and did it need the [1m] context variant". A
   # stage may touch more than one model (e.g. a small model for side work), so attribute it to the
   # one that consumed the most tokens; fall back to a top-level `.model` for older result shapes.
+  # `model_id`, `context_window` and `model_cost_usd` all come from that ONE attributed entry, so
+  # they never describe different models. `contextWindow` is the window the model actually ran with
+  # (200000 vs 1000000) — it settles the [1m] question outright, instead of bounding it from the
+  # cumulative token sums. Note the casing asymmetry the CLI emits: `usage.*` is snake_case,
+  # `modelUsage.<id>.*` is camelCase.
   # Every field is optional: absent -> null, and a jq failure here must never fail the stage.
-  printf '%s' "$out" | jq -c "$pick"' | {
-      model_id: (((.modelUsage // {}) | to_entries
-                  | max_by((.value.inputTokens // 0) + (.value.outputTokens // 0)
-                           + (.value.cacheReadInputTokens // 0) + (.value.cacheCreationInputTokens // 0))
-                  | .key) // .model // null),
+  printf '%s' "$out" | jq -c "$pick"' |
+    (((.modelUsage // {}) | to_entries
+      | map(select((.value | type) == "object"))
+      | max_by((.value.inputTokens // 0) + (.value.outputTokens // 0)
+               + (.value.cacheReadInputTokens // 0) + (.value.cacheCreationInputTokens // 0))) // null) as $top |
+    {
+      model_id: (($top.key) // .model // null),
       output_tokens:         (.usage.output_tokens // null),
       input_tokens:          (.usage.input_tokens // null),
       cache_read_tokens:     (.usage.cache_read_input_tokens // null),
       cache_creation_tokens: (.usage.cache_creation_input_tokens // null),
-      cost_usd:              (.total_cost_usd // null)
+      context_window:        ($top.value.contextWindow // null),
+      cost_usd:              (.total_cost_usd // null),
+      model_cost_usd:        ($top.value.costUSD // null)
     }' > "$id/.usage_$stage" 2>/dev/null || true
   case "$stage" in
     explore) python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/finding.json" ;;
@@ -573,7 +587,8 @@ repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
   # or wrapped in `.msg`, so consider both for every event. Usage rides on `turn.completed` (with
   # `token_count`/`total_token_usage` as the older shape) and is cumulative, hence `last`. The model
   # ID is announced once by a session/thread event. Codex's `input_tokens` INCLUDES
-  # `cached_input_tokens`, unlike claude's, and codex reports no cost — see documentation-system.md.
+  # `cached_input_tokens`, unlike claude's, and codex reports neither cost nor the context window it
+  # ran with — those degrade to null rather than being inferred. See documentation-system.md.
   jq -sc '
     def evs: [.[] | select(type == "object") | ., (.msg | select(type == "object"))];
     def usage: [ evs[]
@@ -589,7 +604,9 @@ repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
       input_tokens:          ($u.input_tokens // null),
       cache_read_tokens:     ($u.cached_input_tokens // $u.cache_read_input_tokens // null),
       cache_creation_tokens: null,
-      cost_usd:              null }' \
+      context_window:        null,
+      cost_usd:              null,
+      model_cost_usd:        null }' \
     "$events" > "$id/.usage_$stage" 2>/dev/null || true
   case "$stage" in
     explore) python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/finding.json" ;;

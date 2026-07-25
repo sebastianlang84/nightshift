@@ -79,23 +79,32 @@ not report it (mock agent, older CLI output shapes) — telemetry can never fail
 | `model` | the **adapter** name: `claude` \| `codex` \| `mock`. Stable identifier — harvest/digest code reads it |
 | `model_id` | the model that **actually served** the stage, as reported by the CLI: `claude-opus-5`, `claude-opus-4-8[1m]`, `gpt-5-codex`, … — never the requested model |
 | `tokens` | **output** tokens (name kept for backwards compatibility) |
-| `input_tokens` · `cache_read_tokens` · `cache_creation_tokens` | input-side counters, i.e. what context sizing is decided on |
-| `cost_usd` | claude only (`total_cost_usd`); codex reports no cost |
+| `input_tokens` · `cache_read_tokens` · `cache_creation_tokens` | input-side counters, i.e. how much context the stage consumed |
+| `context_window` | the window the served model **actually ran with** (`200000`, `1000000`, …), as reported by the CLI — claude only; codex reports none |
+| `cost_usd` | cost of the whole stage invocation — claude only (`total_cost_usd`); codex reports no cost |
+| `model_cost_usd` | the slice of that cost attributed to `model_id`; differs from `cost_usd` only when a stage touched more than one model |
 
 Where the numbers come from, and how to read them:
 
 - **claude** — the `--output-format json` result object. `model_id` comes from `modelUsage`, whose
   keys *are* the real model IDs; a stage that touched several models is attributed to the heaviest
-  consumer. Token counters come from `usage.*`, where `input_tokens` **excludes** cache reads.
+  consumer, and `context_window` / `model_cost_usd` are read from *that same* entry, so the three
+  always describe one model. Note the casing asymmetry the CLI emits: `usage.*` is snake_case,
+  `modelUsage.<id>.*` is camelCase. Token counters come from `usage.*`, where `input_tokens`
+  **excludes** cache reads.
 - **codex** — the `--json` event stream: counters from the last `turn.completed` (`token_count` in
   older shapes), `model_id` from the session/thread event. Codex's `input_tokens` **includes**
   `cached_input_tokens`, and it reports no cache-creation count — so do not compare the two adapters'
-  `input_tokens` directly without accounting for that.
-- **Context-window sizing (200k vs `[1m]`).** These counters are *cumulative per stage over every
-  request the stage made*, not the peak context of a single request. So
-  `input_tokens + cache_read_tokens + cache_creation_tokens` is an upper **bound** on that peak: a
-  stage whose sum stays under 200k provably never needed more, while a stage above it is a candidate
-  worth confirming per-request. That bound is the whole point of recording the input side.
+  `input_tokens` directly without accounting for that. It reports neither cost nor a context window;
+  both stay `null` rather than being inferred.
+- **Context-window sizing (200k vs `[1m]`).** `context_window` answers this directly: it is the
+  window the model ran with, recorded as a fact, so no inference from token sums is needed. The
+  token counters cannot answer it on their own — they are *cumulative per stage over every request
+  the stage made*, not the peak context of a single request, so
+  `input_tokens + cache_read_tokens + cache_creation_tokens` is only an upper **bound** on that peak.
+  Use the two together: `context_window` says which variant was available, the cumulative sum still
+  bounds how much of it any single request could have used. On a stage where `context_window` is
+  `null` (codex, mock, older CLI shapes) the bound is all there is.
 
 Statistics are derived from this file on demand and summarised in the digest; v1 records but does not
 auto-act on them (distinct from the deferred §5 value-learning).
