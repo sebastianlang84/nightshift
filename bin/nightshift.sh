@@ -80,14 +80,31 @@ load_rulebook() {
 }
 
 # --------------------------------------------------------------- telemetry ----
-append_run() { # stage agent start dur tokens status item cost
+# `model` is the ADAPTER name (claude|codex|mock) and stays that way — harvest/digest code may read
+# it. The model that ACTUALLY served the stage is the separate `model_id` field ("claude-opus-5",
+# "claude-opus-4-8[1m]", "gpt-5-codex", …), self-reported by the CLI; null whenever the CLI reports
+# none (mock, older CLI shapes). `tokens` remains OUTPUT tokens for backwards compatibility; the
+# input/cache counters are what make context-window sizing (200k vs [1m]) measurable — they are
+# per-stage CUMULATIVE over every request the stage made, so they bound (never equal) the peak
+# context of a single request. See docs/design/documentation-system.md.
+append_run() { # stage agent start dur status item usage_json
+  local usage="${7:-}"
+  [ -n "$usage" ] || usage='{}'
   jq -nc \
-    --arg night "$NIGHT" --arg item "$7" --arg stage "$1" --arg model "$2" \
-    --argjson start "$3" --argjson dur "$4" --arg tokens "$5" --argjson status "$6" --arg cost "$8" \
-    '{night:$night,item:$item,stage:$stage,model:$model,start:$start,
+    --arg night "$NIGHT" --arg item "$6" --arg stage "$1" --arg model "$2" \
+    --argjson start "$3" --argjson dur "$4" --argjson status "$5" \
+    --argjson usage "$usage" \
+    'def s: if . == null or . == "" then null else tostring end;
+     def n: if . == null or . == "" then null else (tonumber? // null) end;
+     {night:$night,item:$item,stage:$stage,model:$model,
+      model_id:($usage.model_id|s),
+      start:$start,
       duration_s:$dur,
-      tokens:($tokens|if .=="" then null else (tonumber? // null) end),
-      cost_usd:($cost|if .=="" then null else (tonumber? // null) end),
+      tokens:($usage.output_tokens|n),
+      input_tokens:($usage.input_tokens|n),
+      cache_read_tokens:($usage.cache_read_tokens|n),
+      cache_creation_tokens:($usage.cache_creation_tokens|n),
+      cost_usd:($usage.cost_usd|n),
       exit:$status}' >> "$RUNSLOG"
 }
 
@@ -243,7 +260,7 @@ write_codemap_mcp() {
 
 # --------------------------------------------------------------- run_agent ----
 run_agent() { # stage workdir item_dir
-  local stage="$1" workdir="$2" item_dir="$3" start end status=0 tokens="" cost=""
+  local stage="$1" workdir="$2" item_dir="$3" start end status=0 usage='{}'
   start=$(date +%s)
   case "$NIGHTSHIFT_AGENT" in
     mock)   "mock_$stage" "$workdir" "$item_dir" || status=$? ;;
@@ -251,12 +268,15 @@ run_agent() { # stage workdir item_dir
     codex)  codex_run "$stage" "$workdir" "$item_dir" || status=$? ;;
     *) log "unknown NIGHTSHIFT_AGENT=$NIGHTSHIFT_AGENT (expected mock, claude, or codex)"; status=2 ;;
   esac
-  if [ "$NIGHTSHIFT_AGENT" != mock ]; then
-    tokens=$(cat "$item_dir/.tokens_$stage" 2>/dev/null || true)
-    cost=$(cat "$item_dir/.cost_$stage" 2>/dev/null || true)
+  # Each real adapter drops ONE compact JSON object per stage (model_id + token/cost counters).
+  # Missing, empty or unparsable -> {}, and every derived telemetry field degrades to null; the mock
+  # agent never writes one. Telemetry must never be able to fail a stage.
+  if [ "$NIGHTSHIFT_AGENT" != mock ] && [ -s "$item_dir/.usage_$stage" ]; then
+    usage=$(jq -c 'if type=="object" then . else {} end' "$item_dir/.usage_$stage" 2>/dev/null || true)
+    [ -n "$usage" ] || usage='{}'
   fi
   end=$(date +%s)
-  append_run "$stage" "$NIGHTSHIFT_AGENT" "$start" "$((end - start))" "$tokens" "$status" "$(basename "$item_dir")" "$cost"
+  append_run "$stage" "$NIGHTSHIFT_AGENT" "$start" "$((end - start))" "$status" "$(basename "$item_dir")" "$usage"
   return "$status"
 }
 
@@ -470,8 +490,23 @@ repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
   # nothing. So normalise both: pick the result object whether top-level is it or an array.
   local pick='if type=="array" then (map(select(.type=="result"))|last) else . end'
   printf '%s' "$out" | jq -r "$pick"' | (.result // "")'                > "$id/$stage.out"
-  printf '%s' "$out" | jq -r "$pick"' | (.usage.output_tokens // empty)' > "$id/.tokens_$stage" 2>/dev/null || true
-  printf '%s' "$out" | jq -r "$pick"' | (.total_cost_usd // empty)'      > "$id/.cost_$stage"   2>/dev/null || true
+  # Telemetry sidecar for run_agent. `modelUsage` is keyed by the REAL model ID
+  # ("claude-opus-5", "claude-opus-4-8[1m]", …) and is the only place the served model appears — the
+  # adapter name alone cannot answer "which model ran, and did it need the [1m] context variant". A
+  # stage may touch more than one model (e.g. a small model for side work), so attribute it to the
+  # one that consumed the most tokens; fall back to a top-level `.model` for older result shapes.
+  # Every field is optional: absent -> null, and a jq failure here must never fail the stage.
+  printf '%s' "$out" | jq -c "$pick"' | {
+      model_id: (((.modelUsage // {}) | to_entries
+                  | max_by((.value.inputTokens // 0) + (.value.outputTokens // 0)
+                           + (.value.cacheReadInputTokens // 0) + (.value.cacheCreationInputTokens // 0))
+                  | .key) // .model // null),
+      output_tokens:         (.usage.output_tokens // null),
+      input_tokens:          (.usage.input_tokens // null),
+      cache_read_tokens:     (.usage.cache_read_input_tokens // null),
+      cache_creation_tokens: (.usage.cache_creation_input_tokens // null),
+      cost_usd:              (.total_cost_usd // null)
+    }' > "$id/.usage_$stage" 2>/dev/null || true
   case "$stage" in
     explore) python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/finding.json" ;;
     fix)     cp "$id/$stage.out" "$id/worknote.md" ;;
@@ -527,8 +562,29 @@ repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
     codex "${args[@]}" - > "$events"); then
     return 1
   fi
-  jq -sr '[.[] | select(.type=="turn.completed") | .usage.output_tokens // empty] | last // empty' \
-    "$events" > "$id/.tokens_$stage" 2>/dev/null || true
+  # Telemetry sidecar for run_agent — same object contract as the claude adapter. Codex's event
+  # stream is no more stable than claude's JSON: a payload sits either at the top level of an event
+  # or wrapped in `.msg`, so consider both for every event. Usage rides on `turn.completed` (with
+  # `token_count`/`total_token_usage` as the older shape) and is cumulative, hence `last`. The model
+  # ID is announced once by a session/thread event. Codex's `input_tokens` INCLUDES
+  # `cached_input_tokens`, unlike claude's, and codex reports no cost — see documentation-system.md.
+  jq -sc '
+    def evs: [.[] | select(type == "object") | ., (.msg | select(type == "object"))];
+    def usage: [ evs[]
+                 | (select(.type == "turn.completed") | .usage)
+                 , (select(.type == "token_count")   | .info.total_token_usage)
+                 | select(type == "object") ] | last // {};
+    def modelid: [ evs[]
+                   | (try (.model, .session.model, .thread.model, .turn.model) catch empty)
+                   | select(type == "string" and . != "") ] | last // null;
+    usage as $u |
+    { model_id: modelid,
+      output_tokens:         ($u.output_tokens // null),
+      input_tokens:          ($u.input_tokens // null),
+      cache_read_tokens:     ($u.cached_input_tokens // $u.cache_read_input_tokens // null),
+      cache_creation_tokens: null,
+      cost_usd:              null }' \
+    "$events" > "$id/.usage_$stage" 2>/dev/null || true
   case "$stage" in
     explore) python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/finding.json" ;;
     fix)     cp "$id/$stage.out" "$id/worknote.md" ;;

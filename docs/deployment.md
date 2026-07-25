@@ -50,7 +50,7 @@ ledgers diverge silently: duplicate branches, broken caps and rotation). See
 | Path | What | Override |
 |------|------|----------|
 | `state/ledger.jsonl` | The memory: findings, shipped, abandoned, verdicts (append-only) | `NIGHTSHIFT_STATE_DIR` |
-| `state/runs.jsonl` | Per-stage telemetry (tokens, cost, duration) | `NIGHTSHIFT_STATE_DIR` |
+| `state/runs.jsonl` | Per-stage telemetry (real `model_id`, input/output/cache tokens, cost, duration) | `NIGHTSHIFT_STATE_DIR` |
 | `state/recon/` | Per-repo recon caches (derived, disposable) | `NIGHTSHIFT_STATE_DIR` |
 | `state/dim-scans/` | Per-(repo,dim) explore markers driving rotation | `NIGHTSHIFT_STATE_DIR` |
 | `runs/<date>/` | Per-item working dirs (prompts, agent output) | `NIGHTSHIFT_RUNS_DIR` |
