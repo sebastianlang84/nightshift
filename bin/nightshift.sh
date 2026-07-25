@@ -424,8 +424,14 @@ mock_recon() { # workdir item_dir — deterministic yield straight from recon_si
 # Sandbox default uses --dangerously-skip-permissions (throwaway repo; git-level
 # confinement via hooks/pre-push holds regardless of Claude's permission mode).
 claude_run() { # stage workdir item_dir
-  local stage="$1" wd="$2" id="$3" prompt out
+  local stage="$1" wd="$2" id="$3" prompt out model
   local flags="${NIGHTSHIFT_CLAUDE_FLAGS:---dangerously-skip-permissions --max-turns 25}"
+  # Optional per-host model override (mirrors NIGHTSHIFT_CODEX_MODEL). Default EMPTY = pass no
+  # --model and inherit whatever the claude CLI resolves as its default: nightshift commits no
+  # model of its own. Set it to make a stage cheaper (e.g. a small model for the recon survey).
+  local -a model_arg=()
+  model="${NIGHTSHIFT_CLAUDE_MODEL:-}"
+  [ -z "$model" ] || model_arg=(--model "$model")
   # Per-stage CAPABILITY profile: enforce each stage's rules by which tools EXIST, not by
   # asking the prompt nicely (same philosophy as the git-confinement hook). explore/review
   # are read-only by nature -> only Read/Grep/Glob, no Write/Edit/Bash. fix edits the working
@@ -461,7 +467,7 @@ repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
   out="$(cd "$wd" && \
     GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="$HOOKS_DIR" \
     NIGHTSHIFT_WORKTREE="$wd" \
-    claude -p "$prompt" --output-format json --settings "$STATE_DIR/claude-settings.json" --tools "$tools" $cm_flags $flags </dev/null 2>/dev/null)" || return 1
+    claude -p "$prompt" --output-format json --settings "$STATE_DIR/claude-settings.json" --tools "$tools" "${model_arg[@]}" $cm_flags $flags </dev/null 2>/dev/null)" || return 1
   # `claude -p --output-format json` is NOT a stable shape. Sometimes it is a single
   # result object ({result,usage,total_cost_usd}); sometimes a JSON ARRAY of events with
   # the result object as one element (observed with claude 2.1.197, e.g. when a
@@ -916,7 +922,7 @@ $(cat "$id/worknote.md")"
 # do-not-merge — on every open nightshift/* branch, written into the morning digest. It NEVER merges
 # or pushes (read-only tool profile + git-confinement hold). Prefer a different model/vendor with
 # NIGHTSHIFT_ADVISOR_AGENT (e.g. codex when the night ran on claude); the advisor's model is its own
-# adapter env (NIGHTSHIFT_CODEX_MODEL / NIGHTSHIFT_CLAUDE_FLAGS). Emits a markdown section on stdout
+# adapter env (NIGHTSHIFT_CODEX_MODEL / NIGHTSHIFT_CLAUDE_MODEL). Emits a markdown section on stdout
 # ("" if disabled or no open branches).
 advise_branches() {
   [ "${NIGHTSHIFT_BRANCH_REVIEW:-0}" = 1 ] || return 0
