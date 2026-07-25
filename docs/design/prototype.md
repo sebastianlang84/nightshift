@@ -53,8 +53,9 @@ Stages are invoked through `run_agent(stage, workdir, item_dir)`, which dispatch
   than the mock), fixed exactly it, reviewed it independently, and shipped — `main` untouched.
   The agent only reads/edits; the Runner owns all git. `runs.jsonl` captured real tokens **and cost**
   (~$0.37 for the trivial fix across 3 Opus calls — telemetry immediately surfaces that a smaller
-  model for Explore/Review is the obvious cost lever). The PreToolUse guard is wired through the
-  generated settings and confines Fix-stage `Write`/`Edit` paths to the worktree. Still to harden:
+  model for Explore/Review is the obvious cost lever; `NIGHTSHIFT_CLAUDE_MODEL` is that lever —
+  run-wide, empty by default, so no model is committed as the default). The PreToolUse guard is
+  wired through the generated settings and confines Fix-stage `Write`/`Edit` paths to the worktree. Still to harden:
   sub-agents for Explore (context control, §3b) and non-sandbox permission mode.
 - `NIGHTSHIFT_AGENT=codex` — calls `codex exec` ephemerally. Recon/Explore/Review use Codex's
   `read-only` sandbox; Fix uses `workspace-write` in the disposable worktree with network disabled.

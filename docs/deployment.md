@@ -37,6 +37,25 @@ ledgers diverge silently: duplicate branches, broken caps and rotation). See
    bin/schedule.sh dry-run     # runs the launcher now with the mock agent
    ```
 
+### Model and flags (optional, per host)
+
+Nightshift **commits no model of its own** — with these unset, each adapter uses whatever its CLI
+resolves as the default (for `claude`, e.g. a machine-wide pin in `~/.claude/settings.json`). Set
+them only to override that, e.g. a smaller/cheaper model for a run.
+
+| Variable | Adapter | Effect when unset |
+|----------|---------|-------------------|
+| `NIGHTSHIFT_CLAUDE_MODEL` | claude | no `--model` is passed; the CLI default applies |
+| `NIGHTSHIFT_CLAUDE_FLAGS` | claude | `--dangerously-skip-permissions --max-turns 25` |
+| `NIGHTSHIFT_CODEX_MODEL` | codex | no `--model` is passed; the CLI default applies |
+| `NIGHTSHIFT_CODEX_REASONING_EFFORT` | codex | the CLI default effort applies |
+
+These are per-process, so a whole run shares one model. Per-*stage* cost control (a cheap model for
+the recon survey, the full model for fix/review) means one run per model setting today.
+
+`NIGHTSHIFT_CLAUDE_FLAGS` replaces the sandbox defaults wholesale — the `--tools` allowlist, not
+these flags, is what confines the agent (see [`docs/design/risk-analysis.md`](design/risk-analysis.md)).
+
 ## Updating
 
 - `git -C "$NIGHTSHIFT_HOME" pull` to update the code. The units call scripts by path, so no
