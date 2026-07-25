@@ -59,8 +59,17 @@ done
 # Runner-owned flags every stage must carry (headless JSON, Layer-2 settings, sandbox default).
 [ "$outfmt" = json ] && [ "$skip" = 1 ] && [ "$maxturns" = 25 ] && [ -f "$settings" ]
 
+# The usage block mirrors the real headless result object: `modelUsage` keyed by the REAL model ID —
+# the only source for runs.jsonl's `model_id` — plus the cumulative input/cache counters. A second,
+# smaller model is present so the adapter must attribute the stage to the heaviest consumer, and the
+# keys are deliberately camelCase (modelUsage) vs snake_case (usage), as the CLI emits them.
 emit_object() { # result-string  -> top-level result-object shape
-  jq -nc --arg r "$1" '{type:"result",result:$r,usage:{output_tokens:7},total_cost_usd:0.01}'
+  jq -nc --arg r "$1" '{type:"result",result:$r,
+    usage:{input_tokens:11,cache_read_input_tokens:1300,cache_creation_input_tokens:200,output_tokens:7},
+    modelUsage:{"claude-haiku-4-5-20251001":{inputTokens:5,outputTokens:1},
+                "claude-opus-5":{inputTokens:11,outputTokens:7,
+                                 cacheReadInputTokens:1300,cacheCreationInputTokens:200}},
+    total_cost_usd:0.01}'
 }
 
 case "$prompt" in
@@ -70,8 +79,8 @@ case "$prompt" in
   *"EXPLORE stage"*)
     [ "$tools" = "Read,Grep,Glob" ]
     r='{"found":true,"findings":[{"file":"README.md","type":"typo","line_window":"L1-L3","claim":"README contains teh","verify":"search README for teh","verifiability":"static","disposition":"fix","summary":"fix typo","fingerprint":"README.md:typo:L1-L3","rank":1,"confidence":1.0}]}'
-    # ARRAY-of-events shape: rate_limit_event ahead of the result object.
-    jq -nc --arg r "$r" '[{type:"rate_limit_event"},{type:"result",result:$r,usage:{output_tokens:7},total_cost_usd:0.01}]' ;;
+    # ARRAY-of-events shape: rate_limit_event ahead of the SAME result object.
+    jq -nc --argjson o "$(emit_object "$r")" '[{type:"rate_limit_event"},$o]' ;;
   *"FIX stage"*)
     [ "$tools" = "Read,Grep,Glob,Write,Edit" ]
     sed -i 's/teh/the/' README.md
@@ -95,6 +104,12 @@ NIGHTSHIFT_DIGEST_DIR="$TMP/digests" NIGHTSHIFT_WORKTREES="$TMP/worktrees" \
 branch=$(git --git-dir="$TMP/remote.git" for-each-ref --format='%(refname:short)' 'refs/heads/nightshift/*')
 [ -n "$branch" ]
 git --git-dir="$TMP/remote.git" show "$branch:README.md" | grep -q 'This is the demo.'
-jq -e 'select(.model=="claude" and .tokens==7 and .exit==0)' "$TMP/state/runs.jsonl" >/dev/null
+# Telemetry: `model` stays the ADAPTER name, `model_id` carries the model that actually served the
+# stage (the heaviest consumer in modelUsage, NOT the small side model), and the input/cache counters
+# are recorded so context-window sizing is measurable. Asserted on EVERY line, so one stage losing
+# its usage sidecar fails the test.
+jq -se 'all(.model=="claude" and .model_id=="claude-opus-5" and .tokens==7 and .input_tokens==11
+            and .cache_read_tokens==1300 and .cache_creation_tokens==200
+            and .cost_usd==0.01 and .exit==0)' "$TMP/state/runs.jsonl" >/dev/null
 jq -e 'select(.outcome=="shipped" and .branch!=null)' "$TMP/state/ledger.jsonl" >/dev/null
 echo "test-claude-adapter: ok"

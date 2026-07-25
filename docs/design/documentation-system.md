@@ -69,10 +69,36 @@ Reads flow strictly downstream. The human touches exactly two things: the digest
 rulebook (write).
 
 Orthogonal to the stages, the **Runner** wraps every stage invocation and appends one
-`state/runs.jsonl` line — operational telemetry: stage, model, start, duration, tokens **and cost**
-(from the CLI's `--output-format json` usage/`total_cost_usd`), exit. The Runner is its single writer; the
-agents do not self-report. Statistics are derived from it on demand and summarised in the digest;
-v1 records but does not auto-act on them (distinct from the deferred §5 value-learning).
+`state/runs.jsonl` line of operational telemetry. The Runner is its single writer; the agents do not
+self-report. Every field below is optional in the sense that it degrades to `null` when the CLI does
+not report it (mock agent, older CLI output shapes) — telemetry can never fail a stage.
+
+| field | meaning |
+|-------|---------|
+| `night` · `item` · `stage` · `start` · `duration_s` · `exit` | which invocation this was, and how it ended |
+| `model` | the **adapter** name: `claude` \| `codex` \| `mock`. Stable identifier — harvest/digest code reads it |
+| `model_id` | the model that **actually served** the stage, as reported by the CLI: `claude-opus-5`, `claude-opus-4-8[1m]`, `gpt-5-codex`, … — never the requested model |
+| `tokens` | **output** tokens (name kept for backwards compatibility) |
+| `input_tokens` · `cache_read_tokens` · `cache_creation_tokens` | input-side counters, i.e. what context sizing is decided on |
+| `cost_usd` | claude only (`total_cost_usd`); codex reports no cost |
+
+Where the numbers come from, and how to read them:
+
+- **claude** — the `--output-format json` result object. `model_id` comes from `modelUsage`, whose
+  keys *are* the real model IDs; a stage that touched several models is attributed to the heaviest
+  consumer. Token counters come from `usage.*`, where `input_tokens` **excludes** cache reads.
+- **codex** — the `--json` event stream: counters from the last `turn.completed` (`token_count` in
+  older shapes), `model_id` from the session/thread event. Codex's `input_tokens` **includes**
+  `cached_input_tokens`, and it reports no cache-creation count — so do not compare the two adapters'
+  `input_tokens` directly without accounting for that.
+- **Context-window sizing (200k vs `[1m]`).** These counters are *cumulative per stage over every
+  request the stage made*, not the peak context of a single request. So
+  `input_tokens + cache_read_tokens + cache_creation_tokens` is an upper **bound** on that peak: a
+  stage whose sum stays under 200k provably never needed more, while a stage above it is a candidate
+  worth confirming per-request. That bound is the whole point of recording the input side.
+
+Statistics are derived from this file on demand and summarised in the digest; v1 records but does not
+auto-act on them (distinct from the deferred §5 value-learning).
 
 ## Consequences / resolved questions
 

@@ -80,7 +80,12 @@ case "$prompt" in
     printf '%s' '{"verdict":"ship","proof":"verified","evidence":"README now contains the","reason":"minimal typo fix"}' > "$out" ;;
   *) exit 2 ;;
 esac
-printf '%s\n' '{"type":"turn.completed","usage":{"output_tokens":7}}'
+# Event stream shape the adapter mines for telemetry: the model ID is announced once by the
+# thread/session event and deliberately DIFFERS from the --model flag ("test-model"), proving
+# runs.jsonl records the model the CLI reports, not the one nightshift asked for. Codex's
+# `input_tokens` includes `cached_input_tokens` and it reports no cost or cache-creation count.
+printf '%s\n' '{"type":"thread.started","thread_id":"t1","model":"gpt-5-codex-test"}'
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1300,"cached_input_tokens":1200,"output_tokens":7}}'
 EOF
 chmod +x "$TMP/bin/codex"
 
@@ -95,6 +100,11 @@ NIGHTSHIFT_DIGEST_DIR="$TMP/digests" NIGHTSHIFT_WORKTREES="$TMP/worktrees" \
 branch=$(git --git-dir="$TMP/remote.git" for-each-ref --format='%(refname:short)' 'refs/heads/nightshift/*')
 [ -n "$branch" ]
 git --git-dir="$TMP/remote.git" show "$branch:README.md" | grep -q 'This is the demo.'
-jq -e 'select(.model=="codex" and .tokens==7 and .exit==0)' "$TMP/state/runs.jsonl" >/dev/null
+# Telemetry: `model` stays the ADAPTER name, `model_id` the model the CLI reported, plus the token
+# counters. Fields codex does not report degrade to null, they must not be invented. Asserted on
+# EVERY line, so one stage losing its usage sidecar fails the test.
+jq -se 'all(.model=="codex" and .model_id=="gpt-5-codex-test" and .tokens==7 and .input_tokens==1300
+            and .cache_read_tokens==1200 and .cache_creation_tokens==null
+            and .cost_usd==null and .exit==0)' "$TMP/state/runs.jsonl" >/dev/null
 jq -e 'select(.outcome=="shipped" and .branch!=null)' "$TMP/state/ledger.jsonl" >/dev/null
 echo "test-codex-adapter: ok"

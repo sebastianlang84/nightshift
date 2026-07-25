@@ -53,4 +53,11 @@ distinct=$(jq -rs '[.[]|select(.outcome=="shipped")|.item]|unique|length' "$LEDG
 jq -e 'select(.item=="f0" or .item=="f1")' "$TMP/state/runs.jsonl" >/dev/null 2>&1 \
   && { echo "telemetry still records colliding bare item IDs" >&2; exit 1; }
 
+# The mock agent reports no usage at all, so per-stage model/token telemetry must degrade to null on
+# every line — present as fields, never invented, and never able to break the telemetry write.
+jq -se 'all(.model=="mock" and .model_id==null and .tokens==null and .input_tokens==null
+            and .cache_read_tokens==null and .cache_creation_tokens==null and .cost_usd==null)' \
+  "$TMP/state/runs.jsonl" >/dev/null \
+  || { echo "mock telemetry did not degrade to null model/token fields" >&2; exit 1; }
+
 echo "test-multi-finding-item-ids: ok"
