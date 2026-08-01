@@ -11,10 +11,26 @@ def val(raw: str) -> str:
     return raw.split(" #", 1)[0].strip()
 
 
+def quoted_val(raw: str) -> str:
+    """Scalar that may be quoted, so its value may legitimately contain `#`.
+
+    `val()` splits on ` #` before it knows whether it is inside quotes, which
+    truncates `"gpt-5 #2"` to `"gpt-5`. Anything after the closing quote is a
+    comment. An unterminated quote is a typo, not a value — say so."""
+    s = raw.strip()
+    if s[:1] in ("'", '"'):
+        end = s.find(s[0], 1)
+        if end == -1:
+            raise SystemExit(f"unterminated quoted value: {s}")
+        return s[1:end]
+    return val(raw)
+
+
 def main(path: str) -> None:
     prefix = "nightshift/"
     limits: dict[str, str] = {}
     recon: dict[str, str] = {}
+    agent: dict[str, str] = {}
     repos: list[dict[str, str]] = []
     dims: list[str] = []
     cur: dict[str, str] | None = None
@@ -25,19 +41,30 @@ def main(path: str) -> None:
             line = raw.rstrip("\n")
             if not line.strip() or line.strip().startswith("#"):
                 continue
+            # Indentation is what assigns a line to a section, and it is counted in SPACES. A
+            # tab-indented line measures as indent 0, so it would be read as a new top-level key and
+            # its section silently lost every entry. Refuse it instead of misreading it.
+            if "\t" in line[: len(line) - len(line.lstrip())]:
+                raise SystemExit(f"indent with spaces, not tabs: {line.strip()}")
             indent = len(line) - len(line.lstrip(" "))
             s = line.strip()
+            # A section header carries no payload, so everything from the first `#` is a comment.
+            # Comparing the raw line instead silently demoted `repos: # the fleet` to "no section",
+            # which dropped every entry under it without a word.
+            head = s.split("#", 1)[0].rstrip()
             if indent == 0:
                 section = None
                 if s.startswith("branch_prefix:"):
                     prefix = val(s.split(":", 1)[1])
-                elif s.rstrip() == "limits:":
+                elif head == "limits:":
                     section = "limits"
-                elif s.rstrip() == "recon:":
+                elif head == "recon:":
                     section = "recon"
-                elif s.rstrip() == "dimensions:":
+                elif head == "agent:":
+                    section = "agent"
+                elif head == "dimensions:":
                     section = "dimensions"
-                elif s.rstrip() == "repos:":
+                elif head == "repos:":
                     section = "repos"
             elif section == "limits":
                 k, _, v = s.partition(":")
@@ -45,6 +72,22 @@ def main(path: str) -> None:
             elif section == "recon":
                 k, _, v = s.partition(":")
                 recon[k.strip()] = val(v)
+            elif section == "agent":
+                # This block decides which model does the work, so every way of getting it subtly
+                # wrong must fail loudly rather than fall through to the CLI default — that silent
+                # fallback is the exact failure this block exists to prevent. A missing colon, an
+                # unknown key (a `claude-model:` typo), or the same key twice are all misconfigs.
+                k, sep, v = s.partition(":")
+                key = k.strip()
+                if not sep:
+                    raise SystemExit(f"agent: expected `key: value`, got: {s}")
+                if key not in ("claude_model", "codex_model"):
+                    raise SystemExit(
+                        f"agent: unknown key '{key}' (expected claude_model or codex_model)"
+                    )
+                if key in agent:
+                    raise SystemExit(f"agent: duplicate key '{key}'")
+                agent[key] = quoted_val(v)
             elif section == "dimensions":
                 if s.startswith("- "):
                     dims.append(val(s[2:]))
@@ -115,6 +158,22 @@ def main(path: str) -> None:
     if not ttl.isdecimal() or int(ttl) < 1:
         raise SystemExit("recon.ttl_days must be a positive integer")
     print(f"recon_ttl_days\t{ttl}")
+    # Which MODEL a stage runs on (ADR 0020). The host declares it here because stage isolation
+    # (ADR 0019) drops the CLI's `user` settings scope, so a machine-wide pin in
+    # ~/.claude/settings.json no longer reaches a stage. OMITTING the key means "let the CLI resolve
+    # its own default"; writing the key with no value is a half-finished edit, and treating that as
+    # "no model" would silently run the night on something else. Model ID *syntax* stays
+    # unvalidated — it belongs to the CLI vendor and any pattern here would go stale — but a tab
+    # would corrupt the TSV transport to bash.
+    for key in ("claude_model", "codex_model"):
+        model = agent.get(key, "")
+        if key in agent and not model:
+            raise SystemExit(
+                f"agent.{key} is empty — give it a model id, or omit the key entirely"
+            )
+        if "\t" in model:
+            raise SystemExit(f"agent.{key} must not contain a tab")
+        print(f"{key}\t{model}")
     # Global review-dimension set; ORDER is the cold-start / tie priority in the Runner.
     for d in dims:
         print(f"dimension\t{d}")

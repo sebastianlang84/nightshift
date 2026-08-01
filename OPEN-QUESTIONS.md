@@ -3,26 +3,17 @@
 Only unresolved choices with lasting architectural consequences belong here. Once decided, record
 the decision in an ADR and remove the section. Implementation work belongs in [`todo.md`](todo.md).
 
-## Does nightshift now pin its own claude model?
-
-Stage isolation ([ADR 0019](docs/adr/0019-stage-context-excludes-operator-config.md)) excludes the
-CLI's whole `user` settings scope (`--setting-sources project,local`) — that is what keeps the
-operator's personal `CLAUDE.md` out of pushed commit bodies. The scope is the smallest unit the CLI offers:
-there is no knob that drops `~/.claude/CLAUDE.md` while keeping `~/.claude/settings.json`, so a
-machine-wide **model pin** is collateral damage and the nightly model silently becomes whatever the
-CLI resolves on its own.
-
-Unresolved: whether "nightshift commits no model of its own" survives that. Options — (a) keep it and
-make `NIGHTSHIFT_CLAUDE_MODEL` the documented per-host duty (today's state), (b) pin a model in the
-Runner-owned `state/claude-settings.json`, which is loaded regardless of scope, (c) fail the run when
-no model is pinned anywhere. (a) is honest but silent: a host that loses its pin only finds out from
-`runs.jsonl`. Revisit if the CLI ever separates memory scopes from settings scopes.
-
 ## Resolved decisions
 
 Selection, rulebook shape, branch backpressure, anti-churn, morning digest, trust ramp, pipeline
 reuse, build-vs-adopt, repo ordering, dimension rotation, and multi-finding output are resolved in
 ADRs 0002–0011 and are intentionally not duplicated here.
+
+**Which model a stage runs on** is resolved by
+[ADR 0020](docs/adr/0020-the-rulebook-declares-the-stage-model.md): the host declares it in the
+rulebook's `agent:` block, the `NIGHTSHIFT_*_MODEL` variables override per run, and every run
+announces the effective model and its source. "nightshift commits no model of its own" stands — the
+repo ships the key documented and commented out, never set.
 
 The **Recon exclusion policy** (whether Recon may exclude a dimension or only reprioritize it) is
 resolved by [ADR 0015](docs/adr/0015-recon-reprioritizes-never-excludes.md): Recon reprioritizes

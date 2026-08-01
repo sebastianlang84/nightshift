@@ -39,26 +39,44 @@ ledgers diverge silently: duplicate branches, broken caps and rotation). See
 
 ### Model and flags (optional, per host)
 
-Nightshift **commits no model of its own** — with these unset, each adapter uses whatever its CLI
-resolves as the default. Set them only to override that, e.g. a smaller/cheaper model for a run.
+Nightshift **commits no model of its own**. A host declares the model it wants in its own
+`rulebook.yaml` (untracked) under `agent:` — see below; the variables here override that per run,
+e.g. a smaller/cheaper model for one night.
+
+```yaml
+agent:
+  claude_model: claude-opus-5
+  codex_model: gpt-5.6-sol
+```
 
 | Variable | Adapter | Effect when unset |
 |----------|---------|-------------------|
-| `NIGHTSHIFT_CLAUDE_MODEL` | claude | no `--model` is passed; the CLI default applies |
+| `NIGHTSHIFT_CLAUDE_MODEL` | claude | the rulebook's `agent.claude_model`, else no `--model` |
 | `NIGHTSHIFT_CLAUDE_FLAGS` | claude | `--dangerously-skip-permissions --max-turns 25` |
 | `NIGHTSHIFT_CLAUDE_SETTING_SOURCES` | claude | `--setting-sources project,local` (stage isolation) |
-| `NIGHTSHIFT_CODEX_MODEL` | codex | no `--model` is passed; the CLI default applies |
+| `NIGHTSHIFT_CODEX_MODEL` | codex | the rulebook's `agent.codex_model`, else no `--model` |
 | `NIGHTSHIFT_CODEX_REASONING_EFFORT` | codex | the CLI default effort applies |
 | `NIGHTSHIFT_CODEX_STAGE_HOME` | codex | `state/codex-home` (stage isolation); empty = your own `CODEX_HOME` |
 
-**A machine-wide model pin in `~/.claude/settings.json` no longer reaches a stage.** Stage isolation
+**A machine-wide model pin in `~/.claude/settings.json` does not reach a stage.** Stage isolation
 excludes the whole `user` settings scope (see
 [`docs/design/hook-spec.md`](design/hook-spec.md) — it is what keeps the operator's personal
-`CLAUDE.md` out of pushed commit bodies), and the pin lives in that scope. On a host that relies on
-such a pin, set `NIGHTSHIFT_CLAUDE_MODEL` to the same model id — otherwise the nightly model is
-whatever the CLI resolves on its own, which may differ in capability, context window and price.
-`runs.jsonl` records the model that actually served each stage (`model_id`, `context_window`), so the
-effective model is auditable after the fact.
+`CLAUDE.md` out of pushed commit bodies), and the pin lives in that scope. That is precisely why the
+model belongs in the rulebook: it is the one host-owned file every run already reads (ADR 0020). A
+host that pins a model for its interactive work and wants the same model overnight must say so in
+both places — they are deliberately separate scopes.
+
+Nothing about the choice is silent. Each run announces the model it will request and where that
+choice came from — which model actually served is a separate, after-the-fact question answered by
+`runs.jsonl`:
+
+```
+[nightshift] claude model: claude-opus-5 (from rulebook agent.claude_model)
+[nightshift] claude model: not declared — the CLI's own default applies (runs.jsonl model_id records what served)
+```
+
+and `runs.jsonl` records the model that actually served each stage (`model_id`, `context_window`). The
+two answer different questions: the log says what was asked for, the ledger what arrived.
 
 These are per-process, so a whole run shares one model. Per-*stage* cost control (a cheap model for
 the recon survey, the full model for fix/review) means one run per model setting today.

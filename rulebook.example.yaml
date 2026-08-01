@@ -24,6 +24,18 @@ limits:
                                  # but no new branch starts once spent; the digest shows the stop.
                                  # Omit = no time cap. Env override (seconds): NIGHTSHIFT_MAX_RUN_SECONDS.
 
+# Which MODEL each adapter runs its stages on (ADR 0020). Declare it here, not in the CLI's own
+# config: stage isolation (ADR 0019) drops the CLI's `user` settings scope, so a machine-wide pin in
+# ~/.claude/settings.json never reaches a stage. This file is host-owned and untracked, so setting a
+# model here is a host decision — nightshift still ships no model of its own.
+# Precedence: NIGHTSHIFT_CLAUDE_MODEL / NIGHTSHIFT_CODEX_MODEL if set (an explicitly EMPTY value
+# means "pass no --model") > these keys > whatever the CLI resolves by itself. Omit the block to let
+# the CLI decide; the run announces the effective model and its source either way, and
+# `state/runs.jsonl` records the model that actually served each stage.
+# agent:
+#   claude_model: claude-opus-5
+#   codex_model: gpt-5.6-sol
+
 recon:                           # reconnaissance stage (ADR 0010): surveys each repo (docs/, compose,
   enabled: true                  # frontend, tests, CI …) and narrows which dimensions apply to it.
   ttl_days: 7                    # cache is re-run when the repo HEAD changes or is older than this.

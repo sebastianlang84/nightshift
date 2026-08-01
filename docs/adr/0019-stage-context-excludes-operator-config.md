@@ -4,8 +4,8 @@
 - Date: 2026-08-02
 - Extends the "capability, not convention" principle of the confinement hooks
   ([`docs/design/hook-spec.md`](../design/hook-spec.md)) from *what an agent may do* to *what it may read*.
-- Leaves open: whether nightshift must now pin its own model
-  ([`OPEN-QUESTIONS.md`](../../OPEN-QUESTIONS.md)).
+- Left open which model a stage then runs on; resolved by
+  [ADR 0020](0020-the-rulebook-declares-the-stage-model.md) — the host declares it in the rulebook.
 
 ## Context
 
@@ -75,11 +75,10 @@ is loud and recoverable, a reopened leak is silent until it is in a commit body.
 ## Consequences
 
 - **The `user` scope is all-or-nothing, so a machine-wide model pin is collateral.** The CLI offers no
-  way to drop `~/.claude/CLAUDE.md` while keeping `~/.claude/settings.json`. A host relying on such a
-  pin must set `NIGHTSHIFT_CLAUDE_MODEL`; otherwise the nightly model silently becomes the CLI
-  default. `runs.jsonl` records the model that actually served each stage, so it stays auditable —
-  but only after the fact. Whether nightshift should therefore pin a model of its own is the open
-  decision above.
+  way to drop `~/.claude/CLAUDE.md` while keeping `~/.claude/settings.json`, so a pin there does not
+  reach a stage. [ADR 0020](0020-the-rulebook-declares-the-stage-model.md) answers where the model is
+  declared instead — the host's own rulebook — and makes each run announce the effective model and
+  its source, so the choice is visible before a night, not only from `runs.jsonl` afterwards.
 - **Location precondition.** The CLI also collects `CLAUDE.md` along the `cwd`→`/` chain, and for a
   cwd under `$HOME` that chain includes `~/.claude/CLAUDE.md`, which setting scopes do not drop.
   Worktrees default outside `$HOME` and every stage — recon included — runs in one, so isolation

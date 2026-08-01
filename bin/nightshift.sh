@@ -56,6 +56,26 @@ fi
 
 # ---------------------------------------------------------------- rulebook ----
 declare -a REPO_PATHS=() REPO_MODES=() REPO_BASES=() REPO_FINDINGS=() REPO_DIMS=() DIMENSIONS=()
+# Rulebook-declared model per adapter (ADR 0020); empty = the rulebook declares none. Kept separate
+# from the NIGHTSHIFT_*_MODEL env vars so the precedence env > rulebook > CLI default stays legible.
+RB_CLAUDE_MODEL="" RB_CODEX_MODEL=""
+# Announce which model the night will REQUEST, and where that choice came from (ADR 0020). Not which
+# model serves it: with no --model the CLI picks for itself, and even a given id may be an alias that
+# resolves elsewhere — that answer only exists afterwards, in `runs.jsonl` (`model_id`). Announcing
+# the selection is still the point: stage isolation (ADR 0019) means a machine-wide pin in the CLI's
+# own config no longer reaches a stage, so a host that believes it pinned one must learn otherwise at
+# the start of the night rather than the morning after.
+log_model_selection() { # adapter env_var_name rulebook_value
+  local adapter="$1" name="$2" rb="$3"
+  if [ -n "${!name+set}" ]; then
+    log "$adapter model: ${!name:-<none — no --model passed>} (from \$$name)"
+  elif [ -n "$rb" ]; then
+    log "$adapter model: $rb (from rulebook agent.${adapter}_model)"
+  else
+    log "$adapter model: not declared — the CLI's own default applies (runs.jsonl model_id records what served)"
+  fi
+}
+
 load_rulebook() {
   local tag a b c d e rb_run_branches="" parsed
   # Capture the parser's output AND its exit status. Reading it directly via
@@ -77,6 +97,8 @@ load_rulebook() {
       max_run_minutes)       RB_MAX_RUN_MINUTES="$a" ;;
       max_files)             MAX_FILES="$a" ;;
       max_lines)             MAX_LINES="$a" ;;
+      claude_model)          RB_CLAUDE_MODEL="$a" ;;
+      codex_model)           RB_CODEX_MODEL="$a" ;;
       dimension)             DIMENSIONS+=("$a") ;;
       repo)                  REPO_PATHS+=("${a#path=}"); REPO_MODES+=("${b#mode=}"); REPO_BASES+=("${c#base=}"); REPO_FINDINGS+=("${d#findings=}"); REPO_DIMS+=("${e#dimensions=}") ;;
     esac
@@ -489,11 +511,14 @@ mock_recon() { # workdir item_dir — deterministic yield straight from recon_si
 claude_run() { # stage workdir item_dir
   local stage="$1" wd="$2" id="$3" prompt out model
   local flags="${NIGHTSHIFT_CLAUDE_FLAGS:---dangerously-skip-permissions --max-turns 25}"
-  # Optional per-host model override (mirrors NIGHTSHIFT_CODEX_MODEL). Default EMPTY = pass no
-  # --model and inherit whatever the claude CLI resolves as its default: nightshift commits no
-  # model of its own. Set it to make a stage cheaper (e.g. a small model for the recon survey).
+  # Which model this stage runs on. Precedence: the env var if SET (an explicitly empty value is the
+  # escape hatch — pass no --model), else the rulebook's `agent.claude_model` (ADR 0020), else
+  # nothing and the CLI resolves its own default. The rulebook layer matters because stage isolation
+  # (ADR 0019) drops the CLI's `user` settings scope, so a pin in ~/.claude/settings.json cannot
+  # reach a stage; the host declares the model in its own governance file instead. nightshift still
+  # commits no model of its own — rulebook.yaml is host-owned and untracked.
   local -a model_arg=()
-  model="${NIGHTSHIFT_CLAUDE_MODEL:-}"
+  model="${NIGHTSHIFT_CLAUDE_MODEL-${RB_CLAUDE_MODEL:-}}"
   [ -z "$model" ] || model_arg=(--model "$model")
   # Stage isolation from the OPERATOR's personal Claude Code config (docs/design/hook-spec.md).
   # `--setting-sources` selects which settings SCOPES the CLI loads; dropping `user` drops both
@@ -613,7 +638,9 @@ codex_run() { # stage workdir item_dir
   esac
   args+=(--sandbox "$sandbox")
   [ "$stage" != fix ] || args+=(-c 'sandbox_workspace_write.network_access=false')
-  model="${NIGHTSHIFT_CODEX_MODEL:-}"
+  # Same precedence as the claude half: env if SET (empty = pass no --model), else the rulebook's
+  # `agent.codex_model` (ADR 0020), else the CLI default.
+  model="${NIGHTSHIFT_CODEX_MODEL-${RB_CODEX_MODEL:-}}"
   [ -z "$model" ] || args+=(--model "$model")
   effort="${NIGHTSHIFT_CODEX_REASONING_EFFORT:-}"
   [ -z "$effort" ] || args+=(-c "model_reasoning_effort=\"$effort\"")
@@ -1321,6 +1348,10 @@ main() {
       "$NIGHTSHIFT_HOME/bin/harvest.sh" >/dev/null 2>&1 || log "harvest: skipped (non-fatal)"
   fi
   log "agent=$NIGHTSHIFT_AGENT prefix=$BRANCH_PREFIX · cap: max $MAX_OPEN unmerged ${BRANCH_PREFIX} branches · run ceiling $MAX_RUN_BRANCHES · fix iters $MAX_FIX_ITER"
+  case "$NIGHTSHIFT_AGENT" in
+    claude) log_model_selection claude NIGHTSHIFT_CLAUDE_MODEL "$RB_CLAUDE_MODEL" ;;
+    codex)  log_model_selection codex  NIGHTSHIFT_CODEX_MODEL  "$RB_CODEX_MODEL"  ;;
+  esac
 
   local made=0 considered=0 findings=0 repo mode cfgbase id fp fnj iter verdict wt base b summary open="" pass=0 progress ship_progress stop_reason=ok disp rfind farr n_find k fd dim
   # No per-night production cap. The ONLY cap is the count of OPEN (unmerged) nightshift/* branches:
