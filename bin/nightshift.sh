@@ -275,6 +275,32 @@ write_codemap_mcp() {
     > "$STATE_DIR/codemap-mcp.json"
 }
 
+# The Runner-owned CODEX_HOME a codex stage runs under (ADR 0019) — echoes the path, empty on
+# failure. It deliberately contains NOTHING but a symlink to the operator's credentials: no
+# AGENTS.md (the leak this closes), no config.toml, no skills, no memories, no session history.
+# NIGHTSHIFT_CODEX_STAGE_HOME overrides the location; set it EMPTY to run under the operator's real
+# home instead (escape hatch — reopens the leak). Cheap enough to re-assert per stage, and doing so
+# self-heals a stale symlink after `codex login`.
+codex_stage_home() {
+  local real stage
+  real="${CODEX_HOME:-$HOME/.codex}"
+  stage="${NIGHTSHIFT_CODEX_STAGE_HOME-$STATE_DIR/codex-home}"
+  [ -n "$stage" ] || { printf '%s' "$real"; return 0; }
+  mkdir -p "$stage" || { log "codex stage home $stage not creatable"; return 1; }
+  # Same path = the operator's own home; never relink credentials onto themselves.
+  [ "$(cd "$stage" && pwd -P)" != "$(cd "$real" 2>/dev/null && pwd -P || echo "$real")" ] || {
+    printf '%s' "$stage"; return 0; }
+  if [ -e "$real/auth.json" ]; then
+    ln -sfn "$real/auth.json" "$stage/auth.json"
+  else
+    # No credential file to carry over (e.g. API-key-in-env auth). Isolating still beats leaking:
+    # codex fails loudly on a real auth problem, whereas falling back to the real home would fail
+    # SILENTLY — as a leak nobody sees until it is in a commit body.
+    log "codex: no auth.json under $real — stage home carries no credentials"
+  fi
+  printf '%s' "$stage"
+}
+
 # --------------------------------------------------------------- run_agent ----
 run_agent() { # stage workdir item_dir
   local stage="$1" workdir="$2" item_dir="$3" start end status=0 usage='{}'
@@ -591,6 +617,19 @@ codex_run() { # stage workdir item_dir
   [ -z "$model" ] || args+=(--model "$model")
   effort="${NIGHTSHIFT_CODEX_REASONING_EFFORT:-}"
   [ -z "$effort" ] || args+=(-c "model_reasoning_effort=\"$effort\"")
+  # Stage isolation, codex half (ADR 0019). `--ignore-user-config` covers $CODEX_HOME/config.toml and
+  # `--ignore-rules` the execpolicy files, but NEITHER covers $CODEX_HOME/AGENTS.md — the operator's
+  # global instructions leak into the stage verbatim (verified 2026-08-02, codex-cli 0.145.0). The
+  # only lever that separates the scopes is the home itself: a Runner-owned CODEX_HOME with no
+  # AGENTS.md in it drops the global file while the TARGET repo's own AGENTS.md still loads. The
+  # config-level knob is the wrong way round — `project_doc_max_bytes=0` kills the repo's AGENTS.md
+  # and leaves the global one standing. Auth is the one thing the isolated home must keep: codex
+  # resolves credentials under CODEX_HOME, so auth.json is symlinked in (verified: a real API call
+  # succeeds through it). No auth.json -> still isolate, and let codex report the auth failure
+  # itself rather than silently reopening the leak.
+  local cx_home
+  cx_home="$(codex_stage_home)"
+  [ -n "$cx_home" ] || return 1
 
   if [ -n "${NIGHTSHIFT_CODEMAP_REPO:-}" ] && { [ "$stage" = explore ] || [ "$stage" = review ]; }; then
     args+=(-c 'mcp_servers.codemap.command="codemap-mcp"')
@@ -605,6 +644,7 @@ repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
   events="$id/.codex_events_$stage"
   if ! (cd "$wd" && printf '%s' "$prompt" | \
     GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="$HOOKS_DIR" \
+    CODEX_HOME="$cx_home" \
     codex "${args[@]}" - > "$events"); then
     return 1
   fi

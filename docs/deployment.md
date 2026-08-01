@@ -49,6 +49,7 @@ resolves as the default. Set them only to override that, e.g. a smaller/cheaper 
 | `NIGHTSHIFT_CLAUDE_SETTING_SOURCES` | claude | `--setting-sources project,local` (stage isolation) |
 | `NIGHTSHIFT_CODEX_MODEL` | codex | no `--model` is passed; the CLI default applies |
 | `NIGHTSHIFT_CODEX_REASONING_EFFORT` | codex | the CLI default effort applies |
+| `NIGHTSHIFT_CODEX_STAGE_HOME` | codex | `state/codex-home` (stage isolation); empty = your own `CODEX_HOME` |
 
 **A machine-wide model pin in `~/.claude/settings.json` no longer reaches a stage.** Stage isolation
 excludes the whole `user` settings scope (see
@@ -81,6 +82,7 @@ these flags, is what confines the agent (see [`docs/design/risk-analysis.md`](de
 | `state/runs.jsonl` | Per-stage telemetry (real `model_id`, `context_window`, input/output/cache tokens, cost, duration) | `NIGHTSHIFT_STATE_DIR` |
 | `state/recon/` | Per-repo recon caches (derived, disposable) | `NIGHTSHIFT_STATE_DIR` |
 | `state/dim-scans/` | Per-(repo,dim) explore markers driving rotation | `NIGHTSHIFT_STATE_DIR` |
+| `state/codex-home/` | `CODEX_HOME` a codex stage runs under: a symlink to your `auth.json` plus codex's own caches, and deliberately no `AGENTS.md`/`config.toml` (derived, disposable) | `NIGHTSHIFT_CODEX_STAGE_HOME` |
 | `runs/<date>/` | Per-item working dirs (prompts, agent output) | `NIGHTSHIFT_RUNS_DIR` |
 | `digests/<date>.md` | The morning report | `NIGHTSHIFT_DIGEST_DIR` |
 | `~/.local/state/nightshift/logs/<date>.log` | Launcher log (also in journald) | `NIGHTSHIFT_LOG_DIR` |
