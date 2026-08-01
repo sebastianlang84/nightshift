@@ -36,6 +36,24 @@ ship "nightshift/b3" "sha3" "/r:shared:L9"   # same fingerprint, two branches
 warn="$(run verdict "/r:shared:L9" merged 2>&1 >/dev/null || true)"
 grep -q "distinct branches" <<<"$warn" || { echo "expected multi-branch warning, got: $warn" >&2; exit 1; }
 
+# --- unrecognised arguments are rejected, never silently harvested -----------------
+# A typo'd preview flag must NOT fall through to the argument-less (ledger-writing) path.
+before=$(wc -l < "$LEDGER")
+for bad in --dryrun -n --dry_run nightshift/b1 verdict "verdict nightshift/b1"; do
+  rc=0
+  # shellcheck disable=SC2086 -- deliberate word-splitting: these are argv fixtures
+  run $bad >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || { echo "arg '$bad' should exit 2, got $rc" >&2; exit 1; }
+done
+rc=0; run --dry-run stray >/dev/null 2>&1 || rc=$?
+[ "$rc" = 2 ] || { echo "trailing argument should exit 2, got $rc" >&2; exit 1; }
+rc=0; run verdict nightshift/b1 merged unquoted multi word >/dev/null 2>&1 || rc=$?
+[ "$rc" = 2 ] || { echo "unquoted multi-word reason should exit 2, got $rc" >&2; exit 1; }
+[ "$(wc -l < "$LEDGER")" = "$before" ] \
+  || { echo "a rejected invocation still wrote to the ledger" >&2; exit 1; }
+run --help > "$TMP/help.out"   # exits 0 and prints usage on stdout
+grep -q -- '--dry-run' "$TMP/help.out" || { echo "--help did not print usage" >&2; exit 1; }
+
 # --- corrupt ledger aborts loudly --------------------------------------------------
 printf 'not json at all\n' >> "$LEDGER"
 if run --dry-run >/dev/null 2>&1; then
