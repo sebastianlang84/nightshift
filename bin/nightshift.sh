@@ -42,6 +42,18 @@ mkdir -p "$STATE_DIR" "$RUNS_DIR" "$DIGEST_DIR" "$WORKTREES_DIR" "$SCAN_DIR"
 
 log() { echo "[nightshift] $*" >&2; }
 
+# Stage isolation has a location precondition: the claude CLI also collects CLAUDE.md files along the
+# cwd->/ directory chain, and for a cwd under $HOME that chain includes ~/.claude/CLAUDE.md — which
+# --setting-sources cannot drop (verified 2026-08-02, claude 2.1.205). Worktrees default under
+# ${TMPDIR:-/tmp}, outside $HOME, where the isolation holds. Overriding NIGHTSHIFT_WORKTREES into
+# $HOME silently reopens the leak, so say so instead of failing the run (see docs/design/hook-spec.md).
+if [ "$NIGHTSHIFT_AGENT" = claude ] && [ -n "${HOME:-}" ]; then
+  case "$(cd "$WORKTREES_DIR" && pwd -P)/" in
+    "$(cd "$HOME" && pwd -P)"/*)
+      log "WARNING: worktrees live under \$HOME ($WORKTREES_DIR) — stages will inherit ~/.claude/CLAUDE.md" ;;
+  esac
+fi
+
 # ---------------------------------------------------------------- rulebook ----
 declare -a REPO_PATHS=() REPO_MODES=() REPO_BASES=() REPO_FINDINGS=() REPO_DIMS=() DIMENSIONS=()
 load_rulebook() {
@@ -457,6 +469,16 @@ claude_run() { # stage workdir item_dir
   local -a model_arg=()
   model="${NIGHTSHIFT_CLAUDE_MODEL:-}"
   [ -z "$model" ] || model_arg=(--model "$model")
+  # Stage isolation from the OPERATOR's personal Claude Code config (docs/design/hook-spec.md).
+  # `--setting-sources` selects which settings SCOPES the CLI loads; dropping `user` drops both
+  # ~/.claude/settings.json AND ~/.claude/CLAUDE.md, while `project,local` keeps the TARGET repo's
+  # own CLAUDE.md — the context a stage actually wants. Without this the operator's private
+  # instructions (chat language, personal conventions, tripwires) end up verbatim in worknotes and
+  # therefore in pushed commit bodies. Empty = pass no flag (escape hatch for a CLI too old to know
+  # the option; the leak returns). Measured: ~3.8k tokens of personal rules dropped per stage call.
+  local -a sources_arg=()
+  local sources="${NIGHTSHIFT_CLAUDE_SETTING_SOURCES-project,local}"
+  [ -z "$sources" ] || sources_arg=(--setting-sources "$sources")
   # Per-stage CAPABILITY profile: enforce each stage's rules by which tools EXIST, not by
   # asking the prompt nicely (same philosophy as the git-confinement hook). explore/review
   # are read-only by nature -> only Read/Grep/Glob, no Write/Edit/Bash. fix edits the working
@@ -489,10 +511,14 @@ repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
   # shellcheck disable=SC2086
   # NIGHTSHIFT_WORKTREE tells the PreToolUse guard which root to confine Write/Edit to
   # (the Fix stage has Write/Edit but no Bash; absolute paths would otherwise escape — R8).
+  # CLAUDE_CODE_DISABLE_AUTO_MEMORY: the auto-memory store is keyed by cwd under ~/.claude/projects/
+  # and is NOT covered by --setting-sources. A stage worktree is throwaway, so there is nothing to
+  # read — but the memory writer is a write path OUTSIDE the worktree that the PreToolUse guard
+  # never sees (R8). Off for stages: nightshift's memory is its ledger, not a per-cwd store.
   out="$(cd "$wd" && \
     GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="$HOOKS_DIR" \
-    NIGHTSHIFT_WORKTREE="$wd" \
-    claude -p "$prompt" --output-format json --settings "$STATE_DIR/claude-settings.json" --tools "$tools" "${model_arg[@]}" $cm_flags $flags </dev/null 2>/dev/null)" || return 1
+    NIGHTSHIFT_WORKTREE="$wd" CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 \
+    claude -p "$prompt" --output-format json --settings "$STATE_DIR/claude-settings.json" --tools "$tools" "${model_arg[@]}" "${sources_arg[@]}" $cm_flags $flags </dev/null 2>/dev/null)" || return 1
   # `claude -p --output-format json` is NOT a stable shape. Sometimes it is a single
   # result object ({result,usage,total_cost_usd}); sometimes a JSON ARRAY of events with
   # the result object as one element (observed with claude 2.1.197, e.g. when a

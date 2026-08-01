@@ -40,15 +40,24 @@ ledgers diverge silently: duplicate branches, broken caps and rotation). See
 ### Model and flags (optional, per host)
 
 Nightshift **commits no model of its own** — with these unset, each adapter uses whatever its CLI
-resolves as the default (for `claude`, e.g. a machine-wide pin in `~/.claude/settings.json`). Set
-them only to override that, e.g. a smaller/cheaper model for a run.
+resolves as the default. Set them only to override that, e.g. a smaller/cheaper model for a run.
 
 | Variable | Adapter | Effect when unset |
 |----------|---------|-------------------|
 | `NIGHTSHIFT_CLAUDE_MODEL` | claude | no `--model` is passed; the CLI default applies |
 | `NIGHTSHIFT_CLAUDE_FLAGS` | claude | `--dangerously-skip-permissions --max-turns 25` |
+| `NIGHTSHIFT_CLAUDE_SETTING_SOURCES` | claude | `--setting-sources project,local` (stage isolation) |
 | `NIGHTSHIFT_CODEX_MODEL` | codex | no `--model` is passed; the CLI default applies |
 | `NIGHTSHIFT_CODEX_REASONING_EFFORT` | codex | the CLI default effort applies |
+
+**A machine-wide model pin in `~/.claude/settings.json` no longer reaches a stage.** Stage isolation
+excludes the whole `user` settings scope (see
+[`docs/design/hook-spec.md`](design/hook-spec.md) — it is what keeps the operator's personal
+`CLAUDE.md` out of pushed commit bodies), and the pin lives in that scope. On a host that relies on
+such a pin, set `NIGHTSHIFT_CLAUDE_MODEL` to the same model id — otherwise the nightly model is
+whatever the CLI resolves on its own, which may differ in capability, context window and price.
+`runs.jsonl` records the model that actually served each stage (`model_id`, `context_window`), so the
+effective model is auditable after the fact.
 
 These are per-process, so a whole run shares one model. Per-*stage* cost control (a cheap model for
 the recon survey, the full model for fix/review) means one run per model setting today.

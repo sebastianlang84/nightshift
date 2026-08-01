@@ -85,6 +85,48 @@ flags, and had it attempt a `--no-verify` push; the guard denied it verbatim (`n
 both hold in unattended mode. Optional defense-in-depth remains: **GitHub branch protection** on `main`
 (with `enforce_admins`, else the agent's own admin creds bypass it) as a server-side backstop.
 
+## Stage isolation — the operator's personal config is not stage context
+
+A stage runs on the operator's machine but must **not** inherit the operator's personal Claude Code
+configuration. That config is chat-scoped and person-scoped (preferred reply language, private
+conventions, tripwire strings); a stage's output is repo-scoped and permanent — `bin/nightshift.sh`
+commits the Fix worknote **verbatim** as the commit body and pushes it. Observed on a supervised
+real-model night (2026-08-01): a worknote opened with a tripwire line from the operator's
+`~/.claude/CLAUDE.md`, was written in the operator's chat language rather than the repo's, and used a
+chat-only annotation convention the same file forbids in commits. Same class as the confinement
+hooks — enforce it by what the CLI *loads*, not by asking the prompt nicely.
+
+**Mechanism (verified against claude 2.1.205, 2026-08-02).**
+
+- **`--setting-sources project,local`** — selects which settings **scopes** the CLI loads. Dropping
+  `user` drops `~/.claude/settings.json` *and* `~/.claude/CLAUDE.md`; keeping `project,local` keeps
+  the **target repo's own** `CLAUDE.md`, which is exactly the context a stage should have. Measured:
+  ~3.8k tokens of personal rules removed per stage call. `--settings`, `--mcp-config` and `--tools`
+  are unaffected — Layer 2 was re-verified firing under the flag, so the confinement is untouched.
+  Override with `NIGHTSHIFT_CLAUDE_SETTING_SOURCES`; **empty disables the flag** (escape hatch for a
+  CLI too old to know the option — the leak returns).
+- **`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`** — the auto-memory store is keyed by cwd under
+  `~/.claude/projects/` and is *not* covered by setting sources. A throwaway worktree has nothing to
+  read, but the memory **writer** is a write path outside the worktree that the PreToolUse guard
+  never sees. Closing it keeps R8 ("Fix writes only inside the worktree") true for the whole process.
+
+**Precondition — worktrees must live outside `$HOME`.** Independently of setting scopes, the CLI also
+collects `CLAUDE.md` along the `cwd`→`/` directory chain, and for a cwd under `$HOME` that chain
+includes `~/.claude/CLAUDE.md`; `--setting-sources` does not drop it (measured: no token drop, the
+tripwire still fired). Worktrees default to `${TMPDIR:-/tmp}/nightshift-worktrees`, outside `$HOME`,
+where isolation holds; every stage — recon included — runs in such a worktree, never in the live
+checkout. Pointing `NIGHTSHIFT_WORKTREES` into `$HOME` silently reopens the leak, so the Runner logs
+a warning at startup instead of failing the run.
+
+**Rejected alternatives.** `--bare` and `--safe-mode` both remove the personal config, but they also
+disable hooks — that is Layer 2, i.e. the confinement itself — and `--bare` additionally forces
+API-key auth. `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` would also drop the *target repo's* `CLAUDE.md`,
+which a stage legitimately needs. Not tested: `deny`-style permission rules, which do not govern
+context loading at all.
+
+Regression cover: `tests/test-claude-context-isolation.sh` (flag default, escape hatch, verbatim
+pass-through, memory env).
+
 ## Out of scope for §2a — narrowed by capability profiles
 
 §2a confines **git** only. Non-git irreversible shell — `gh`, `curl`, `npm publish`, `rm -rf` outside
