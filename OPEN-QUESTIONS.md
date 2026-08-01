@@ -5,9 +5,9 @@ the decision in an ADR and remove the section. Implementation work belongs in [`
 
 ## Does nightshift now pin its own claude model?
 
-Stage isolation excludes the CLI's whole `user` settings scope (`--setting-sources project,local`) —
-that is what keeps the operator's personal `CLAUDE.md` out of pushed commit bodies, see
-[`docs/design/hook-spec.md`](docs/design/hook-spec.md). The scope is the smallest unit the CLI offers:
+Stage isolation ([ADR 0019](docs/adr/0019-stage-context-excludes-operator-config.md)) excludes the
+CLI's whole `user` settings scope (`--setting-sources project,local`) — that is what keeps the
+operator's personal `CLAUDE.md` out of pushed commit bodies. The scope is the smallest unit the CLI offers:
 there is no knob that drops `~/.claude/CLAUDE.md` while keeping `~/.claude/settings.json`, so a
 machine-wide **model pin** is collateral damage and the nightly model silently becomes whatever the
 CLI resolves on its own.

@@ -87,6 +87,9 @@ both hold in unattended mode. Optional defense-in-depth remains: **GitHub branch
 
 ## Stage isolation — the operator's personal config is not stage context
 
+Decision and rationale: [ADR 0019](../adr/0019-stage-context-excludes-operator-config.md). This
+section is the mechanism.
+
 A stage runs on the operator's machine but must **not** inherit the operator's personal Claude Code
 configuration. That config is chat-scoped and person-scoped (preferred reply language, private
 conventions, tripwire strings); a stage's output is repo-scoped and permanent — `bin/nightshift.sh`
