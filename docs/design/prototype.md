@@ -51,26 +51,38 @@ Stages are invoked through `run_agent(stage, workdir, item_dir)`, which dispatch
 - `NIGHTSHIFT_AGENT=claude` — calls the first-party CLI headless (`claude -p --output-format json`,
   ADR 0003), **verified**: a real run found the planted typo (pinning the line window more precisely
   than the mock), fixed exactly it, reviewed it independently, and shipped — `main` untouched.
-  The agent only reads/edits; the Runner owns all git. `runs.jsonl` captured real tokens **and cost**
-  (~$0.37 for the trivial fix across 3 Opus calls — telemetry immediately surfaces that a smaller
-  model for Explore/Review is the obvious cost lever; `NIGHTSHIFT_CLAUDE_MODEL` is that lever —
-  run-wide, empty by default, so no model is committed as the default). The PreToolUse guard is
-  wired through the generated settings and confines Fix-stage `Write`/`Edit` paths to the worktree. Still to harden:
-  sub-agents for Explore (context control, §3b) and non-sandbox permission mode.
+  The agent only reads/edits; the Runner owns all git. `runs.jsonl` captures real tokens **and
+  cost**, plus the `model_id` and `context_window` that actually served each stage — so a night is
+  attributable to a model after the fact, not just to an adapter. A supervised night (2026-08-01,
+  four stages, sandbox repo) cost ~$2.16 across 4 Opus-5 calls — recon $0.57 · explore $0.65 ·
+  fix $0.61 · review $0.33, 163s wall clock — which keeps a smaller model for Recon/Explore/Review
+  the obvious cost lever. `NIGHTSHIFT_CLAUDE_MODEL` is that lever — run-wide, empty by default, so
+  no model is committed as the default. The PreToolUse guard is wired through the generated settings
+  and confines Fix-stage `Write`/`Edit` paths to the worktree. Still to harden: sub-agents for
+  Explore (context control, §3b) and non-sandbox permission mode.
 - `NIGHTSHIFT_AGENT=codex` — calls `codex exec` ephemerally. Recon/Explore/Review use Codex's
   `read-only` sandbox; Fix uses `workspace-write` in the disposable worktree with network disabled.
   `NIGHTSHIFT_CODEX_MODEL` and `NIGHTSHIFT_CODEX_REASONING_EFFORT` are optional host configuration;
   no model is committed as the default. Codex can execute sandboxed commands during Fix, unlike the
   Claude adapter's no-Bash profile. The Runner still owns branch, commit, and push.
 
-**Verification debt — real-model prompt behavior.** The Runner logic (recon caching, yield-weighted
-dimension selection, the empty-scope ledger row and its digest suggestions — ADR 0010/0015) is
-covered end-to-end only in **mock** mode, which drives the real branch/worktree/git/ledger path but
-fakes the model boundary. The *prompt-level* v2 behavior against a live model is unproven: whether a
-real Recon calibrates `yield` sensibly, and whether a real Explore honestly returns
-`out_of_scope`/`in_scope_no_findings` under the confabulation guard rather than manufacturing a
-finding. A single supervised real-model night against a throwaway sandbox repo would close this;
-until then, treat live-model lens quality as observed-in-mock-only.
+**Verification debt — real-model prompt behavior (partly closed).** The Runner logic (recon
+caching, yield-weighted dimension selection, the empty-scope ledger row and its digest suggestions
+— ADR 0010/0015) is covered end-to-end in **mock** mode, which drives the real
+branch/worktree/git/ledger path but fakes the model boundary.
+
+A supervised real-model night on **2026-08-01** against a throwaway sandbox repo closed part of the
+prompt-level gap. A live Recon calibrated `yield` across all nine dimensions with file- and
+line-grounded hints — it rated `correctness` high and pointed at the exact zero-argument division
+Explore then found. Explore produced that finding, Fix made a minimal guarded change, and Review
+shipped it on independently gathered evidence; both Fix and Review stated plainly that they could
+not execute the code instead of claiming verification they had not done.
+
+Two things that night did **not** exercise, and they stay open. The rulebook pinned a single
+dimension, so yield-weighted *selection* never had to choose. And the sandbox contained a genuine
+defect, so the confabulation guard is still untested: whether a real Explore honestly returns
+`out_of_scope`/`in_scope_no_findings` on a repo with nothing to find, rather than manufacturing a
+finding, needs a night against a clean repo.
 
 ## Files
 
