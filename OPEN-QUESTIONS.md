@@ -3,7 +3,20 @@
 Only unresolved choices with lasting architectural consequences belong here. Once decided, record
 the decision in an ADR and remove the section. Implementation work belongs in [`todo.md`](todo.md).
 
-_No open design decisions at present._
+## Does nightshift now pin its own claude model?
+
+Stage isolation ([ADR 0019](docs/adr/0019-stage-context-excludes-operator-config.md)) excludes the
+CLI's whole `user` settings scope (`--setting-sources project,local`) — that is what keeps the
+operator's personal `CLAUDE.md` out of pushed commit bodies. The scope is the smallest unit the CLI offers:
+there is no knob that drops `~/.claude/CLAUDE.md` while keeping `~/.claude/settings.json`, so a
+machine-wide **model pin** is collateral damage and the nightly model silently becomes whatever the
+CLI resolves on its own.
+
+Unresolved: whether "nightshift commits no model of its own" survives that. Options — (a) keep it and
+make `NIGHTSHIFT_CLAUDE_MODEL` the documented per-host duty (today's state), (b) pin a model in the
+Runner-owned `state/claude-settings.json`, which is loaded regardless of scope, (c) fail the run when
+no model is pinned anywhere. (a) is honest but silent: a host that loses its pin only finds out from
+`runs.jsonl`. Revisit if the CLI ever separates memory scopes from settings scopes.
 
 ## Resolved decisions
 

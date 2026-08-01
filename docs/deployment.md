@@ -40,15 +40,25 @@ ledgers diverge silently: duplicate branches, broken caps and rotation). See
 ### Model and flags (optional, per host)
 
 Nightshift **commits no model of its own** — with these unset, each adapter uses whatever its CLI
-resolves as the default (for `claude`, e.g. a machine-wide pin in `~/.claude/settings.json`). Set
-them only to override that, e.g. a smaller/cheaper model for a run.
+resolves as the default. Set them only to override that, e.g. a smaller/cheaper model for a run.
 
 | Variable | Adapter | Effect when unset |
 |----------|---------|-------------------|
 | `NIGHTSHIFT_CLAUDE_MODEL` | claude | no `--model` is passed; the CLI default applies |
 | `NIGHTSHIFT_CLAUDE_FLAGS` | claude | `--dangerously-skip-permissions --max-turns 25` |
+| `NIGHTSHIFT_CLAUDE_SETTING_SOURCES` | claude | `--setting-sources project,local` (stage isolation) |
 | `NIGHTSHIFT_CODEX_MODEL` | codex | no `--model` is passed; the CLI default applies |
 | `NIGHTSHIFT_CODEX_REASONING_EFFORT` | codex | the CLI default effort applies |
+| `NIGHTSHIFT_CODEX_STAGE_HOME` | codex | `state/codex-home` (stage isolation); empty = your own `CODEX_HOME` |
+
+**A machine-wide model pin in `~/.claude/settings.json` no longer reaches a stage.** Stage isolation
+excludes the whole `user` settings scope (see
+[`docs/design/hook-spec.md`](design/hook-spec.md) — it is what keeps the operator's personal
+`CLAUDE.md` out of pushed commit bodies), and the pin lives in that scope. On a host that relies on
+such a pin, set `NIGHTSHIFT_CLAUDE_MODEL` to the same model id — otherwise the nightly model is
+whatever the CLI resolves on its own, which may differ in capability, context window and price.
+`runs.jsonl` records the model that actually served each stage (`model_id`, `context_window`), so the
+effective model is auditable after the fact.
 
 These are per-process, so a whole run shares one model. Per-*stage* cost control (a cheap model for
 the recon survey, the full model for fix/review) means one run per model setting today.
@@ -72,6 +82,7 @@ these flags, is what confines the agent (see [`docs/design/risk-analysis.md`](de
 | `state/runs.jsonl` | Per-stage telemetry (real `model_id`, `context_window`, input/output/cache tokens, cost, duration) | `NIGHTSHIFT_STATE_DIR` |
 | `state/recon/` | Per-repo recon caches (derived, disposable) | `NIGHTSHIFT_STATE_DIR` |
 | `state/dim-scans/` | Per-(repo,dim) explore markers driving rotation | `NIGHTSHIFT_STATE_DIR` |
+| `state/codex-home/` | `CODEX_HOME` a codex stage runs under: a symlink to your `auth.json` plus codex's own caches, and deliberately no `AGENTS.md`/`config.toml` (derived, disposable) | `NIGHTSHIFT_CODEX_STAGE_HOME` |
 | `runs/<date>/` | Per-item working dirs (prompts, agent output) | `NIGHTSHIFT_RUNS_DIR` |
 | `digests/<date>.md` | The morning report | `NIGHTSHIFT_DIGEST_DIR` |
 | `~/.local/state/nightshift/logs/<date>.log` | Launcher log (also in journald) | `NIGHTSHIFT_LOG_DIR` |
