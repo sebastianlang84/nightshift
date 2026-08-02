@@ -25,6 +25,9 @@ NIGHT="$(date +%Y-%m-%d)"
 RUNS_DIR="${NIGHTSHIFT_RUNS_DIR:-$NIGHTSHIFT_HOME/runs}/$NIGHT"
 DIGEST_DIR="${NIGHTSHIFT_DIGEST_DIR:-$NIGHTSHIFT_HOME/digests}"
 LEDGER="$STATE_DIR/ledger.jsonl"
+# Freshness snapshot for open findings (lib/probe_findings.py): derived, disposable, rewritten by
+# harvest and by the verify phase. Read by the dashboard's Nightshift tab through the same mount.
+PROBE_SNAPSHOT="$STATE_DIR/findings-probe.json"
 # Derived, disposable index of the last service epoch per (repo,dimension). One aggregating jq
 # pass over the append-only ledger, memoized on the ledger's mtime, so last_dim_epoch's nested
 # repo×dimension callers stop re-slurping the whole ledger on every cell (see last_dim_epoch).
@@ -58,7 +61,7 @@ fi
 declare -a REPO_PATHS=() REPO_MODES=() REPO_BASES=() REPO_FINDINGS=() REPO_DIMS=() DIMENSIONS=()
 # Rulebook-declared model per adapter (ADR 0020); empty = the rulebook declares none. Kept separate
 # from the NIGHTSHIFT_*_MODEL env vars so the precedence env > rulebook > CLI default stays legible.
-RB_CLAUDE_MODEL="" RB_CODEX_MODEL=""
+RB_CLAUDE_MODEL="" RB_CODEX_MODEL="" RB_MAX_VERIFY=""
 # Announce which model the night will REQUEST, and where that choice came from (ADR 0020). Not which
 # model serves it: with no --model the CLI picks for itself, and even a given id may be an alias that
 # resolves elsewhere — that answer only exists afterwards, in `runs.jsonl` (`model_id`). Announcing
@@ -90,6 +93,7 @@ load_rulebook() {
       prefix)                BRANCH_PREFIX="$a" ;;
       max_open)              MAX_OPEN="$a" ;;
       max_findings_per_item) MAX_FINDINGS="$a" ;;
+      max_verifies_per_run)  RB_MAX_VERIFY="$a" ;;
       recon_enabled)         RECON_ENABLED="$a" ;;
       recon_ttl_days)        RECON_TTL_DAYS="$a" ;;
       max_branches_per_run)  rb_run_branches="$a" ;;
@@ -105,6 +109,10 @@ load_rulebook() {
   done <<< "$parsed"
   MAX_FINDINGS="${MAX_FINDINGS:-1}"
   RECON_ENABLED="${RECON_ENABLED:-true}"; RECON_TTL_DAYS="${RECON_TTL_DAYS:-7}"
+  # How many open findings the verify phase may re-check per night. Bounds what closure can cost:
+  # every candidate is one read-only stage call. 0 disables the phase (the deterministic probe
+  # still runs — it is free). Env override for a one-off, else the rulebook, else 5.
+  MAX_VERIFY="${NIGHTSHIFT_MAX_VERIFIES:-${RB_MAX_VERIFY:-5}}"
   # Fallback dimension set if the rulebook declares none, so rotation still works out of the box.
   [ "${#DIMENSIONS[@]}" -gt 0 ] || DIMENSIONS=(correctness security infra docs tests perf ui-ux deps craft)
   # Per-run safety ceiling: the rulebook wins; NIGHTSHIFT_MAX_RUN_BRANCHES stays as an
@@ -401,7 +409,7 @@ ${NIGHTSHIFT_KNOWN_WORK}"
 $(cat "$id/signals.json")"
   fi
   case "$stage" in
-    fix|review) prompt="$prompt
+    fix|review|verify) prompt="$prompt
 
 ### finding.json
 $(cat "$id/finding.json")" ;;
@@ -483,6 +491,22 @@ mock_advise() { # workdir item_dir — deterministic second-opinion from the bra
     jq -nc '{recommendation:"merge",reason:"Typo fix; trivial, reversible, no behaviour change."}' > "$id/advice.json"
   else
     jq -nc '{recommendation:"do-not-merge",reason:"Non-trivial change; a human should judge intent."}' > "$id/advice.json"
+  fi
+}
+mock_verify() { # workdir item_dir — resolved iff the planted defect is gone from the target file
+  local wd="$1" id="$2" file marker
+  file=$(jq -r '.file // ((.files // [])[0] // "")' "$id/finding.json" 2>/dev/null || echo "")
+  case "$file" in
+    README.md) marker="teh " ;;
+    app.py)    marker="retrun" ;;
+    *)         marker="" ;;
+  esac
+  if [ -n "$marker" ] && [ -f "$wd/$file" ] && ! grep -qF "$marker" "$wd/$file"; then
+    jq -nc --arg f "$file" '{resolved:true,confidence:"high",
+      evidence:("planted defect no longer present in " + $f)}' > "$id/verify.json"
+  else
+    jq -nc --arg f "$file" '{resolved:false,confidence:"high",
+      evidence:("defect still present in " + $f)}' > "$id/verify.json"
   fi
 }
 mock_recon() { # workdir item_dir — deterministic yield straight from recon_signals.json (ADR 0015)
@@ -610,6 +634,7 @@ repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
     review)  python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/review.md" ;;
     recon)   python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/recon.json" ;;
     advise)  python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/advice.json" ;;
+    verify)  python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/verify.json" ;;
   esac
   return 0
 }
@@ -707,6 +732,7 @@ repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
     review)  python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/review.md" ;;
     recon)   python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/recon.json" ;;
     advise)  python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/advice.json" ;;
+    verify)  python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/verify.json" ;;
   esac
 }
 
@@ -1098,6 +1124,96 @@ $(cat "$id/worknote.md")"; then
 }
 
 # ------------------------------------------------- independent branch review ----
+# ----------------------------------------------------------- finding closure ----
+# A finding is a human-owned TODO with no branch and no sha, so harvest's reconcile loop — which
+# tests a branch sha against base — can never reach it. Left alone it stays open in the ledger, the
+# digest and the dashboard forever, and known_work keeps re-injecting it into Explore. This phase
+# closes the loop, cheapest layer first:
+#   1. the deterministic freshness probe (lib/probe_findings.py) recomputes every open finding's
+#      content signature (ADR 0014). An UNCHANGED signature proves the target code was never
+#      touched, so the finding cannot have been fixed — no model is spent on it.
+#   2. only findings whose code DID change reach the read-only verify stage, which reads today's
+#      code and judges whether that specific defect is gone.
+# Fail closed at every step: only resolved:true AND confidence:high writes a verdict, and it is
+# stamped source "auto-verify" — a machine claim, distinct from a human's `manual` ground truth
+# (ADR 0007). Anything else leaves the item open and records the negative in the probe snapshot, so
+# the same unchanged code is never paid for twice.
+append_finding_verdict() { # item repo fingerprint verdict [reason]
+  jq -nc --arg night "$NIGHT" --arg item "$1" --arg repo "$2" --arg fp "$3" \
+    --arg verdict "$4" --arg reason "${5:-}" --arg ts "$(date -Iseconds)" \
+    '{night:$night,item:$item,repo:$repo,fingerprint:$fp,branch:null,sha:null,
+      outcome:"verdict",verdict:$verdict,
+      reason:($reason|if .=="" then null else . end),
+      source:"auto-verify",ts:$ts,schema_version:2}' >> "$LEDGER"
+}
+
+repo_cfg_base() { # repo -> the rulebook's `base:` for it ("" = auto-detect)
+  local repo="$1" i
+  for i in "${!REPO_PATHS[@]}"; do
+    [ "${REPO_PATHS[$i]}" = "$repo" ] && { echo "${REPO_BASES[$i]:-}"; return; }
+  done
+  echo ""
+}
+
+run_probe() { # refresh the freshness snapshot; never fatal — it is derived, disposable state
+  python3 "$NIGHTSHIFT_HOME/lib/probe_findings.py" \
+    --ledger "$LEDGER" --out "$PROBE_SNAPSHOT" >/dev/null 2>&1 \
+    || log "findings probe failed (non-fatal)"
+}
+
+verify_findings() {
+  [ "${MAX_VERIFY:-0}" -gt 0 ] || return 0
+  [ -f "$LEDGER" ] || return 0
+  run_probe
+  local n=0 cand row item repo fp sig summary dim ts base wt id resolved conf ev
+  # Oldest candidate first, and only those never verified against TODAY's signature — the probe
+  # drops a stale verify block itself, so an item re-enters this queue exactly when its code moves.
+  cand=$(jq -r '[.items[]? | select(.state=="code_changed" and (has("verify")|not))]
+                | sort_by(.ts) | .[] | @base64' "$PROBE_SNAPSHOT" 2>/dev/null || true)
+  [ -n "$cand" ] || return 0
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    if [ "$n" -ge "$MAX_VERIFY" ]; then
+      log "verify: cap reached ($MAX_VERIFY) — the rest keep until the next night"; break
+    fi
+    if over_budget; then log "verify: time budget exhausted — stop"; break; fi
+    row=$(base64 -d <<<"$row")
+    item=$(jq -r '.item' <<<"$row");        repo=$(jq -r '.repo' <<<"$row")
+    fp=$(jq -r '.fingerprint' <<<"$row");   sig=$(jq -r '.code_sig_now' <<<"$row")
+    summary=$(jq -r '.summary' <<<"$row");  dim=$(jq -r '.dimension' <<<"$row")
+    ts=$(jq -r '.ts' <<<"$row")
+    [ -d "$repo/.git" ] || continue
+    base="$(resolve_base "$repo" "$(repo_cfg_base "$repo")")"
+    wt="$WORKTREES_DIR/verify-$(date +%s%N)"
+    setup_worktree "$repo" "$wt" "$base" || { log "verify: no worktree for $(basename "$repo") — skip"; continue; }
+    id="$RUNS_DIR/verify-$(date +%s%N)"; mkdir -p "$id"
+    # The stage sees the finding as recorded — NOT the original code. Judging the present state is
+    # the whole point; handing it a reconstruction would invite pattern-matching on the old defect.
+    jq -nc --arg s "$summary" --arg fp "$fp" --arg d "$dim" --arg ts "$ts" \
+      --argjson files "$(jq -c '[(.fingerprint|split(":")[0]|split(","))[]|select(length>0)]' <<<"$row")" \
+      '{summary:$s,fingerprint:$fp,dimension:$d,recorded:$ts,files:$files}' > "$id/finding.json"
+    run_agent verify "$wt" "$id" || true
+    remove_worktree "$repo" "$wt"
+    n=$((n + 1))
+    resolved=$(jq -r '.resolved // false' "$id/verify.json" 2>/dev/null || echo false)
+    conf=$(jq -r '.confidence // "low"' "$id/verify.json" 2>/dev/null || echo low)
+    ev=$(jq -r '.evidence // ""' "$id/verify.json" 2>/dev/null || echo "")
+    if [ "$resolved" = true ] && [ "$conf" = high ]; then
+      append_finding_verdict "$item" "$repo" "$fp" resolved "auto-verify: ${ev:-no evidence given}"
+      python3 "$NIGHTSHIFT_HOME/lib/probe_findings.py" record-verify --out "$PROBE_SNAPSHOT" \
+        --item "$item" --sig "$sig" --result resolved --reason "$ev" >/dev/null 2>&1 || true
+      log "  verify: $(basename "$repo") — RESOLVED ($fp)"
+    else
+      python3 "$NIGHTSHIFT_HOME/lib/probe_findings.py" record-verify --out "$PROBE_SNAPSHOT" \
+        --item "$item" --sig "$sig" --result open --reason "${ev:-no evidence given}" >/dev/null 2>&1 || true
+      log "  verify: $(basename "$repo") — still open ($fp)"
+    fi
+  done <<< "$cand"
+  # Resolved items must leave the snapshot now, not on the next harvest — the dashboard reads it.
+  [ "$n" -gt 0 ] && run_probe
+  return 0
+}
+
 # Opt-in (NIGHTSHIFT_BRANCH_REVIEW=1): a FRESH read-only agent gives a second opinion — merge /
 # do-not-merge — on every open nightshift/* branch, written into the morning digest. It NEVER merges
 # or pushes (read-only tool profile + git-confinement hold). Prefer a different model/vendor with
@@ -1367,6 +1483,9 @@ main() {
     STATE_DIR="$STATE_DIR" LEDGER="$LEDGER" RULEBOOK="$RULEBOOK" \
       "$NIGHTSHIFT_HOME/bin/harvest.sh" >/dev/null 2>&1 || log "harvest: skipped (non-fatal)"
   fi
+  # Then close the loop harvest cannot reach: open findings (no branch, no sha). Runs before the
+  # night's work so a finding cleared here also drops out of tonight's known_work injection.
+  verify_findings
   log "agent=$NIGHTSHIFT_AGENT prefix=$BRANCH_PREFIX · cap: max $MAX_OPEN unmerged ${BRANCH_PREFIX} branches · run ceiling $MAX_RUN_BRANCHES · fix iters $MAX_FIX_ITER"
   case "$NIGHTSHIFT_AGENT" in
     claude) log_model_selection claude NIGHTSHIFT_CLAUDE_MODEL "$RB_CLAUDE_MODEL" ;;

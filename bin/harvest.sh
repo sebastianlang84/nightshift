@@ -22,8 +22,12 @@
 # Human verdicts are ground truth: reconcile only DERIVES merged|open|dropped, so it
 # never overwrites a resolved/wontfix or a manually recorded terminal verdict with a
 # machine value (only an objective merge — sha contained in base — can supersede them).
-# Findings (branch=null) have no sha to test — give them a verdict by hand:
-#     harvest.sh verdict <item|branch|fingerprint> <merged|dropped|resolved|wontfix|open> [reason]
+# FINDINGS (branch=null) have no sha to test, so the reconcile loop can never reach them. Two
+# things close that gap, and neither invents a verdict:
+#   * the freshness probe (lib/probe_findings.py) recomputes each open finding's content signature
+#     (ADR 0014, ADR 0021) and records untouched / code_changed / unknown into
+#     state/findings-probe.json — a derived snapshot, never a ledger event. It runs on every harvest.
+#   * `todos` lists what is open with that state attached, and `close` records the human verdict.
 #
 #   harvest.sh                 # reconcile all shipped branches, append changed verdicts
 #   harvest.sh --dry-run       # show the reconciliation, write nothing
@@ -38,6 +42,7 @@ STATE_DIR="${STATE_DIR:-$NIGHTSHIFT_HOME/state}"
 LEDGER="${LEDGER:-$STATE_DIR/ledger.jsonl}"
 RULEBOOK="${RULEBOOK:-$NIGHTSHIFT_HOME/rulebook.yaml}"
 [ -f "$RULEBOOK" ] || RULEBOOK="$NIGHTSHIFT_HOME/rulebook.example.yaml"
+PROBE_SNAPSHOT="${PROBE_SNAPSHOT:-$STATE_DIR/findings-probe.json}"
 SCHEMA_VERSION=2
 BRANCH_PREFIX="nightshift/"   # overridden by the rulebook's branch_prefix; the orphan sweep needs it
 
@@ -240,6 +245,72 @@ manual_verdict() { # selector verdict [reason]
     "${branch:-$sel}" "$verdict" "${reason:+ ($reason)}" "$item" "$(basename "$repo")"
 }
 
+# ------------------------------------------------------- findings freshness ----
+# The probe is pure observation (no model, no network, no ledger write), so it is safe to run on
+# every harvest. Non-fatal by contract: a probe failure must never take down reconciliation.
+run_probe() { # [--print]
+  python3 "$NIGHTSHIFT_HOME/lib/probe_findings.py" \
+    --ledger "$LEDGER" --out "$PROBE_SNAPSHOT" "$@"
+}
+
+# Age in whole days, for the "how long has this been rotting" column.
+age_days() { # iso_ts
+  local then now
+  then=$(date -d "$1" +%s 2>/dev/null) || { echo "?"; return; }
+  now=$(date +%s)
+  echo $(( (now - then) / 86400 ))
+}
+
+# Open findings, oldest first — ONE ordering shared by `todos` and `close`, so the number a human
+# reads off the list is the item `close` acts on.
+todo_items() { jq -r '[.items[]] | sort_by(.ts) | .[] | @base64' "$PROBE_SNAPSHOT" 2>/dev/null; }
+
+list_todos() {
+  run_probe >/dev/null || { echo "probe failed — cannot list findings" >&2; exit 1; }
+  local n=0 row item repo dim state ts summary verify age mark
+  printf '%-4s %-6s %-18s %-11s %-13s %s\n' '#' 'AGE' 'REPO' 'DIMENSION' 'STATE' 'SUMMARY'
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    n=$((n + 1))
+    item=$(base64 -d <<<"$row")
+    repo=$(jq -r '.repo' <<<"$item"); dim=$(jq -r '.dimension // ""' <<<"$item")
+    state=$(jq -r '.state' <<<"$item"); ts=$(jq -r '.ts' <<<"$item")
+    summary=$(jq -r '.summary // ""' <<<"$item")
+    verify=$(jq -r '.verify.result // ""' <<<"$item")
+    age="$(age_days "$ts")d"
+    case "$state" in
+      untouched)    mark="untouched" ;;   # target code never changed -> certainly still open
+      code_changed) mark="recheck" ;;     # something changed under it -> may already be fixed
+      *)            mark="unknown" ;;
+    esac
+    [ -n "$verify" ] && mark="$mark/$verify"
+    printf '%-4s %-6s %-18s %-11s %-13s %s\n' \
+      "$n" "$age" "$(basename "$repo")" "${dim:-—}" "$mark" "${summary:0:96}"
+  done < <(todo_items)
+  if [ "$n" -eq 0 ]; then
+    echo "(no open findings)"
+  else
+    printf '\n%d open finding(s). Close one with: harvest.sh close <#> [reason]\n' "$n"
+  fi
+}
+
+# Record a human `resolved` for an open finding, addressed by its `todos` line number (or any
+# selector manual_verdict understands). Human input stays ground truth (ADR 0007) — this is just
+# the ergonomic front door to `verdict <sel> resolved`.
+close_todo() { # <n|selector> [reason]
+  local sel="$1" reason="${2:-}" item
+  if [[ "$sel" =~ ^[0-9]+$ ]]; then
+    [ -f "$PROBE_SNAPSHOT" ] || run_probe >/dev/null || true
+    item=$(todo_items | sed -n "${sel}p" | base64 -d 2>/dev/null | jq -r '.item // ""')
+    [ -n "$item" ] || { echo "no open finding #$sel — run: harvest.sh todos" >&2; exit 1; }
+    sel="$item"
+  fi
+  manual_verdict "$sel" resolved "$reason"
+  # Re-probe so the snapshot (and with it the dashboard) drops the item immediately instead of
+  # carrying a closed finding until the next harvest.
+  run_probe >/dev/null || true
+}
+
 # --------------------------------------------------------------------- main ----
 usage() {
   cat <<'EOF'
@@ -249,6 +320,9 @@ usage:
   harvest.sh verdict <sel> <verdict> [reason]   record a manual verdict (findings/override)
       <sel>      item id | branch | fingerprint
       <verdict>  merged | dropped | resolved | wontfix | open
+  harvest.sh todos                              list open findings, numbered, with freshness state
+  harvest.sh close <#|sel> [reason]             record `resolved` for one open finding
+  harvest.sh probe                              re-run the finding freshness probe, print the table
   harvest.sh --help                             print this
 EOF
 }
@@ -264,18 +338,25 @@ case "${1:-}" in
   --dry-run) DRYRUN=1 ;;
   -h|--help) usage; exit 0 ;;
   verdict)   ;;                                  # arity checked below, run after the ledger checks
+  close)     ;;                                  # arity checked below, run after the ledger checks
+  todos)     ;;                                  # read-only finding surfaces, run after the checks
+  probe)     ;;
   *)         printf 'unknown argument: %s\n' "$1" >&2; usage >&2; exit 2 ;;
 esac
 # Arity, checked here so a malformed command line fails fast and identically whatever
 # state the rulebook/ledger are in. Extra words are rejected rather than ignored: for
 # `verdict` a 4th+ word is almost always an unquoted multi-word reason, which would
 # otherwise be silently truncated to its first word in the ledger.
-if [ "${1:-}" = verdict ]; then
-  [ "$#" -ge 3 ] && [ "$#" -le 4 ] \
-    || { echo "verdict takes <selector> <verdict> [reason] (quote a multi-word reason)" >&2; usage >&2; exit 2; }
-elif [ "$#" -gt 1 ]; then
-  printf 'unexpected extra arguments: %s\n' "${*:2}" >&2; usage >&2; exit 2
-fi
+case "${1:-}" in
+  verdict)
+    [ "$#" -ge 3 ] && [ "$#" -le 4 ] \
+      || { echo "verdict takes <selector> <verdict> [reason] (quote a multi-word reason)" >&2; usage >&2; exit 2; } ;;
+  close)
+    [ "$#" -ge 2 ] && [ "$#" -le 3 ] \
+      || { echo "close takes <#|selector> [reason] (quote a multi-word reason)" >&2; usage >&2; exit 2; } ;;
+  *)
+    [ "$#" -le 1 ] || { printf 'unexpected extra arguments: %s\n' "${*:2}" >&2; usage >&2; exit 2; } ;;
+esac
 
 load_rulebook
 [ -f "$LEDGER" ] || { echo "no ledger at $LEDGER — nothing to harvest"; exit 0; }
@@ -286,9 +367,12 @@ load_rulebook
 jq -e . "$LEDGER" >/dev/null 2>&1 \
   || { echo "ledger is not valid JSONL ($LEDGER) — aborting harvest" >&2; exit 1; }
 
-if [ "${1:-}" = verdict ]; then
-  shift; manual_verdict "$@"; exit 0
-fi
+case "${1:-}" in
+  verdict) shift; manual_verdict "$@"; exit 0 ;;
+  todos)   list_todos;        exit 0 ;;
+  close)   shift; close_todo "$@"; exit 0 ;;
+  probe)   run_probe --print; exit 0 ;;
+esac
 
 # prefetch each repo once
 declare -A FETCHED=()
@@ -366,3 +450,8 @@ else
   echo "$changed verdict event(s) appended (* = changed since last harvest)."
 fi
 sweep_orphans
+# Findings never enter the reconcile loop (no branch, no sha). Refresh their freshness snapshot so
+# `todos` and the dashboard see today's state. A --dry-run writes nothing here either.
+if [ "$DRYRUN" -eq 0 ]; then
+  run_probe >/dev/null 2>&1 || echo "(findings probe skipped — non-fatal)" >&2
+fi

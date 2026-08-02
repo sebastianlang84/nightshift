@@ -17,6 +17,10 @@ limits:
                                  # backpressure above is the real governor). Env override:
                                  # NIGHTSHIFT_MAX_RUN_BRANCHES wins only if this is unset.
   max_fix_iterations: 3          # HARD cap on Fix<->Review round-trips per finding before abandon
+  max_verifies_per_run: 5        # HARD cap on open findings re-checked per night (ADR 0021). Only
+                                 # findings whose target code CHANGED since they were recorded ever
+                                 # qualify; each costs one read-only stage call. 0 = never spend a
+                                 # model on closure (the free signature probe still runs).
   max_files_per_change: 15       # SOFT — guidance to the agent, not a hard reject
   max_lines_per_change: 400      # SOFT — a bigger change is fine if it's one coherent improvement
   # max_run_minutes: 240         # OPTIONAL wall-clock budget for the whole night (ADR 0013). Checked

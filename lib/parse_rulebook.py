@@ -150,6 +150,14 @@ def main(path: str) -> None:
     if not mfp.isdecimal() or int(mfp) < 1:
         raise SystemExit("limits.max_findings_per_item must be a positive integer")
     print(f"max_findings_per_item\t{mfp}")
+    # Open findings the verify phase may re-check per night — one read-only stage call each, so
+    # this is the ceiling on what closing the finding loop can cost. 0 is a legitimate value
+    # ("never spend a model on closure"); the free deterministic probe runs either way. A
+    # non-numeric value would detonate in bash arithmetic — fail loudly like every sibling.
+    mvr = limits.get("max_verifies_per_run", "5")
+    if not mvr.isdecimal():
+        raise SystemExit("limits.max_verifies_per_run must be a non-negative integer")
+    print(f"max_verifies_per_run\t{mvr}")
     # Recon stage: on by default; cache invalidated on HEAD change or after ttl_days.
     print(f"recon_enabled\t{recon.get('enabled', 'true')}")
     # A malformed ttl_days silently became 0 in bash arithmetic → the cache was never fresh →
