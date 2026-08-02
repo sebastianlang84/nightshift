@@ -45,6 +45,9 @@ RULEBOOK="${RULEBOOK:-$NIGHTSHIFT_HOME/rulebook.yaml}"
 PROBE_SNAPSHOT="${PROBE_SNAPSHOT:-$STATE_DIR/findings-probe.json}"
 SCHEMA_VERSION=2
 BRANCH_PREFIX="nightshift/"   # overridden by the rulebook's branch_prefix; the orphan sweep needs it
+# The author identity bin/nightshift.sh commits under. It is what marks a recorded sha as OUR work
+# rather than a base commit the branch merely points at — see step 0 of reconcile().
+NIGHTSHIFT_COMMIT_EMAIL="nightshift@localhost"
 
 declare -a REPO_PATHS=() REPO_BASES=()
 load_rulebook() {
@@ -121,6 +124,18 @@ reconcile() { # repo base branch sha [pr_url]
   local repo="$1" base="$2" branch="$3" sha="$4" pr_url="${5:-}"
   # 1. sha is an ancestor of base (merge-commit / fast-forward) — cheapest definitive test.
   if git -C "$repo" merge-base --is-ancestor "$sha" "$base" 2>/dev/null; then
+    # …unless nightshift never created that commit. Then finalize's commit was rejected (a repo
+    # hook, or an empty change), the branch still sits on the base commit it was CUT from, and its
+    # containment in base is trivial rather than a merge. Reporting `merged` there invents a merge,
+    # counts it into the merge-rate, and — since `merged` is the one verdict that outranks a
+    # human's — silently reverses an operator's `dropped` on every harvest. Scoped deliberately to
+    # this branch of the ladder: a squash/rebase merge is NOT contained in base and is settled by
+    # step 2 below, whatever identity replayed it. A gc'd object falls through to `merged` as
+    # before — only a READABLE foreign commit proves our work is absent.
+    if git -C "$repo" cat-file -e "${sha}^{commit}" 2>/dev/null \
+       && [ "$(git -C "$repo" log -1 --format=%ae "$sha" 2>/dev/null)" != "$NIGHTSHIFT_COMMIT_EMAIL" ]; then
+      echo dropped; return
+    fi
     echo merged; return
   fi
   # 2. the branch's one-commit patch already landed in base (squash / rebase merge, ADR 0011).
