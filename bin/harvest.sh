@@ -28,6 +28,9 @@
 #   harvest.sh                 # reconcile all shipped branches, append changed verdicts
 #   harvest.sh --dry-run       # show the reconciliation, write nothing
 #   harvest.sh verdict <sel> <verdict> [reason]   # record a manual verdict (findings/override)
+#   harvest.sh --help          # print the usage above
+# Any other argument is an error (exit 2), never a silent fall-through to the
+# argument-less form — that form WRITES to the ledger. See the dispatch in main.
 set -euo pipefail
 
 NIGHTSHIFT_HOME="${NIGHTSHIFT_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -238,7 +241,42 @@ manual_verdict() { # selector verdict [reason]
 }
 
 # --------------------------------------------------------------------- main ----
+usage() {
+  cat <<'EOF'
+usage:
+  harvest.sh                                    reconcile all shipped branches, append changed verdicts
+  harvest.sh --dry-run                          show the reconciliation, write nothing
+  harvest.sh verdict <sel> <verdict> [reason]   record a manual verdict (findings/override)
+      <sel>      item id | branch | fingerprint
+      <verdict>  merged | dropped | resolved | wontfix | open
+  harvest.sh --help                             print this
+EOF
+}
+
+# Dispatch BEFORE any other work, and reject anything unrecognised. Harvest is the one
+# tool here whose ARGUMENT-LESS invocation is the mutating one: falling through to the
+# default means appending `verdict` rows to the ledger. A typo'd preview flag (--dryrun,
+# -n, --dry_run) or a stray selector must therefore be an error, not a silent write —
+# the same contract bin/schedule.sh's `*) usage; exit 2` arm gives its subcommands.
 DRYRUN=0
+case "${1:-}" in
+  '')        ;;                                  # reconcile (writes)
+  --dry-run) DRYRUN=1 ;;
+  -h|--help) usage; exit 0 ;;
+  verdict)   ;;                                  # arity checked below, run after the ledger checks
+  *)         printf 'unknown argument: %s\n' "$1" >&2; usage >&2; exit 2 ;;
+esac
+# Arity, checked here so a malformed command line fails fast and identically whatever
+# state the rulebook/ledger are in. Extra words are rejected rather than ignored: for
+# `verdict` a 4th+ word is almost always an unquoted multi-word reason, which would
+# otherwise be silently truncated to its first word in the ledger.
+if [ "${1:-}" = verdict ]; then
+  [ "$#" -ge 3 ] && [ "$#" -le 4 ] \
+    || { echo "verdict takes <selector> <verdict> [reason] (quote a multi-word reason)" >&2; usage >&2; exit 2; }
+elif [ "$#" -gt 1 ]; then
+  printf 'unexpected extra arguments: %s\n' "${*:2}" >&2; usage >&2; exit 2
+fi
+
 load_rulebook
 [ -f "$LEDGER" ] || { echo "no ledger at $LEDGER — nothing to harvest"; exit 0; }
 # Validate the whole ledger up front. Every read below is `jq -s` (slurp); a single corrupt
@@ -249,10 +287,8 @@ jq -e . "$LEDGER" >/dev/null 2>&1 \
   || { echo "ledger is not valid JSONL ($LEDGER) — aborting harvest" >&2; exit 1; }
 
 if [ "${1:-}" = verdict ]; then
-  shift; [ "$#" -ge 2 ] || { echo "usage: harvest.sh verdict <selector> <verdict> [reason]" >&2; exit 2; }
-  manual_verdict "$@"; exit 0
+  shift; manual_verdict "$@"; exit 0
 fi
-[ "${1:-}" = --dry-run ] && DRYRUN=1
 
 # prefetch each repo once
 declare -A FETCHED=()
