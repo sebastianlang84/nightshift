@@ -1059,13 +1059,27 @@ finalize() { # repo worktree item_dir [seq] [base] -> echoes branch name
   branch="${BRANCH_PREFIX}${slug}-$(date +%Y%m%d-%H%M%S)-${seq}"
   git -C "$wt" checkout -q -b "$branch"
   git -C "$wt" add -A
-  git -C "$wt" -c user.name=nightshift -c user.email=nightshift@localhost \
-      commit -q -m "nightshift: $(jq -r '.summary' "$id/finding.json")
-
-$(cat "$id/worknote.md")"
-  sha=$(git -C "$wt" rev-parse HEAD)
   summary=$(jq -r '.summary // ""' "$id/finding.json")
   verif=$(jq -r '.verifiability // ""' "$id/finding.json" 2>/dev/null || true)
+  # The TARGET repo's own hooks run for this commit — deliberately: nightshift must not manufacture
+  # commits the host repo would reject. So the commit can fail (a blocking pre-commit hook, or an
+  # empty index because the Fix stage changed nothing), and NOTHING below may treat that as shipped.
+  # Without this check `rev-parse HEAD` just returned the BASE sha, the untouched branch was pushed,
+  # and the ledger recorded `shipped` — a fix that does not exist, holding an open-branch slot.
+  # (Observed 2026-08-02: partflow's CHANGELOG pre-commit hook rejected a deps cleanup; the empty
+  # branch shipped anyway. `set -e` cannot catch it — finalize runs inside an `if` condition.)
+  if ! git -C "$wt" -c user.name=nightshift -c user.email=nightshift@localhost \
+       commit -q -m "nightshift: $(jq -r '.summary' "$id/finding.json")
+
+$(cat "$id/worknote.md")"; then
+    log "  $(basename "$repo"): commit rejected (repo hook, or nothing to commit) — not shipped: $branch"
+    ledger_append "$(basename "$id")" "$repo" "$fp" "" "" "commit-failed" "$summary" "" "" "$verif" "$dim" "$type" "$csig"
+    git -C "$wt" checkout -q --detach >/dev/null 2>&1 || true
+    git -C "$repo" branch -q -D "$branch" >/dev/null 2>&1 \
+      || log "  $(basename "$repo"): cleanup warning — local branch remains: $branch"
+    return 1
+  fi
+  sha=$(git -C "$wt" rev-parse HEAD)
   # Layer 1 hook active for THIS push only (-c), never persisted to the repo config.
   if ! git -c core.hooksPath="$HOOKS_DIR" -C "$wt" push -q -u origin "$branch"; then
     log "  $(basename "$repo"): push failed — not shipped: $branch"
@@ -1259,7 +1273,7 @@ write_digest() { # made open status [advice]
     echo
     echo "## Considered but not shipped"
     [ -f "$LEDGER" ] && jq -r --arg n "$NIGHT" \
-      'select(.night==$n and (.outcome=="abandoned" or .outcome=="push-failed")) | "- " + .repo + " — " + .outcome + ": " + (.summary // .fingerprint)' \
+      'select(.night==$n and (.outcome=="abandoned" or .outcome=="push-failed" or .outcome=="commit-failed")) | "- " + .repo + " — " + .outcome + ": " + (.summary // .fingerprint)' \
       "$LEDGER" 2>/dev/null || true
     echo
     # Carry-forward (ADR 0014): every surfaced finding, across ALL nights, that a human has not yet
