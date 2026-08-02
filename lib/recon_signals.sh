@@ -9,7 +9,7 @@
 # JSON (jq must be able to parse the output).
 #
 # It is the cheap, always-true ground truth handed to prompts/recon.md so the recon
-# model judges dimension applicability from signals, not guesses.
+# model judges each dimension's expected yield from signals, not guesses (ADR 0015).
 set -euo pipefail
 
 log() { echo "[recon] $*" >&2; }
