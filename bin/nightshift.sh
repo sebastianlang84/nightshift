@@ -296,10 +296,11 @@ write_claude_settings() {
 }
 
 # codemap (optional structural index) — an MCP tool, so it adds navigation power WITHOUT reopening
-# Bash. Auto-gated per repo: only offered where the repo is already indexed. The agent works in a
-# throwaway worktree (no index) and queries the STABLE real repo via repoPath; unindexed or codemap
-# not installed -> the agent just uses Read/Grep/Glob. Activation is a human step: `codemap index
-# --approve --repo <path>` once.
+# Bash. Auto-gated per repo: offered only where the Runner's own `codemap index --approve` succeeded
+# for that repo this pass (NIGHTSHIFT_CODEMAP_REPO, set in the night loop) — nightshift indexes every
+# repo itself, so activation is never a human step; the rulebook is the consent surface. The agent
+# works in a throwaway worktree (no index) and queries the STABLE real repo via repoPath; codemap not
+# installed, indexing failed or NIGHTSHIFT_CODEMAP=0 -> the agent just uses Read/Grep/Glob.
 write_codemap_mcp() {
   printf '%s\n' '{"mcpServers":{"codemap":{"type":"stdio","command":"codemap-mcp","args":[],"env":{}}}}' \
     > "$STATE_DIR/codemap-mcp.json"
