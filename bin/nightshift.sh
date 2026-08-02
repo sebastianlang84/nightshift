@@ -430,7 +430,7 @@ ${NIGHTSHIFT_KNOWN_WORK}"
   if [ "$stage" = recon ] && [ -f "$id/signals.json" ]; then
     prompt="$prompt
 
-### recon_signals (deterministic filesystem probe — refine these into per-dimension applicability)
+### recon_signals (deterministic filesystem probe — refine these into a per-dimension yield)
 $(cat "$id/signals.json")"
   fi
   case "$stage" in
@@ -790,9 +790,10 @@ repo_findings() { # repo -> per-repo `findings:` override from the rulebook, els
   echo "$MAX_FINDINGS"
 }
 
-repo_dimensions() { # repo -> applicable dimensions, space-separated, in priority order (ADR 0010)
-  # Per-repo `dimensions:` (comma-separated) overrides the global set. Recon further narrows this
-  # (Phase 3) via recon_applicable(); here it is the configured candidate set.
+repo_dimensions() { # repo -> candidate dimensions, space-separated, in priority order (ADR 0010)
+  # Per-repo `dimensions:` (comma-separated) overrides the global set. This IS the candidate set and
+  # nothing downstream shrinks it: the human rulebook is the only exclusion authority (ADR 0015);
+  # recon only reweights the lenses within it (see dim_weight/select_dimension).
   local repo="$1" i
   for i in "${!REPO_PATHS[@]}"; do
     if [ "${REPO_PATHS[$i]}" = "$repo" ]; then
@@ -835,7 +836,8 @@ refresh_ledger_epoch_index() { # rebuild LEDGER_EPOCH_INDEX (repo\tdim\tepoch) i
 }
 last_dim_epoch() { # repo dim -> epoch this (repo,dim) was last SERVICED — a work-item row OR an Explore scan
   # A lens can Explore and find nothing; counting only work-item outcomes left its epoch at 0
-  # forever, so the argmin in select_dimension re-picked it every run and starved the others.
+  # forever — permanently maximal staleness, so select_dimension re-picked it every run and
+  # starved the others.
   # The Explore scan marker (touched every pass, outcome or not) is what makes rotation advance.
   local repo="$1" dim="$2" lepoch=0 mepoch=0 marker
   refresh_ledger_epoch_index
@@ -957,7 +959,7 @@ ensure_recon() { # repo -> refresh the recon cache if missing / HEAD changed / o
   # Recon is read-only, but the "never the live checkout" invariant is absolute: if the
   # isolated worktree can't be created, SKIP recon rather than pointing a stage at the
   # operator's working tree. Recon degrades gracefully — no cache written this run means
-  # recon_applicable() treats every dimension as applicable, so nothing is starved.
+  # dim_weight() returns the normal weight for every dimension, so nothing is starved.
   base="$(base_ref "$repo")"; wt="$WORKTREES_DIR/$(basename "$id")"
   if setup_worktree "$repo" "$wt" "$base"; then
     run_agent recon "$wt" "$id" || true; remove_worktree "$repo" "$wt"
@@ -975,8 +977,8 @@ ensure_recon() { # repo -> refresh the recon cache if missing / HEAD changed / o
       rm -f "$tmp"; log "  $(basename "$repo"): recon cache write failed — keeping prior cache"
     fi
   else
-    # Negative cache: recon produced nothing. Empty dimensions ⇒ recon_applicable treats every lens as
-    # applicable (safe degrade); recon_failed + the short backoff stop it re-running every pass.
+    # Negative cache: recon produced nothing. Empty dimensions ⇒ dim_weight() falls back to the normal
+    # weight for every lens (safe degrade); recon_failed + the short backoff stop it re-running every pass.
     if jq -nc --arg h "$head" --arg r "$repo" --arg ts "$(date -Iseconds)" \
          '{repo:$r, head:$h, ts:$ts, recon_failed:true, dimensions:{}, notes:""}' > "$tmp" 2>/dev/null; then
       mv -f "$tmp" "$cache"; log "  $(basename "$repo"): recon produced no result — negative-cached (backoff ${RECON_FAIL_BACKOFF_S}s)"
@@ -1565,9 +1567,10 @@ main() {
 
     rfind=$(repo_findings "$repo")
     export NIGHTSHIFT_FINDINGS_N="$rfind"
-    # Recon (cached): survey the repo and narrow which dimensions apply. Then pick the review lens
-    # for this repo/pass: its least-recently-serviced APPLICABLE dimension (ADR 0010). The lens and
-    # the recon orientation notes are injected into explore; the lens is stamped onto every finding.
+    # Recon (cached): survey the repo and label each dimension's expected yield. Then pick the review
+    # lens for this repo/pass: the highest weighted staleness across the rulebook's candidate set
+    # (ADR 0010 + 0015) — recon steers the order, it never drops a lens. The lens and the recon
+    # orientation notes are injected into explore; the lens is stamped onto every finding.
     ensure_recon "$repo"
     dim=$(select_dimension "$repo")
     export NIGHTSHIFT_DIMENSION="$dim"

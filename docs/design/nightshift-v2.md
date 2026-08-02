@@ -2,7 +2,8 @@
 
 Design reference for the v2 evolution. Decisions are recorded in ADR 0008 (repo ordering),
 0009 (value over smallness), 0010 (recon + dimensions + rotation), 0011 (multi-finding, one
-branch per finding). This document is the map; the ADRs are the law.
+branch per finding) and 0015 (recon reprioritizes, never excludes — refines 0010's selection
+half). This document is the map; the ADRs are the law.
 
 ## Why
 
@@ -18,8 +19,8 @@ morning review budget — governed by the open-branch cap.
 
 ```
 per repo (order: least-recently-serviced first — ADR 0008):
-  ensure_recon(repo)            # cached survey → which dimensions apply (state/recon/<repo>.json)
-  dim = select_dimension(repo)  # least-recently-serviced APPLICABLE dimension (ADR 0010)
+  ensure_recon(repo)            # cached survey → per-dimension yield (state/recon/<repo>.json)
+  dim = select_dimension(repo)  # argmax of staleness × yield weight (ADR 0010 + 0015)
   explore ONCE (read-only, lens=dim, recon notes injected) → up to N ranked findings
   per finding (best first, cap-checked between each):
     dedup (fingerprint) · surface-vs-fix guard (ADR 0006)
@@ -37,10 +38,12 @@ persistent state except the disposable recon cache.
   rulebook. Extensible with no code change. Stamped onto findings (ledger `dimension` field) and
   the branch slug. Fingerprint stays dimension-free so the same defect never double-ships.
 - **Recon.** Read-only, per-repo, cached; HEAD/TTL-invalidated. `lib/recon_signals.sh`
-  (deterministic filesystem signals) + `prompts/recon.md` (model refines to per-dimension
-  applicability + orientation notes). Narrows the candidate dimensions; never starves.
-- **Rotation.** `last_dim_epoch(repo,dim)` (ledger query) + `select_dimension` (argmin, rulebook
-  order breaks ties). Reproduces "security yesterday on A → docs today on A, security on B".
+  (deterministic filesystem signals) + `prompts/recon.md` (model refines to a per-dimension
+  `yield: high|normal|low` + orientation notes). Reweights the candidate dimensions; it can never
+  remove one (ADR 0015) — only the human rulebook excludes.
+- **Rotation.** `last_dim_epoch(repo,dim)` (ledger query) + `select_dimension` (argmax of
+  `staleness × eff_weight`, rulebook order breaks ties; the finite `low` weight is what stops a
+  lens starving). Reproduces "security yesterday on A → docs today on A, security on B".
 - **Multi-finding.** `limits.max_findings_per_item` (per-repo `findings:` override); explore emits
   a ranked `findings[]`; each ships on its own branch from its own fresh worktree (ADR 0011).
 - **Observability.** Digest gains a coverage matrix (days since each repo×dimension serviced) and
@@ -88,7 +91,8 @@ without a model.
 
 1. **Multi-finding** — array schema + per-finding fresh worktrees + cap-per-finding (ADR 0011).
 2. **Dimensions + rotation** — lens files, ledger `dimension`, `select_dimension`, coverage matrix.
-3. **Recon** — signals probe + recon prompt + cache + applicability narrowing.
+3. **Recon** — signals probe + recon prompt + cache + yield weighting (ADR 0015; shipped as
+   applicability narrowing, since replaced).
 4. **Tuning** — per-dimension merge-rate in the digest.
 
 Each phase was verified end-to-end in an isolated mock sandbox.
