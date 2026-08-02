@@ -18,10 +18,27 @@ ledgers diverge silently: duplicate branches, broken caps and rotation). See
 
 1. **Clone** the Nightshift repo somewhere stable — this path becomes `NIGHTSHIFT_HOME`, and the
    installed systemd unit hard-codes it. Moving the checkout later requires re-running `install`.
-2. **Provide the agent CLI.** Nightly runs default to the `claude` adapter (`NIGHTSHIFT_AGENT=claude`;
-   `codex` also supported). The chosen CLI must be on `PATH` — the launcher prepends
-   `~/.local/bin:/usr/local/bin:/usr/bin:/bin` because systemd user services start with a minimal
-   env. `git` and (optionally) `gh` must also be reachable there.
+2. **Provide the binaries a run shells out to.** Nightly runs default to the `claude` adapter
+   (`NIGHTSHIFT_AGENT=claude`; `codex` also supported), but the agent CLI is only one of the tools the
+   Runner invokes. All of these must be reachable from the launcher's `PATH`, which is
+   `/usr/local/bin:/usr/bin:/bin:~/.local/bin` — systemd user services start with a minimal env, so
+   the launcher sets that list explicitly (system dirs first, deliberately: see
+   [`docs/design/risk-analysis.md`](design/risk-analysis.md) R10). "It works in my login shell" is not
+   the test.
+
+   | Binary | Used for | Missing |
+   |--------|----------|---------|
+   | `claude` or `codex` | every stage that thinks | every stage fails; nothing ships |
+   | `git` | worktrees, commits, branch pushes | run aborts |
+   | `jq` | every ledger and telemetry read/write | run aborts |
+   | `python3` (stdlib only — nothing to install) | rulebook parsing, JSON extraction, finding probes | run aborts |
+   | `gh` | opening PRs when `NIGHTSHIFT_OPEN_PR=1` | branch still pushed, no PR |
+   | `codemap` | structural index handed to explore | falls back to Read/Grep/Glob |
+
+   Only the last two degrade — they are probed with `command -v`. `git`, `jq` and `python3` are hard
+   dependencies called unqualified and unguarded: parsing the rulebook is a `python3` call on the
+   first code path of every entry point, so a host missing one loses the entire night. Step 5's
+   `dry-run` is the cheap way to find out before a real run does.
 3. **Write the rulebook.** Copy `rulebook.example.yaml` to `rulebook.yaml` and list the repos this
    installation may touch, their `mode` (`branch-fix` / `findings-only`), optional `base:`,
    `dimensions:`, and the `limits:` block. The parser rejects a malformed rulebook and the run aborts
