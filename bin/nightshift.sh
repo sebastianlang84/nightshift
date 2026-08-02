@@ -1237,37 +1237,43 @@ write_digest() { # made open status [advice]
       [ rate("verifiability";"verifiability"), rate("proof";"proof"), rate("type";"finding type") ] | .[]
       ' "$LEDGER" 2>/dev/null || true
     echo
+    # Backpressure ADDS a banner; it never REPLACES the body. Hitting the open-branch cap is the
+    # normal end of a productive night (default cap 2, and the cap is only reached BY shipping), so
+    # this is exactly when the human most needs the sections below: the banner says "go harvest
+    # branches", and `## Shipped` is what names them. Suppressing the body here also broke ADR
+    # 0004's digest contract (report shipped AND considered-but-abandoned) and contradicted this
+    # same file's own `shipped this run: N` header line.
     if [ "$status" = "backpressure" ]; then
       echo "**FULL STOP — open-branch cap reached.** Harvest (merge/delete) some \`${BRANCH_PREFIX}\` branches to resume."
-    else
-      echo "## Shipped"
-      [ -f "$LEDGER" ] && jq -r --arg n "$NIGHT" \
-        'select(.night==$n and .outcome=="shipped") | "- " + (if .proof=="unproven" then "**[unverified]** " else "" end) + .repo + " → `" + (.branch // "") + "` — " + (.summary // .fingerprint) + (if .pr_url then "  ([open PR](" + .pr_url + "))" else "" end)' \
-        "$LEDGER" 2>/dev/null || true
       echo
-      echo "## Findings (surfaced — reported, not touched)"
-      [ -f "$LEDGER" ] && jq -r --arg n "$NIGHT" \
-        'select(.night==$n and .outcome=="finding") | "- " + .repo + " — " + (.summary // .fingerprint) + "  (" + .fingerprint + ")"' \
-        "$LEDGER" 2>/dev/null || true
-      echo
-      echo "## Considered but not shipped"
-      [ -f "$LEDGER" ] && jq -r --arg n "$NIGHT" \
-        'select(.night==$n and (.outcome=="abandoned" or .outcome=="push-failed")) | "- " + .repo + " — " + .outcome + ": " + (.summary // .fingerprint)' \
-        "$LEDGER" 2>/dev/null || true
-      echo
-      # Carry-forward (ADR 0014): every surfaced finding, across ALL nights, that a human has not yet
-      # cleared (merged/resolved/wontfix/dropped) — so an unresolved TODO stays visible until acted on.
-      echo "## Open findings (all nights — awaiting a human)"
-      [ -f "$LEDGER" ] && jq -rs '
-        ([.[]|select(.outcome=="verdict" and .fingerprint!=null)] | group_by([.repo, .fingerprint])
-          | map(sort_by(.ts)|last)
-          | map({key:([.repo, .fingerprint] | tojson), value:.verdict}) | from_entries) as $v
-        | [.[]|select(.outcome=="finding" and .fingerprint!=null)]
-        | group_by([.repo, .fingerprint]) | map(sort_by(.ts)|last)
-        | map(select((($v[([.repo, .fingerprint] | tojson)] // "") | (. == "merged" or . == "resolved" or . == "wontfix" or . == "dropped")) | not))
-        | map("- " + .repo + " — " + (.summary // .fingerprint) + "  (" + .fingerprint + ", since " + .night + ")")
-        | join("\n")' "$LEDGER" 2>/dev/null || true
     fi
+    echo "## Shipped"
+    [ -f "$LEDGER" ] && jq -r --arg n "$NIGHT" \
+      'select(.night==$n and .outcome=="shipped") | "- " + (if .proof=="unproven" then "**[unverified]** " else "" end) + .repo + " → `" + (.branch // "") + "` — " + (.summary // .fingerprint) + (if .pr_url then "  ([open PR](" + .pr_url + "))" else "" end)' \
+      "$LEDGER" 2>/dev/null || true
+    echo
+    echo "## Findings (surfaced — reported, not touched)"
+    [ -f "$LEDGER" ] && jq -r --arg n "$NIGHT" \
+      'select(.night==$n and .outcome=="finding") | "- " + .repo + " — " + (.summary // .fingerprint) + "  (" + .fingerprint + ")"' \
+      "$LEDGER" 2>/dev/null || true
+    echo
+    echo "## Considered but not shipped"
+    [ -f "$LEDGER" ] && jq -r --arg n "$NIGHT" \
+      'select(.night==$n and (.outcome=="abandoned" or .outcome=="push-failed")) | "- " + .repo + " — " + .outcome + ": " + (.summary // .fingerprint)' \
+      "$LEDGER" 2>/dev/null || true
+    echo
+    # Carry-forward (ADR 0014): every surfaced finding, across ALL nights, that a human has not yet
+    # cleared (merged/resolved/wontfix/dropped) — so an unresolved TODO stays visible until acted on.
+    echo "## Open findings (all nights — awaiting a human)"
+    [ -f "$LEDGER" ] && jq -rs '
+      ([.[]|select(.outcome=="verdict" and .fingerprint!=null)] | group_by([.repo, .fingerprint])
+        | map(sort_by(.ts)|last)
+        | map({key:([.repo, .fingerprint] | tojson), value:.verdict}) | from_entries) as $v
+      | [.[]|select(.outcome=="finding" and .fingerprint!=null)]
+      | group_by([.repo, .fingerprint]) | map(sort_by(.ts)|last)
+      | map(select((($v[([.repo, .fingerprint] | tojson)] // "") | (. == "merged" or . == "resolved" or . == "wontfix" or . == "dropped")) | not))
+      | map("- " + .repo + " — " + (.summary // .fingerprint) + "  (" + .fingerprint + ", since " + .night + ")")
+      | join("\n")' "$LEDGER" 2>/dev/null || true
     [ -n "$advice" ] && printf '%s\n' "$advice"
   } > "$f"
   log "digest -> $f"
