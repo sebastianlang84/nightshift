@@ -366,6 +366,31 @@ Repo working directory: $wd"
 Prefer a change under ${MAX_FILES:-15} files and ${MAX_LINES:-400} lines. Larger is acceptable only
 if it is genuinely ONE coherent, reviewable improvement — never bundle unrelated changes." ;;
   esac
+  if [ "$stage" = fix ]; then
+    # Name the gates the repo will apply to the runner's commit. The Fix stage cannot commit and so
+    # never sees a hook fire; an unmet convention surfaces only as `commit-failed` AFTER the model
+    # is gone, discarding the whole change (that is how partflow's CHANGELOG gate silently ate a
+    # deps cleanup, and pi-authenticator's two test fixes before it). Detected, not guessed: only
+    # what is actually present is listed, and nothing is listed when the repo gates nothing.
+    local gates="" hooks changelog f
+    for f in CHANGELOG.md CHANGELOG CHANGES.md; do
+      [ -f "$wd/$f" ] && { changelog="$f"; break; }
+    done
+    [ -n "${changelog:-}" ] && gates="$gates
+- \`$changelog\` is present — a user-visible change is expected to carry an entry. Match the file's
+  own format and add to its newest/unreleased section; do not invent a release."
+    hooks="$(git -C "$wd" config core.hooksPath 2>/dev/null || true)"
+    [ -n "$hooks" ] || hooks="$(git -C "$wd" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)/hooks"
+    [ -f "$hooks/pre-commit" ] && gates="$gates
+- A \`pre-commit\` hook is installed (\`$hooks/pre-commit\`) and runs on the runner's commit. Read it
+  if you are unsure what it demands of the files you touched."
+    [ -n "$gates" ] && prompt="$prompt
+
+## Gates this repo applies to the commit
+The runner commits your working tree exactly as you leave it, with the repo's own hooks active. A
+rejected commit discards the ENTIRE fix — there is no second attempt. Satisfy these as part of the
+change:$gates"
+  fi
   if [ "$stage" = explore ]; then
     prompt="$prompt
 
