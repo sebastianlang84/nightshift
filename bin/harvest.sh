@@ -108,7 +108,8 @@ append_verdict() { # item repo fingerprint branch sha verdict reason [source]
     --arg verdict "$6" --arg reason "${7:-}" --arg source "${8:-}" \
     --arg ts "$(date -Iseconds)" \
     --arg night "$(date +%F)" --argjson sv "$SCHEMA_VERSION" \
-    '{night:$night,item:$item,repo:$repo,fingerprint:$fp,
+    '{night:$night,item:$item,repo:$repo,
+      fingerprint:($fp|if .=="" then null else . end),
       branch:($branch|if .=="" then null else . end),
       sha:($sha|if .=="" then null else . end),
       outcome:"verdict",verdict:$verdict,
@@ -408,7 +409,13 @@ done < <(jq -rs '[.[]|select(.outcome=="verdict" and (.branch//"")!="")]
 
 printf '%-28s %-46s %-8s -> %-8s %s\n' REPO BRANCH WAS NOW ""
 changed=0
-while IFS=$'\t' read -r item repo fp branch sha pr_url; do
+# US (\x1f), NOT tab: tab is an IFS *whitespace* character, so bash collapses a run of tabs into
+# one delimiter and every field after an empty one shifts left. `fingerprint` is legitimately null
+# on an adopted orphan row (adopt_orphan writes it so by design, ADR 0018), which shifted branch
+# into fp and sha into branch — reconcile then probed a branch named "<sha>" with an empty sha,
+# found nothing on origin, and recorded `dropped` for a branch that was actually merged. A
+# non-whitespace separator is never collapsed, so empty fields keep their position.
+while IFS=$'\x1f' read -r item repo fp branch sha pr_url; do
   [ -z "$branch" ] && continue
   # Prefetch once per repo, recording reachability. A missing repo path or a failed fetch means
   # we cannot see git reality — skip every branch in that repo (fail closed) rather than
@@ -455,7 +462,7 @@ while IFS=$'\t' read -r item repo fp branch sha pr_url; do
     changed=$((changed + 1))
   fi
   printf '%-28s %-46s %-8s -> %-8s %s\n' "$(basename "$repo")" "$branch" "${was:-—}" "$now" "$mark"
-done < <(jq -r '.[]|[.item,.repo,.fingerprint,(.branch//""),(.sha//""),(.pr_url//"")]|@tsv' \
+done < <(jq -r '.[]|[.item,.repo,.fingerprint,(.branch//""),(.sha//""),(.pr_url//"")]|join("\u001f")' \
            <(jq -sc '[.[]|select(.outcome=="shipped" and .branch!=null and .sha!=null)]' "$LEDGER"))
 
 echo
