@@ -395,6 +395,23 @@ if it is genuinely ONE coherent, reviewable improvement — never bundle unrelat
 The runner commits your working tree exactly as you leave it, with the repo's own hooks active. A
 rejected commit discards the ENTIRE fix — there is no second attempt. Satisfy these as part of the
 change:$gates"
+    # A tests.log here means the PREVIOUS iteration of this same loop passed review and then broke
+    # the repo's suite (ADR 0022). run_test_gate deletes the file the moment the suite is green, so
+    # its presence is always about the attempt that is still in the working tree.
+    if [ -f "$id/tests.log" ]; then
+      prompt="$prompt
+
+## Your previous attempt broke this repo's test suite
+The reviewer accepted your fix and the repo's own suite then failed against it. The working tree
+still holds that attempt — this is YOUR regression to repair, not a new finding. Read the output
+below, fix the cause, and keep the original finding fixed: reverting your change to make the suite
+pass is not a solution. If the failing test is itself wrong, say so in the worknote and correct it
+deliberately rather than deleting or skipping it. Last 100 lines:
+
+\`\`\`
+$(tail -n 100 "$id/tests.log")
+\`\`\`"
+    fi
   fi
   if [ "$stage" = explore ]; then
     prompt="$prompt
@@ -1113,6 +1130,40 @@ open_pr() { # repo wt branch item_dir base -> echoes PR url ("" if none)
   printf '%s' "$url"
 }
 
+# --------------------------------------------------------------- ship gate ----
+# The Review stage proves the FINDING is fixed; it does not prove nothing ELSE broke. Regressions
+# therefore shipped unnoticed unless the host repo happened to have CI — and only one of four did.
+# (Observed 2026-08-04: market-digest PR #10 dropped a dependency that looked unreferenced in src/
+# but was imported by tests across a service boundary; three tests broke, the PR shipped.)
+#
+# So the repo's own suite runs against the worktree, INSIDE the fix<->review loop rather than after
+# it: a failure is a revision request, not a death sentence. The Fix stage caused the breakage and
+# is still in the loop with budget left, so it gets the failing output back and repairs its own
+# damage (see stage_prompt). Only an item that leaves the loop still broken is refused.
+run_test_gate() { # repo worktree item_dir -> 0 pass/ungated, 1 fail; writes item_dir/tests.log on failure
+  local repo="$1" wt="$2" id="$3" tcmd trc=0
+  tcmd=$(repo_test_cmd "$repo")
+  if [ -z "$tcmd" ]; then
+    log "  $(basename "$repo"): no test_cmd in the rulebook — shipping UNGATED"
+    return 0
+  fi
+  # Runs in the WORKTREE, not the repo — the worktree is what carries the fix and what is about to
+  # be committed. `timeout` bounds a hanging suite so it cannot eat the night.
+  # `|| trc=$?` and not `if ! …`: inside an `if !` body `$?` is the negation's 0, not the suite's.
+  ( cd "$wt" && timeout "$TEST_TIMEOUT" bash -c "$tcmd" ) >"$id/tests.log" 2>&1 || trc=$?
+  if [ "$trc" -ne 0 ]; then
+    [ "$trc" -eq 124 ] && log "  $(basename "$repo"): test gate TIMED OUT after ${TEST_TIMEOUT}s"
+    log "  $(basename "$repo"): test gate failed (rc=$trc) — see $id/tests.log"
+    return 1
+  fi
+  # Removed on success on purpose: the file's PRESENCE is what tells stage_prompt that the previous
+  # attempt broke the suite. A stale log from an earlier iteration would keep asking the Fix stage
+  # to repair damage it has already repaired.
+  rm -f "$id/tests.log"
+  log "  $(basename "$repo"): test gate passed"
+  return 0
+}
+
 # ---------------------------------------------------------------- finalize ----
 finalize() { # repo worktree item_dir [seq] [base] -> echoes branch name
   local repo="$1" wt="$2" id="$3" seq="${4:-0}" basearg="${5:-}" fp type dim csig slug branch sha summary verif
@@ -1122,30 +1173,6 @@ finalize() { # repo worktree item_dir [seq] [base] -> echoes branch name
   csig=$(jq -r '.code_sig // ""' "$id/finding.json")     # content signature for invalidation (ADR 0014)
   summary=$(jq -r '.summary // ""' "$id/finding.json")
   verif=$(jq -r '.verifiability // ""' "$id/finding.json" 2>/dev/null || true)
-  # --- ship gate: the repo's own test suite (ADR 0022) ------------------------
-  # The Review stage proves the FINDING is fixed; it does not prove nothing else broke. Regressions
-  # therefore shipped unnoticed unless the host repo happened to have CI — and only one of four did.
-  # (Observed 2026-08-04: market-digest PR #10 dropped a dependency that looked unreferenced in
-  # src/ but was imported by tests across a service boundary; three tests broke, the PR shipped.)
-  # So: run the repo's declared suite against the worktree with the fix applied, BEFORE the branch
-  # exists — a failure then costs no branch to clean up. Ungated repos keep the old behavior.
-  local tcmd trc=0; tcmd=$(repo_test_cmd "$repo")
-  if [ -n "$tcmd" ]; then
-    # Runs in the WORKTREE, not the repo — the worktree is what carries the fix and what is about
-    # to be committed. `timeout` bounds a hanging suite so it cannot eat the night; the log lands in
-    # the item dir next to finding.json/review.md so a failed gate is diagnosable after the run.
-    # `|| trc=$?` and not `if ! …`: inside an `if !` body `$?` is the negation's 0, not the suite's.
-    ( cd "$wt" && timeout "$TEST_TIMEOUT" bash -c "$tcmd" ) >"$id/tests.log" 2>&1 || trc=$?
-    if [ "$trc" -ne 0 ]; then
-      [ "$trc" -eq 124 ] && log "  $(basename "$repo"): test gate TIMED OUT after ${TEST_TIMEOUT}s"
-      log "  $(basename "$repo"): test gate failed (rc=$trc) — not shipped; see $id/tests.log"
-      ledger_append "$(basename "$id")" "$repo" "$fp" "" "" "tests-failed" "$summary" "" "" "$verif" "$dim" "$type" "$csig"
-      return 1
-    fi
-    log "  $(basename "$repo"): test gate passed"
-  else
-    log "  $(basename "$repo"): no test_cmd in the rulebook — shipping UNGATED"
-  fi
   if [ -n "$dim" ]; then
     slug="$(printf '%s-%s-%s' "$dim" "$type" "$(basename "$repo")" | tr '[:upper:] /' '[:lower:]--' | cut -c1-48)"
   else
@@ -1712,14 +1739,22 @@ main() {
       if ! setup_worktree "$repo" "$wt" "$base"; then
         log "  $(basename "$repo"): could not create worktree for finding — skip"; continue
       fi
-      iter=0; verdict="revise"
+      iter=0; verdict="revise"; gate=""
       while [ "$iter" -lt "$MAX_FIX_ITER" ]; do
         iter=$((iter + 1))
         run_agent fix "$wt" "$fd" || true
         run_agent review "$wt" "$fd" || true
         verdict=$(jq -r '.verdict' "$fd/review.md" 2>/dev/null || echo abandon)
-        [ "$verdict" = ship ] && break
         [ "$verdict" = abandon ] && break
+        if [ "$verdict" = ship ]; then
+          # The reviewer is satisfied that the FINDING is fixed. The gate asks the other question —
+          # is the repo still whole? — and it OVERRULES a ship (ADR 0022). A failure is not the end
+          # of the item: the Fix stage broke it, is still in the loop, and gets the failing output
+          # back on the next turn. Only running out of iterations refuses the item.
+          if run_test_gate "$repo" "$wt" "$fd"; then gate=pass; break; fi
+          gate=fail; verdict=revise
+          log "  $(basename "$repo"): gate overrules ship — fix attempt $iter/$MAX_FIX_ITER broke the suite"
+        fi
       done
       b=""
       if [ "$verdict" = ship ]; then
@@ -1727,6 +1762,12 @@ main() {
           made=$((made + 1)); open=$((open + 1)); progress=1; ship_progress=1
           log "  $(basename "$repo"): shipped -> $b"
         fi
+      elif [ "$gate" = fail ]; then
+        # Distinct from `abandoned`: the reviewer WANTED to ship and the suite said no, every time.
+        # Recorded as a fact about this attempt, not a verdict on the defect — the finding stays
+        # unlatched so a later night may try again.
+        ledger_append "$(basename "$fd")" "$repo" "$fp" "" "" "tests-failed" "$summary" "" "" "" "$dim" "" "$csig"
+        log "  $(basename "$repo"): test gate refused all $MAX_FIX_ITER attempts — not shipped ($fp)"
       else
         ledger_append "$(basename "$fd")" "$repo" "$fp" "" "" "abandoned" "$summary" "" "" "" "$dim" "" "$csig"
         log "  $(basename "$repo"): abandoned ($fp)"

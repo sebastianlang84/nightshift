@@ -48,32 +48,49 @@ repos:
     test_cmd: cd services/transcript-miner && uv run pytest -q
 ```
 
-`finalize()` runs it under `bash -c` **in the worktree**, with the fix applied, **before the branch
-is created**. Nonzero exit ends the item: no branch, no commit, no push.
+`run_test_gate()` runs it under `bash -c` **in the worktree**, with the fix applied, **before the
+branch is created**. Running it in the worktree and not the repo is the whole point — the worktree
+is what carries the change and what is about to be committed. Running it before branch creation
+means a failure costs nothing to clean up, unlike `commit-failed`, which has to delete a branch it
+already made.
 
-Running it in the worktree and not the repo is the whole point — the worktree is what carries the
-change and what is about to be committed. Running it before branch creation means a failure costs
-nothing to clean up, unlike `commit-failed`, which has to delete a branch it already made.
+**2. The gate sits INSIDE the fix↔review loop. A red suite is a revision request, not a verdict.**
 
-**2. A failed gate is recorded, not swallowed.**
+When the reviewer returns `ship`, the gate asks the other question — is the repo still whole? — and
+it overrules a `ship`. But it does not end the item. Discarding the whole change on the first red
+suite would throw away a fix that is *mostly right* and leave the finding unfixed, and it would
+punish the one actor best placed to repair the damage: the Fix stage caused the regression, is
+still in the loop, and has iterations left.
+
+So a failed gate loops back. `stage_prompt` hands the Fix stage the last 100 lines of the failing
+output with an explicit instruction that this is its own regression to repair, that reverting to
+green is not a solution, and that a genuinely wrong test must be corrected deliberately and named
+in the worknote. `run_test_gate` deletes `tests.log` the moment the suite is green, so the file's
+*presence* is the signal — a stale log can never ask the Fix stage to repair something already
+repaired.
+
+Only an item that leaves the loop still broken is refused.
+
+**3. A refusal is recorded, not swallowed.**
 
 The ledger gets an outcome row `tests-failed`, in the same family as `commit-failed` and
 `push-failed`: recorded with the finding's summary and identity, with `branch` and `sha` null
-because neither ever existed. The digest lists it under "Considered but not shipped". The suite's
-stdout+stderr is written to `<item_dir>/tests.log` next to `finding.json` and `review.md`, so a
-morning-after diagnosis does not require re-running the night.
+because neither ever existed. It is distinct from `abandoned` on purpose — the reviewer *wanted* to
+ship and the suite said no, every time, which is a different signal from a fix the reviewer gave up
+on. The digest lists both under "Considered but not shipped".
 
 Crucially the finding is **not** latched as an open finding. `tests-failed` is a fact about one
-attempt, not a verdict about the defect — a later night may find the same thing and fix it properly.
+night's attempts, not a verdict about the defect — a later night may find the same thing and fix it
+properly.
 
-**3. Absent `test_cmd` means ungated, and the run says so.**
+**4. Absent `test_cmd` means ungated, and the run says so.**
 
 There is no fleet-wide default test command. A test command is repo-specific by nature; inheriting
 one would run the wrong suite, and inventing one (guessing `pytest`, `npm test`) would produce
-confident nonsense. A repo without the key ships exactly as it did before, and `finalize()` logs
+confident nonsense. A repo without the key ships exactly as it did before, and the run logs
 `shipping UNGATED` — so the gap is visible in the night's log rather than silently assumed away.
 
-**4. The gate always runs under a timeout.**
+**5. The gate always runs under a timeout.**
 
 `limits.test_timeout_seconds` (default 600, env override `NIGHTSHIFT_TEST_TIMEOUT`) bounds a single
 `test_cmd`. A suite that hangs — waiting on a port, a prompt, a network call — must not consume the
@@ -90,19 +107,22 @@ gated, and a suite that is already red on `main` blocks every ship in that repo 
 Both are host decisions the rulebook makes explicit rather than problems nightshift can solve — the
 rulebook is host-owned, and the log names the outcome either way.
 
-**It costs one suite run per shipped finding**, inside the night's wall-clock budget (ADR 0013).
-Keep `test_cmd` fast; it is a regression gate, not a release pipeline. A repo whose suite takes
-twenty minutes should declare a fast subset, not the whole thing.
+**It costs one suite run per shipped finding**, and up to `max_fix_iterations` runs for one that
+keeps breaking — all inside the night's wall-clock budget (ADR 0013). Keep `test_cmd` fast; it is a
+regression gate, not a release pipeline. A repo whose suite takes twenty minutes should declare a
+fast subset, not the whole thing.
 
 **A repo can be gated without having CI**, which is the case that motivated this: three of four
 fleet repos have no CI at all, and now three of four can still gate.
 
 ## Alternatives considered
 
-**Feed the failure back into the fix↔review loop.** Give the Fix stage the failing output and let it
-iterate up to `max_fix_iterations`. Strictly better when the fix is close and strictly more
-expensive when it is not — and it changes what a "ship" verdict means mid-loop. Deferred: the gate
-has to exist and be trusted before it becomes a signal to iterate on. Nothing here forecloses it.
+**Refuse on the first red suite instead of looping back.** This is what the gate did for its first
+few hours, and it was wrong: a fix that breaks one test is usually a fix that is nearly right, and
+throwing it away costs the whole night's work on that finding *and* leaves the defect unfixed. It
+also aims the consequence at the wrong actor — the Fix stage caused the regression and is the only
+thing in the loop that can undo it. Retrying costs at most `max_fix_iterations` suite runs, which
+is bounded and cheap next to re-finding the same defect on a later night.
 
 **Ship anyway and only warn in the digest.** Rejected. The digest is read in the morning; the branch
 is open all night with a PR attached and a summary that reads as verified. A warning that arrives

@@ -45,11 +45,13 @@ ledgers diverge silently: duplicate branches, broken caps and rotation). See
    rather than silently servicing a partial fleet.
 
    **Give every `branch-fix` repo a `test_cmd`** ([ADR 0022](adr/0022-a-repos-own-tests-gate-the-ship.md)).
-   It is the repo's own suite, run in the worktree just before the commit; a nonzero exit means no
-   branch is created and the ledger records `tests-failed`. Without it the repo ships **ungated** —
-   the Review stage proves the finding is fixed, never that nothing else broke, so a regression only
-   surfaces if that repo happens to have CI. Keep the command fast: it runs once per shipped finding,
-   inside the night's wall-clock budget, and is bounded by `limits.test_timeout_seconds` (default 600).
+   It is the repo's own suite, run in the worktree just before the commit and *inside* the fix↔review
+   loop: a red suite hands the failing output back to the Fix stage to repair its own regression, and
+   only an item still red after `max_fix_iterations` is refused (`tests-failed`, no branch). Without
+   the key the repo ships **ungated** — the Review stage proves the finding is fixed, never that
+   nothing else broke, so a regression only surfaces if that repo happens to have CI. Keep the command
+   fast: it runs once per shipped finding and up to `max_fix_iterations` times for one that keeps
+   breaking, inside the night's wall-clock budget, bounded by `limits.test_timeout_seconds` (600).
    ```yaml
    repos:
      - path: /home/you/dev/yourrepo

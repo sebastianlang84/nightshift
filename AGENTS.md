@@ -6,7 +6,7 @@ it does not repeat architecture (CONTEXT.md/ADRs) or global rules (git, secrets,
 
 ## Where things are (router)
 
-- **Orchestrator:** [`bin/nightshift.sh`](bin/nightshift.sh) — the night loop: harvest → verify (close open findings) → recon → explore → fix↔review → finalize (repo's own `test_cmd` gates the ship, ADR 0022, then push `nightshift/*`).
+- **Orchestrator:** [`bin/nightshift.sh`](bin/nightshift.sh) — the night loop: harvest → verify (close open findings) → recon → explore → fix↔review↔`test_cmd` gate (a red suite loops back into Fix, ADR 0022) → finalize (push `nightshift/*`).
 - **Peers:** `harvest.sh` (reconcile branches, probe findings, `todos`/`close`) · `review-branch.sh` (mechanical branch review) · `schedule.sh` (systemd timer) · `nightshift-cron.sh` (unattended launcher).
 - **lib/:** `parse_rulebook.py` · `extract_json.py` · `recon_signals.sh` · `probe_findings.py` (finding freshness, ADR 0021). **prompts/** one per stage. **hooks/** `pre-push` + `pretooluse-guard.sh` (the confinement).
 - **Decisions → [`docs/adr/`](docs/adr/) · Design → [`docs/design/`](docs/design/) · Open questions → [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) · Backlog → [`todo.md`](todo.md) · Operations → [`docs/deployment.md`](docs/deployment.md).**
