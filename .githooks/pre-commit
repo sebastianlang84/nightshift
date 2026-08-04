@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# nightshift DEVELOPMENT hook — not to be confused with hooks/, which is the agent confinement
+# (hooks/pre-push + hooks/pretooluse-guard.sh; see docs/design/hook-spec.md). This one guards the
+# tree against the docs quietly going out of date, and it applies to whoever commits — a human, or
+# the runner committing its own fix into a worktree.
+#
+# Activate:  git config core.hooksPath .githooks
+#
+# Only the doc check runs here: 0.05s, so it costs nothing on every commit. The full suite
+# (tests/*.sh, ~15s) belongs in CI and in the ADR 0022 ship gate, not in front of every `git commit`
+# — a pre-commit hook people disable because it is slow protects nothing.
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+
+if ! python3 "$ROOT/lib/check_docs.py" "$ROOT"; then
+  cat >&2 <<'MSG'
+
+pre-commit: REJECTED — the docs name something that is not there any more.
+
+Each line above is a doc making a checkable claim about this repo that no longer
+holds: a dead link, an ADR that does not exist, a file that moved, or a line
+citation past the end of its file. Fix the doc (or the claim), then commit again.
+
+Emergency bypass: git commit --no-verify
+MSG
+  exit 1
+fi

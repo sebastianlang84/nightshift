@@ -1,0 +1,44 @@
+name: CI
+
+# nightshift had no CI, which is the same gap ADR 0022 closes for the repos it services: the ship
+# gate proves a nightshift branch is sound before it is pushed, but nothing proved a HUMAN commit
+# was. This runs the same suite the gate runs, on every push and every PR.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The suite needs jq (ledger assertions) and git; python3 is preinstalled. No pip install:
+      # lib/*.py is stdlib-only on purpose, and CI must not be the first place that stops being true.
+      - name: Install dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq jq
+
+      # A run creates commits in throwaway sandboxes; git refuses without an identity.
+      - name: Configure git identity
+        run: |
+          git config --global user.name  "ci"
+          git config --global user.email "ci@localhost"
+
+      # The docs check first: it is 0.05s and its failure message is the most actionable one.
+      - name: Docs name only what exists
+        run: python3 lib/check_docs.py .
+
+      # There is no test runner — the suite IS tests/*.sh, and every one must pass.
+      - name: Test suite
+        run: |
+          rc=0
+          for t in tests/*.sh; do
+            if bash "$t"; then
+              echo "PASS $t"
+            else
+              echo "::error file=$t::$t failed"
+              rc=1
+            fi
+          done
+          exit $rc

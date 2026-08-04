@@ -13,7 +13,8 @@ it does not repeat architecture (CONTEXT.md/ADRs) or global rules (git, secrets,
 
 ## Test & verify (documented nowhere else)
 
-- There is no test runner: `for t in tests/*.sh; do bash "$t"; done` — every test must pass before a commit.
+- There is no test runner: `for t in tests/*.sh; do bash "$t"; done` — every test must pass before a commit. The same loop runs in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) on every push/PR.
+- `lib/check_docs.py` refuses docs that name something absent (dead links, missing ADRs, moved files, line citations past EOF). It runs in the suite, in CI, and — activate with `git config core.hooksPath .githooks` — in [`.githooks/pre-commit`](.githooks/pre-commit) (0.05s). Not to be confused with `hooks/`, which is the agent confinement.
 - Tests run `NIGHTSHIFT_AGENT=mock` with isolated `NIGHTSHIFT_STATE_DIR` / `RUNS_DIR` / `DIGEST_DIR` / `WORKTREES` against a throwaway bare-remote sandbox — never the live state.
 - **`systemctl --user` ignores `XDG_CONFIG_HOME`.** It talks to the operator's live session bus wherever the unit files sit, so a test that exercises `schedule.sh` must stub `systemctl` on `PATH` (`test-scheduler-overrides.sh` does) — otherwise `uninstall` disarms the real nightly timer. The ADR 0022 ship gate runs this suite in a worktree, which would make that a nightly occurrence.
 

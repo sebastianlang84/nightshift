@@ -125,6 +125,20 @@ these flags, is what confines the agent (see [`docs/design/risk-analysis.md`](de
   re-running `install`. If you use `systemctl --user edit` instead, `schedule.sh status` will flag the
   drop-in override so the effective cadence is never hidden.
 
+## Working on nightshift itself
+
+- The suite IS `tests/*.sh` — there is no runner: `for t in tests/*.sh; do bash "$t" || break; done`.
+  [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs the same loop on every push and PR.
+- **Turn the doc guard on once per clone:** `git config core.hooksPath .githooks`. The
+  [`pre-commit`](../.githooks/pre-commit) hook runs `lib/check_docs.py` (0.05s) and refuses a commit
+  whose docs name something that is not there: a dead relative link, an `ADR 00NN` with no file, a
+  backticked `bin/…`/`lib/…` path that moved, or a `file.sh:123` citation past the end of that file.
+  It is the class of rot nightshift itself kept reporting as findings. `--no-verify` bypasses it.
+  This is unrelated to `hooks/`, which is the agent confinement and is never installed into a clone.
+- The hook applies to the runner's own commits too, when nightshift services this repo — and the Fix
+  stage is told about it up front (`stage_prompt`), so a doc-breaking fix is corrected before the
+  commit rather than discarded after it.
+
 ## Local state (all under `NIGHTSHIFT_HOME` unless overridden)
 
 | Path | What | Override |

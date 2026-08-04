@@ -385,6 +385,12 @@ if it is genuinely ONE coherent, reviewable improvement — never bundle unrelat
 - \`$changelog\` is present — a user-visible change is expected to carry an entry. Match the file's
   own format and add to its newest/unreleased section; do not invent a release."
     hooks="$(git -C "$wd" config core.hooksPath 2>/dev/null || true)"
+    # `core.hooksPath` is very often RELATIVE (`.githooks` is the common spelling, and this repo
+    # uses it). git resolves that against the working tree; testing it as-is would resolve it
+    # against the RUNNER's cwd instead, so the hook silently went undetected and the Fix stage was
+    # never told about a gate that then rejected its commit — the exact `commit-failed` this block
+    # exists to prevent.
+    case "$hooks" in "" ) ;; /* ) ;; * ) hooks="$wd/$hooks" ;; esac
     [ -n "$hooks" ] || hooks="$(git -C "$wd" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)/hooks"
     [ -f "$hooks/pre-commit" ] && gates="$gates
 - A \`pre-commit\` hook is installed (\`$hooks/pre-commit\`) and runs on the runner's commit. Read it

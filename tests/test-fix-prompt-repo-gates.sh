@@ -33,6 +33,19 @@ grep -q 'pre-commit` hook is installed' <<<"$p" || { echo "gated repo: hook gate
 # The consequence must be stated — a gate the model may treat as optional is not a gate.
 grep -qi "discards the ENTIRE fix" <<<"$p" || { echo "gated repo: consequence not stated" >&2; exit 1; }
 
+# --- 1b. a RELATIVE core.hooksPath still resolves ------------------------------------
+# `.githooks` is the common spelling and the one this repo uses. git resolves it against the
+# working tree; testing it as-is resolves it against the RUNNER's cwd, so the hook went undetected
+# and the Fix stage was never warned about a gate that then rejected its commit.
+mk "$TMP/relhooks"
+mkdir -p "$TMP/relhooks/.githooks"
+printf '#!/bin/sh\nexit 1\n' > "$TMP/relhooks/.githooks/pre-commit"
+chmod +x "$TMP/relhooks/.githooks/pre-commit"
+git -C "$TMP/relhooks" config core.hooksPath .githooks
+p="$(cd / && stage_prompt fix "$TMP/relhooks" "$TMP/item")"   # cwd deliberately elsewhere
+grep -q 'pre-commit` hook is installed' <<<"$p" \
+  || { echo "relative core.hooksPath: hook gate not detected" >&2; exit 1; }
+
 # --- 2. ungated repo: nothing claimed -----------------------------------------------
 mk "$TMP/plain"
 p="$(stage_prompt fix "$TMP/plain" "$TMP/item")"

@@ -26,8 +26,8 @@ repos:
 The failure is not hypothetical. On 2026-08-04 nightshift shipped
 [market-digest#10](https://github.com/sebastianlang84/market-digest/pull/10), which removed
 `fastapi` from a dev dependency group after correctly establishing that nothing under `src/`
-imports it. The reviewer's recipe passed. But `tests/test_wrapper_*.py` import
-`mcp/transcript-miner/app/main.py` **across a service boundary**, and that module is a FastAPI app:
+imports it. The reviewer's recipe passed. But that repo's `services/transcript-miner/tests/test_wrapper_*.py`
+import `mcp/transcript-miner/app/main.py` **across a service boundary**, and that module is a FastAPI app:
 three tests broke. `main` had 160 passing tests, the branch had 157. Nothing in the pipeline
 noticed, and the PR sat merge-ready with a green human summary until a human ran the suite by hand.
 
