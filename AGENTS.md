@@ -6,7 +6,7 @@ it does not repeat architecture (CONTEXT.md/ADRs) or global rules (git, secrets,
 
 ## Where things are (router)
 
-- **Orchestrator:** [`bin/nightshift.sh`](bin/nightshift.sh) — the night loop: harvest → verify (close open findings) → recon → explore → fix↔review → finalize (push `nightshift/*`).
+- **Orchestrator:** [`bin/nightshift.sh`](bin/nightshift.sh) — the night loop: harvest → verify (close open findings) → recon → explore → fix↔review → finalize (repo's own `test_cmd` gates the ship, ADR 0022, then push `nightshift/*`).
 - **Peers:** `harvest.sh` (reconcile branches, probe findings, `todos`/`close`) · `review-branch.sh` (mechanical branch review) · `schedule.sh` (systemd timer) · `nightshift-cron.sh` (unattended launcher).
 - **lib/:** `parse_rulebook.py` · `extract_json.py` · `recon_signals.sh` · `probe_findings.py` (finding freshness, ADR 0021). **prompts/** one per stage. **hooks/** `pre-push` + `pretooluse-guard.sh` (the confinement).
 - **Decisions → [`docs/adr/`](docs/adr/) · Design → [`docs/design/`](docs/design/) · Open questions → [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) · Backlog → [`todo.md`](todo.md) · Operations → [`docs/deployment.md`](docs/deployment.md).**
@@ -22,6 +22,7 @@ it does not repeat architecture (CONTEXT.md/ADRs) or global rules (git, secrets,
 - Mock findings are triggered by **target-file content** (`teh`, `retrun`, `AMBIGUOUS`, `FROB`) — that is how tests plant deterministic defects.
 - Runner functions are unit-testable via `NIGHTSHIFT_SOURCED=1 source bin/nightshift.sh` (defines functions without running the night).
 - `state/findings-probe.json` is **derived** state (ADR 0021), rewritten by harvest and the verify phase — never hand-edit it; the ledger is the record. The dashboard reads it through the same read-only mount, so it must stay world-readable.
+- The rulebook's per-repo `test_cmd` rides **last** on the parser's `repo` TSV row on purpose (ADR 0022): a command contains spaces and the Runner's `read` soaks the remainder into the final variable, so any new repo field must be inserted *before* it.
 
 ## Before touching confinement / safety
 

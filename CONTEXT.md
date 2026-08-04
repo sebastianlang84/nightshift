@@ -52,8 +52,9 @@ oss-autopilot's scoring as the selection template, and the existing `nightly-rev
 the fix flow. See [ADR 0002](docs/adr/0002-build-the-brain-borrow-the-body.md). The budget gate is
 **not** a MartinLoop wrapper (ADR 0002's original plan): [ADR 0004](docs/adr/0004-v1-scope-branch-isolated-steward.md)
 makes it the runner's own `max_open_branches` open-branch backpressure cap + per-run bounds
-([ADR 0005](docs/adr/0005-configurable-limits-in-rulebook.md)); the verify idea survives only
-as a CI-green check in the Review stage.
+([ADR 0005](docs/adr/0005-configurable-limits-in-rulebook.md)); the verify idea survives as the
+Review stage's per-finding proof plus the ship gate that runs the repo's own suite before the
+branch exists ([ADR 0022](docs/adr/0022-a-repos-own-tests-gate-the-ship.md)).
 Execution stays on the **first-party CLI** (subscription-safe, not a custom API wrapper) —
 [ADR 0003](docs/adr/0003-subscription-safe-execution.md). The concrete **v1 cut** — branch-isolated
 output, the run pipeline, budget cap, and the force-push hook — is

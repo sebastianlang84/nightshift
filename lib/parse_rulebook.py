@@ -140,6 +140,13 @@ def main(path: str) -> None:
     if mrm and (not mrm.isdecimal() or int(mrm) < 1):
         raise SystemExit("limits.max_run_minutes must be a positive integer")
     print(f"max_run_minutes\t{mrm}")
+    # Wall-clock ceiling for ONE repo's `test_cmd` (ADR 0022). A hanging suite must not eat the
+    # night, so the gate always runs under a timeout. Default 600s; a hand-set 0 would make every
+    # gated run time out instantly and silently ship nothing, so require a positive integer.
+    tts = limits.get("test_timeout_seconds", "600")
+    if not tts.isdecimal() or int(tts) < 1:
+        raise SystemExit("limits.test_timeout_seconds must be a positive integer")
+    print(f"test_timeout_seconds\t{tts}")
     # Findings emitted per repo per pass. Default 1 keeps a rulebook that omits the key at the
     # pre-v2 single-finding behavior; the live rulebook sets it explicitly (ADR 0011).
     # A hand-set 0 forces n_find=0 in the Runner (MAX_FINDINGS=0 → repo_findings 0 → the
@@ -196,6 +203,14 @@ def main(path: str) -> None:
             raise SystemExit(
                 f"repo {r.get('path', '')}: findings must be a positive integer"
             )
+        # test_cmd is optional: empty means "no ship gate" (ADR 0022). It rides the same TSV as
+        # every other repo field and MUST stay last — a command legitimately contains spaces, and
+        # bash's `read` soaks the remainder into the final variable. A tab would split it in two.
+        test_cmd = r.get("test_cmd", "")
+        if "\t" in test_cmd:
+            raise SystemExit(
+                f"repo {r.get('path', '')}: test_cmd must not contain a tab"
+            )
         print(
             "repo"
             f"\tpath={r.get('path', '')}"
@@ -203,6 +218,7 @@ def main(path: str) -> None:
             f"\tbase={r.get('base', '')}"
             f"\tfindings={findings}"
             f"\tdimensions={r.get('dimensions', '')}"
+            f"\ttest_cmd={test_cmd}"
         )
 
 

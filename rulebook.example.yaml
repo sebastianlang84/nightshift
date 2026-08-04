@@ -27,6 +27,8 @@ limits:
                                  # before each pass and each fix: a read-only stage in flight finishes
                                  # but no new branch starts once spent; the digest shows the stop.
                                  # Omit = no time cap. Env override (seconds): NIGHTSHIFT_MAX_RUN_SECONDS.
+  test_timeout_seconds: 600      # HARD ceiling for ONE repo's `test_cmd` ship gate (ADR 0022), so a
+                                 # hanging suite cannot eat the night. Env override: NIGHTSHIFT_TEST_TIMEOUT.
 
 # Which MODEL each adapter runs its stages on (ADR 0020). Declare it here, not in the CLI's own
 # config: stage isolation (ADR 0019) drops the CLI's `user` settings scope, so a machine-wide pin in
@@ -72,3 +74,10 @@ repos:
   #                              # off the integration branch, not production `main`.
   #   findings: 5                # OPTIONAL per-repo override of max_findings_per_item
   #   dimensions: security,infra,docs  # OPTIONAL per-repo lens set (comma-separated); beats the global list
+  #   test_cmd: uv run pytest -q # OPTIONAL ship gate (ADR 0022): the repo's own suite, run in the
+  #                              # WORKTREE right before the commit. Nonzero exit = the branch is not
+  #                              # created and the ledger records `tests-failed`; the finding stays
+  #                              # unlatched, so a later night may retry it. Omit and the repo ships
+  #                              # UNGATED — the Review stage proves the finding is fixed, never that
+  #                              # nothing else broke. Keep it FAST: it runs once per shipped finding.
+  #                              # Must be one line; no tabs. Runs under `bash -c` in the worktree.

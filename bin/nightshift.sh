@@ -58,7 +58,7 @@ if [ "$NIGHTSHIFT_AGENT" = claude ] && [ -n "${HOME:-}" ]; then
 fi
 
 # ---------------------------------------------------------------- rulebook ----
-declare -a REPO_PATHS=() REPO_MODES=() REPO_BASES=() REPO_FINDINGS=() REPO_DIMS=() DIMENSIONS=()
+declare -a REPO_PATHS=() REPO_MODES=() REPO_BASES=() REPO_FINDINGS=() REPO_DIMS=() REPO_TEST_CMDS=() DIMENSIONS=()
 # Rulebook-declared model per adapter (ADR 0020); empty = the rulebook declares none. Kept separate
 # from the NIGHTSHIFT_*_MODEL env vars so the precedence env > rulebook > CLI default stays legible.
 RB_CLAUDE_MODEL="" RB_CODEX_MODEL="" RB_MAX_VERIFY=""
@@ -80,7 +80,7 @@ log_model_selection() { # adapter env_var_name rulebook_value
 }
 
 load_rulebook() {
-  local tag a b c d e rb_run_branches="" parsed
+  local tag a b c d e f rb_run_branches="" parsed
   # Capture the parser's output AND its exit status. Reading it directly via
   # `done < <(python3 …)` hides a nonzero exit from `set -euo pipefail`, so a
   # mid-stream parse error (e.g. a bad `findings:` on repo #2) silently truncated
@@ -88,7 +88,7 @@ load_rulebook() {
   # run proceeded on a partial fleet. Fail closed instead: abort the whole run.
   parsed="$(python3 "$NIGHTSHIFT_HOME/lib/parse_rulebook.py" "$RULEBOOK")" \
     || { log "rulebook parse failed ($RULEBOOK) — aborting run"; exit 1; }
-  while IFS=$'\t' read -r tag a b c d e; do
+  while IFS=$'\t' read -r tag a b c d e f; do
     case "$tag" in
       prefix)                BRANCH_PREFIX="$a" ;;
       max_open)              MAX_OPEN="$a" ;;
@@ -99,16 +99,20 @@ load_rulebook() {
       max_branches_per_run)  rb_run_branches="$a" ;;
       max_fix_iterations)    MAX_FIX_ITER="$a" ;;
       max_run_minutes)       RB_MAX_RUN_MINUTES="$a" ;;
+      test_timeout_seconds)  TEST_TIMEOUT="$a" ;;
       max_files)             MAX_FILES="$a" ;;
       max_lines)             MAX_LINES="$a" ;;
       claude_model)          RB_CLAUDE_MODEL="$a" ;;
       codex_model)           RB_CODEX_MODEL="$a" ;;
       dimension)             DIMENSIONS+=("$a") ;;
-      repo)                  REPO_PATHS+=("${a#path=}"); REPO_MODES+=("${b#mode=}"); REPO_BASES+=("${c#base=}"); REPO_FINDINGS+=("${d#findings=}"); REPO_DIMS+=("${e#dimensions=}") ;;
+      repo)                  REPO_PATHS+=("${a#path=}"); REPO_MODES+=("${b#mode=}"); REPO_BASES+=("${c#base=}"); REPO_FINDINGS+=("${d#findings=}"); REPO_DIMS+=("${e#dimensions=}"); REPO_TEST_CMDS+=("${f#test_cmd=}") ;;
     esac
   done <<< "$parsed"
   MAX_FINDINGS="${MAX_FINDINGS:-1}"
   RECON_ENABLED="${RECON_ENABLED:-true}"; RECON_TTL_DAYS="${RECON_TTL_DAYS:-7}"
+  # Ship gate ceiling (ADR 0022). Env override for a one-off, else the rulebook (which the
+  # parser already defaulted and validated), else 600s.
+  TEST_TIMEOUT="${NIGHTSHIFT_TEST_TIMEOUT:-${TEST_TIMEOUT:-600}}"
   # How many open findings the verify phase may re-check per night. Bounds what closure can cost:
   # every candidate is one read-only stage call. 0 disables the phase (the deterministic probe
   # still runs — it is free). Env override for a one-off, else the rulebook, else 5.
@@ -791,6 +795,19 @@ repo_findings() { # repo -> per-repo `findings:` override from the rulebook, els
   echo "$MAX_FINDINGS"
 }
 
+repo_test_cmd() { # repo -> the repo's ship-gate command, or "" for an ungated repo (ADR 0022)
+  # Deliberately has NO global fallback: a test command is repo-specific by nature, and inheriting
+  # some fleet-wide default would run the wrong suite. Absent means ungated, which is a real and
+  # legitimate state (a repo may genuinely have no runner) — finalize logs it so it stays visible.
+  local repo="$1" i
+  for i in "${!REPO_PATHS[@]}"; do
+    if [ "${REPO_PATHS[$i]}" = "$repo" ]; then
+      echo "${REPO_TEST_CMDS[$i]:-}"; return
+    fi
+  done
+  echo ""
+}
+
 repo_dimensions() { # repo -> candidate dimensions, space-separated, in priority order (ADR 0010)
   # Per-repo `dimensions:` (comma-separated) overrides the global set. This IS the candidate set and
   # nothing downstream shrinks it: the human rulebook is the only exclusion authority (ADR 0015);
@@ -1103,6 +1120,32 @@ finalize() { # repo worktree item_dir [seq] [base] -> echoes branch name
   type=$(jq -r '.type // "change"' "$id/finding.json")   # default so the branch slug never reads "null"
   dim=$(jq -r '.dimension // ""' "$id/finding.json")     # the review lens (ADR 0010), leads the slug
   csig=$(jq -r '.code_sig // ""' "$id/finding.json")     # content signature for invalidation (ADR 0014)
+  summary=$(jq -r '.summary // ""' "$id/finding.json")
+  verif=$(jq -r '.verifiability // ""' "$id/finding.json" 2>/dev/null || true)
+  # --- ship gate: the repo's own test suite (ADR 0022) ------------------------
+  # The Review stage proves the FINDING is fixed; it does not prove nothing else broke. Regressions
+  # therefore shipped unnoticed unless the host repo happened to have CI — and only one of four did.
+  # (Observed 2026-08-04: market-digest PR #10 dropped a dependency that looked unreferenced in
+  # src/ but was imported by tests across a service boundary; three tests broke, the PR shipped.)
+  # So: run the repo's declared suite against the worktree with the fix applied, BEFORE the branch
+  # exists — a failure then costs no branch to clean up. Ungated repos keep the old behavior.
+  local tcmd trc=0; tcmd=$(repo_test_cmd "$repo")
+  if [ -n "$tcmd" ]; then
+    # Runs in the WORKTREE, not the repo — the worktree is what carries the fix and what is about
+    # to be committed. `timeout` bounds a hanging suite so it cannot eat the night; the log lands in
+    # the item dir next to finding.json/review.md so a failed gate is diagnosable after the run.
+    # `|| trc=$?` and not `if ! …`: inside an `if !` body `$?` is the negation's 0, not the suite's.
+    ( cd "$wt" && timeout "$TEST_TIMEOUT" bash -c "$tcmd" ) >"$id/tests.log" 2>&1 || trc=$?
+    if [ "$trc" -ne 0 ]; then
+      [ "$trc" -eq 124 ] && log "  $(basename "$repo"): test gate TIMED OUT after ${TEST_TIMEOUT}s"
+      log "  $(basename "$repo"): test gate failed (rc=$trc) — not shipped; see $id/tests.log"
+      ledger_append "$(basename "$id")" "$repo" "$fp" "" "" "tests-failed" "$summary" "" "" "$verif" "$dim" "$type" "$csig"
+      return 1
+    fi
+    log "  $(basename "$repo"): test gate passed"
+  else
+    log "  $(basename "$repo"): no test_cmd in the rulebook — shipping UNGATED"
+  fi
   if [ -n "$dim" ]; then
     slug="$(printf '%s-%s-%s' "$dim" "$type" "$(basename "$repo")" | tr '[:upper:] /' '[:lower:]--' | cut -c1-48)"
   else
@@ -1113,8 +1156,6 @@ finalize() { # repo worktree item_dir [seq] [base] -> echoes branch name
   branch="${BRANCH_PREFIX}${slug}-$(date +%Y%m%d-%H%M%S)-${seq}"
   git -C "$wt" checkout -q -b "$branch"
   git -C "$wt" add -A
-  summary=$(jq -r '.summary // ""' "$id/finding.json")
-  verif=$(jq -r '.verifiability // ""' "$id/finding.json" 2>/dev/null || true)
   # The TARGET repo's own hooks run for this commit — deliberately: nightshift must not manufacture
   # commits the host repo would reject. So the commit can fail (a blocking pre-commit hook, or an
   # empty index because the Fix stage changed nothing), and NOTHING below may treat that as shipped.
@@ -1417,7 +1458,7 @@ write_digest() { # made open status [advice]
     echo
     echo "## Considered but not shipped"
     [ -f "$LEDGER" ] && jq -r --arg n "$NIGHT" \
-      'select(.night==$n and (.outcome=="abandoned" or .outcome=="push-failed" or .outcome=="commit-failed")) | "- " + .repo + " — " + .outcome + ": " + (.summary // .fingerprint)' \
+      'select(.night==$n and (.outcome=="abandoned" or .outcome=="push-failed" or .outcome=="commit-failed" or .outcome=="tests-failed")) | "- " + .repo + " — " + .outcome + ": " + (.summary // .fingerprint)' \
       "$LEDGER" 2>/dev/null || true
     echo
     # Carry-forward (ADR 0014): every surfaced finding, across ALL nights, that a human has not yet

@@ -43,6 +43,19 @@ ledgers diverge silently: duplicate branches, broken caps and rotation). See
    installation may touch, their `mode` (`branch-fix` / `findings-only`), optional `base:`,
    `dimensions:`, and the `limits:` block. The parser rejects a malformed rulebook and the run aborts
    rather than silently servicing a partial fleet.
+
+   **Give every `branch-fix` repo a `test_cmd`** ([ADR 0022](adr/0022-a-repos-own-tests-gate-the-ship.md)).
+   It is the repo's own suite, run in the worktree just before the commit; a nonzero exit means no
+   branch is created and the ledger records `tests-failed`. Without it the repo ships **ungated** —
+   the Review stage proves the finding is fixed, never that nothing else broke, so a regression only
+   surfaces if that repo happens to have CI. Keep the command fast: it runs once per shipped finding,
+   inside the night's wall-clock budget, and is bounded by `limits.test_timeout_seconds` (default 600).
+   ```yaml
+   repos:
+     - path: /home/you/dev/yourrepo
+       mode: branch-fix
+       test_cmd: uv run pytest -q
+   ```
 4. **Install and enable the timer:**
    ```
    bin/schedule.sh install     # write + reload the user units
@@ -74,6 +87,7 @@ agent:
 | `NIGHTSHIFT_CODEX_MODEL` | codex | the rulebook's `agent.codex_model`, else no `--model` |
 | `NIGHTSHIFT_CODEX_REASONING_EFFORT` | codex | the CLI default effort applies |
 | `NIGHTSHIFT_CODEX_STAGE_HOME` | codex | `state/codex-home` (stage isolation); empty = your own `CODEX_HOME` |
+| `NIGHTSHIFT_TEST_TIMEOUT` | all | the rulebook's `limits.test_timeout_seconds`, else 600s per `test_cmd` |
 
 **A machine-wide model pin in `~/.claude/settings.json` does not reach a stage.** Stage isolation
 excludes the whole `user` settings scope (see

@@ -1,0 +1,117 @@
+# ADR 0022 — a repo's own tests gate the ship
+
+- Status: accepted
+- Date: 2026-08-04
+- Extends: [ADR 0011](0011-multi-finding-explore-one-branch-per-finding.md) (the per-finding branch this gate terminates)
+
+## Context
+
+The Fix↔Review loop proves one thing: that **the finding** is fixed. `prompts/review.md` asks the
+reviewer to run *the finding's verification recipe* — a targeted proof about a targeted claim. That
+is the right question for the claim and the wrong question for the repository: a change that fixes
+its finding perfectly can still break something the reviewer never looked at.
+
+Nothing downstream caught that. `finalize()` gated on the host repo's commit hooks
+(`commit-failed`) and on the push (`push-failed`), so a branch could only be blocked by a repo that
+happened to run a hook. Regressions were caught by CI, and CI existed in **one of four** fleet
+repos:
+
+| repo | CI |
+|---|---|
+| macrolens | `.github/workflows/ci.yml` |
+| nightshift | — |
+| market-digest | — |
+| valuelens | — |
+
+The failure is not hypothetical. On 2026-08-04 nightshift shipped
+[market-digest#10](https://github.com/sebastianlang84/market-digest/pull/10), which removed
+`fastapi` from a dev dependency group after correctly establishing that nothing under `src/`
+imports it. The reviewer's recipe passed. But `tests/test_wrapper_*.py` import
+`mcp/transcript-miner/app/main.py` **across a service boundary**, and that module is a FastAPI app:
+three tests broke. `main` had 160 passing tests, the branch had 157. Nothing in the pipeline
+noticed, and the PR sat merge-ready with a green human summary until a human ran the suite by hand.
+
+That is the general shape — a claim that is locally true and globally wrong — and no amount of
+prompt engineering on the Review stage fixes it, because the reviewer is being asked about the
+finding, not about the repo. The repo already knows how to answer: it has a test suite.
+
+## Decision
+
+**1. A repo may declare `test_cmd`, and it gates the ship.**
+
+Per-repo, in the rulebook, alongside `mode`/`base`/`findings`/`dimensions`:
+
+```yaml
+repos:
+  - path: /home/wasti/dev/market-digest
+    mode: branch-fix
+    test_cmd: cd services/transcript-miner && uv run pytest -q
+```
+
+`finalize()` runs it under `bash -c` **in the worktree**, with the fix applied, **before the branch
+is created**. Nonzero exit ends the item: no branch, no commit, no push.
+
+Running it in the worktree and not the repo is the whole point — the worktree is what carries the
+change and what is about to be committed. Running it before branch creation means a failure costs
+nothing to clean up, unlike `commit-failed`, which has to delete a branch it already made.
+
+**2. A failed gate is recorded, not swallowed.**
+
+The ledger gets an outcome row `tests-failed`, in the same family as `commit-failed` and
+`push-failed`: recorded with the finding's summary and identity, with `branch` and `sha` null
+because neither ever existed. The digest lists it under "Considered but not shipped". The suite's
+stdout+stderr is written to `<item_dir>/tests.log` next to `finding.json` and `review.md`, so a
+morning-after diagnosis does not require re-running the night.
+
+Crucially the finding is **not** latched as an open finding. `tests-failed` is a fact about one
+attempt, not a verdict about the defect — a later night may find the same thing and fix it properly.
+
+**3. Absent `test_cmd` means ungated, and the run says so.**
+
+There is no fleet-wide default test command. A test command is repo-specific by nature; inheriting
+one would run the wrong suite, and inventing one (guessing `pytest`, `npm test`) would produce
+confident nonsense. A repo without the key ships exactly as it did before, and `finalize()` logs
+`shipping UNGATED` — so the gap is visible in the night's log rather than silently assumed away.
+
+**4. The gate always runs under a timeout.**
+
+`limits.test_timeout_seconds` (default 600, env override `NIGHTSHIFT_TEST_TIMEOUT`) bounds a single
+`test_cmd`. A suite that hangs — waiting on a port, a prompt, a network call — must not consume the
+night. A timeout is a failure: `timeout` exits 124, the run logs `test gate TIMED OUT`, and the item
+takes the `tests-failed` path like any other failure.
+
+## Consequences
+
+**A green nightshift branch now means two things instead of one:** the finding is fixed *and* the
+repo's own suite still passes. That is the claim a reviewer actually wants when deciding to merge.
+
+**The gate is only as good as the declared command.** `test_cmd: true` gates nothing while looking
+gated, and a suite that is already red on `main` blocks every ship in that repo until it is green.
+Both are host decisions the rulebook makes explicit rather than problems nightshift can solve — the
+rulebook is host-owned, and the log names the outcome either way.
+
+**It costs one suite run per shipped finding**, inside the night's wall-clock budget (ADR 0013).
+Keep `test_cmd` fast; it is a regression gate, not a release pipeline. A repo whose suite takes
+twenty minutes should declare a fast subset, not the whole thing.
+
+**A repo can be gated without having CI**, which is the case that motivated this: three of four
+fleet repos have no CI at all, and now three of four can still gate.
+
+## Alternatives considered
+
+**Feed the failure back into the fix↔review loop.** Give the Fix stage the failing output and let it
+iterate up to `max_fix_iterations`. Strictly better when the fix is close and strictly more
+expensive when it is not — and it changes what a "ship" verdict means mid-loop. Deferred: the gate
+has to exist and be trusted before it becomes a signal to iterate on. Nothing here forecloses it.
+
+**Ship anyway and only warn in the digest.** Rejected. The digest is read in the morning; the branch
+is open all night with a PR attached and a summary that reads as verified. A warning that arrives
+after the artifact has been presented as trustworthy is not a gate.
+
+**Require CI on every repo instead.** A better world, and not one nightshift can legislate. It
+already runs on the host machine with the repo checked out — asking a repo to name its own test
+command is a far smaller thing to ask than asking it to adopt a CI provider.
+
+**Detect the test command automatically** (find `pytest.ini`, `package.json` scripts, a `Makefile`).
+Rejected on the same ground as the fleet-wide default: a wrong guess produces a *passing* gate on
+the wrong suite, which is worse than no gate, because it reads as proof.
