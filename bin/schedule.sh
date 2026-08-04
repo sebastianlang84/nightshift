@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Manage the nightshift nightly scheduler — a systemd *user* timer that fires
-# bin/nightshift-cron.sh at 03:00 local. This is the create/edit/delete tooling
+# bin/nightshift-cron.sh at 04:00 local. This is the create/edit/delete tooling
 # for the schedule, so you never hand-edit unit files.
 #
 #   schedule.sh install     # write + reload the user units (idempotent)
@@ -47,7 +47,7 @@ case "$cmd" in
     ;;
   enable)
     systemctl --user enable --now nightshift.timer
-    # Linger lets the user timer fire while you're logged out (the whole point at 03:00).
+    # Linger lets the user timer fire while you're logged out (the whole point at 04:00).
     if loginctl enable-linger "$USER" 2>/dev/null; then
       echo "linger enabled — timer fires even when you're logged out"
     else
