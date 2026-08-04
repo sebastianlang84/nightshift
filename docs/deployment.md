@@ -115,6 +115,7 @@ these flags, is what confines the agent (see [`docs/design/risk-analysis.md`](de
 |------|------|----------|
 | `state/ledger.jsonl` | The memory: findings, shipped, abandoned, verdicts (append-only) | `NIGHTSHIFT_STATE_DIR` |
 | `state/runs.jsonl` | Per-stage telemetry (real `model_id`, `context_window`, input/output/cache tokens, cost, duration) | `NIGHTSHIFT_STATE_DIR` |
+| `state/findings-probe.json` | Freshness snapshot of every open finding (`untouched` / `code_changed` / `unknown` plus verify results) — derived, disposable, rewritten in place by harvest; world-readable for the dashboard. Never hand-edit it: the ledger is the record ([ADR 0021](adr/0021-closing-open-findings.md)) | `NIGHTSHIFT_STATE_DIR` |
 | `state/recon/` | Per-repo recon caches (derived, disposable) | `NIGHTSHIFT_STATE_DIR` |
 | `state/dim-scans/` | Per-(repo,dim) explore markers driving rotation | `NIGHTSHIFT_STATE_DIR` |
 | `state/codex-home/` | `CODEX_HOME` a codex stage runs under: a symlink to your `auth.json` plus codex's own caches, and deliberately no `AGENTS.md`/`config.toml` (derived, disposable) | `NIGHTSHIFT_CODEX_STAGE_HOME` |
@@ -149,6 +150,28 @@ never push outside `nightshift/*` (see [`docs/design/hook-spec.md`](design/hook-
   delete. Deleting/merging frees the open-branch cap so the next night resumes.
 - **Record verdicts** the machine can't derive with `bin/harvest.sh verdict <selector> <verdict>`;
   harvest also reconciles merged/dropped branches automatically each run.
+- **Clear open findings** — the work items nightshift reported but did not fix. A finding has **no
+  branch**, so the merge/delete flow above structurally cannot reach it; it is closed from the
+  numbered list instead:
+  ```
+  bin/harvest.sh todos              # open findings, oldest first, numbered, with freshness state
+  bin/harvest.sh close <#> [reason] # record `resolved` for one of them (quote a multi-word reason)
+  ```
+  The `STATE` column comes from the freshness probe that runs at the end of every harvest — it
+  recomputes each finding's content signature and never invents a verdict:
+
+  | State | Means | What to do |
+  |-------|-------|------------|
+  | `untouched` | the target code has not changed since the finding was recorded, so it cannot have been fixed | fix it, then `close` it — or, if you disagree with the finding, record `verdict <sel> wontfix` (`close` always records `resolved`) |
+  | `recheck` | the target code moved — a fix, or an unrelated edit | the verify stage judges it; a `recheck/resolved` closure is machine-made and appears with source `auto-verify` |
+  | `unknown` | no baseline signature (pre-[ADR 0014](adr/0014-finding-identity-and-lifecycle.md) rows), or the repo is unreadable | human backlog: `close` is the only thing that ever clears it |
+
+  Left open, a finding repeats in every digest and keeps consuming Explore prompt budget, so this is
+  the routine that keeps the backlog honest. `bin/harvest.sh probe` refreshes the snapshot on demand
+  and prints it by state and fingerprint, reconciling nothing — but `close <#>` always counts against
+  the numbering `todos` prints, so run `todos` when you mean to act. Your verdict outranks the
+  machine's ([ADR 0007](adr/0007-human-verdicts-outrank-machine-reconcile.md),
+  [ADR 0021](adr/0021-closing-open-findings.md)).
 - **Independent branch review (opt-in):** set `NIGHTSHIFT_BRANCH_REVIEW=1` to have a fresh read-only
   agent add a merge / do-not-merge second opinion for every open branch to the digest. Set
   `NIGHTSHIFT_ADVISOR_AGENT` (e.g. `codex` when the night runs on `claude`) for a different vendor's
