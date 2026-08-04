@@ -15,6 +15,7 @@ it does not repeat architecture (CONTEXT.md/ADRs) or global rules (git, secrets,
 
 - There is no test runner: `for t in tests/*.sh; do bash "$t"; done` — every test must pass before a commit.
 - Tests run `NIGHTSHIFT_AGENT=mock` with isolated `NIGHTSHIFT_STATE_DIR` / `RUNS_DIR` / `DIGEST_DIR` / `WORKTREES` against a throwaway bare-remote sandbox — never the live state.
+- **`systemctl --user` ignores `XDG_CONFIG_HOME`.** It talks to the operator's live session bus wherever the unit files sit, so a test that exercises `schedule.sh` must stub `systemctl` on `PATH` (`test-scheduler-overrides.sh` does) — otherwise `uninstall` disarms the real nightly timer. The ADR 0022 ship gate runs this suite in a worktree, which would make that a nightly occurrence.
 
 ## Gotchas
 
