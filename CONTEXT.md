@@ -49,16 +49,16 @@ A prior-art survey ([`docs/prior-art.md`](docs/prior-art.md)) found no off-the-s
 pieces exist. So nightshift builds only its **novel core — cross-repo self-prioritization + the
 ledger (Brain + Memory)** — and borrows the rest: `claude -p`/Ralph-loop for the runtime,
 oss-autopilot's scoring as the selection template, and the existing `nightly-review-pipeline` for
-the fix flow. See [ADR 0002](docs/adr/0002-build-the-brain-borrow-the-body.md). The budget gate is
-**not** a MartinLoop wrapper (ADR 0002's original plan): [ADR 0004](docs/adr/0004-v1-scope-branch-isolated-steward.md)
-makes it the runner's own `max_open_branches` open-branch backpressure cap + per-run bounds
-([ADR 0005](docs/adr/0005-configurable-limits-in-rulebook.md)); the verify idea survives as the
-Review stage's per-finding proof plus the ship gate that runs the repo's own suite before the
-branch exists ([ADR 0022](docs/adr/0022-a-repos-own-tests-gate-the-ship.md)).
-Execution stays on the **first-party CLI** (subscription-safe, not a custom API wrapper) —
-[ADR 0003](docs/adr/0003-subscription-safe-execution.md). The concrete **v1 cut** — branch-isolated
-output, the run pipeline, budget cap, and the force-push hook — is
-[ADR 0004](docs/adr/0004-v1-scope-branch-isolated-steward.md).
+the fix flow.
+
+The decisions behind this live in the ADRs, not here — this section points, it does not restate:
+
+- [ADR 0002](docs/adr/0002-build-the-brain-borrow-the-body.md) — build the brain, borrow the body.
+- [ADR 0003](docs/adr/0003-subscription-safe-execution.md) — execution stays on the first-party CLI.
+- [ADR 0004](docs/adr/0004-v1-scope-branch-isolated-steward.md) — the v1 cut: branch-isolated output,
+  the run pipeline, the budget cap, the force-push hook.
+- [ADR 0005](docs/adr/0005-configurable-limits-in-rulebook.md) — per-run bounds in the rulebook.
+- [ADR 0022](docs/adr/0022-a-repos-own-tests-gate-the-ship.md) — a repo's own tests gate the ship.
 
 ## Relationship to `nightly-review-pipeline`
 
@@ -74,7 +74,15 @@ ledger and branch-first workflow ([ADR 0004](docs/adr/0004-v1-scope-branch-isola
 - **work item** — one unit the steward picks: (repo, target, action ∈ {review, fix}).
 - **lens** — a kind of review (e.g. bug screen, usability). Borrowed from the pipeline.
 - **ledger** — the persistent memory of past work items and their outcomes.
-- **rulebook / constitution / policy** — the human-authored, agent-read rules of what is allowed.
+- **rulebook** — the *operator*-authored, agent-read file of what is allowed: repo whitelist and
+  per-repo mode, limits, tool allowlist, prohibitions. Read-only to the steward.
+  _Avoid_: policy, ruleset.
+- **constitution** — a *different* layer from the rulebook: the system prompt shipped with
+  nightshift (identity, stakes, prime directives), authored by us rather than the operator.
+  Idea-stage, not implemented — see
+  [`docs/design/constitution-and-rulebook.md`](docs/design/constitution-and-rulebook.md).
+  _Avoid_: using it as a synonym for **rulebook**; the whole point is that they have different
+  authors and different mutability.
 - **budget window** — the nightly time/quota envelope the steward runs within.
 
 ## Non-goals (current)
