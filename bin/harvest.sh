@@ -32,7 +32,10 @@
 #   harvest.sh                 # reconcile all shipped branches, append changed verdicts
 #   harvest.sh --dry-run       # show the reconciliation, write nothing
 #   harvest.sh verdict <sel> <verdict> [reason]   # record a manual verdict (findings/override)
-#   harvest.sh --help          # print the usage above
+#   harvest.sh todos           # list open findings, numbered, with freshness state
+#   harvest.sh close <#|sel> [reason]             # record `resolved` for one open finding
+#   harvest.sh probe           # re-run the freshness probe, print the table
+#   harvest.sh --help          # print the usage above (see usage(), which this mirrors)
 # Any other argument is an error (exit 2), never a silent fall-through to the
 # argument-less form — that form WRITES to the ledger. See the dispatch in main.
 set -euo pipefail
