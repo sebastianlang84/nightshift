@@ -89,12 +89,19 @@ finding, needs a night against a clean repo.
 | Path | Role |
 |------|------|
 | `bin/nightshift.sh` | the Brain/Runner (outer loop, caps, finalize, digest) |
+| `bin/harvest.sh` | reconciles shipped branches into verdicts; `todos`/`close`/`probe` for open findings |
+| `bin/review-branch.sh` | mechanical branch review (the opt-in second opinion) |
+| `bin/schedule.sh` | installs/updates the systemd timer |
+| `bin/nightshift-cron.sh` | unattended launcher the timer invokes |
 | `bin/setup-sandbox.sh` | builds the throwaway sandbox |
 | `hooks/pre-push` | Layer 1 git-confinement (resolved-ref check) |
 | `hooks/pretooluse-guard.sh` | Layer 2 anti-bypass (Claude PreToolUse; for the claude path) |
 | `lib/parse_rulebook.py` | minimal rulebook YAML-subset parser |
 | `lib/extract_json.py` | pulls the JSON artifact out of a stage model's output |
-| `prompts/{recon,explore,fix,review}.md` | provider-neutral stage prompts |
+| `lib/recon_signals.sh` | collects the per-repo signals recon ranks dimensions on |
+| `lib/probe_findings.py` | finding freshness probe (ADR 0021), writes `state/findings-probe.json` |
+| `prompts/{recon,explore,fix,review,verify,advise}.md` | provider-neutral stage prompts |
+| `prompts/dimensions/*.md` | one lens per review dimension, selected by recon |
 | `rulebook.example.yaml` | the governance template |
 
 Runtime state (`state/`, `runs/`, `digests/`, `sandbox/`, `rulebook.yaml`) is gitignored.
