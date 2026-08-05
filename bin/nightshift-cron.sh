@@ -33,7 +33,21 @@ if ! flock -n 9; then
 fi
 
 echo "=== nightshift start $(date -Iseconds) (agent=$NIGHTSHIFT_AGENT) ===" | tee -a "$LOG"
+# The orchestrator's exit status is the thing this launcher exists to record, so the
+# pipeline below must NOT be allowed to kill the shell: under `set -e` + `pipefail` a
+# nonzero exit from nightshift.sh (e.g. a rulebook parse error, or the split-state
+# guard) fails the pipeline and terminates the launcher right here — leaving the
+# unattended log with a `start` line, no `done rc=` footer, and no recorded status,
+# which is precisely the case the footer is for.
+#
+# `set +e` rather than `|| true`: `||` runs a second command on the failure path, and
+# every command — a bare `true` included — resets PIPESTATUS. Nothing may execute
+# between the pipeline and the capture.
+set +e
 "$NIGHTSHIFT_HOME/bin/nightshift.sh" 2>&1 | tee -a "$LOG"
 rc=${PIPESTATUS[0]}
+set -e
 echo "=== nightshift done rc=$rc $(date -Iseconds) ===" | tee -a "$LOG"
+# Propagate: Type=oneshot with no Restart=, so this only marks the unit failed
+# (visible in `systemctl --user status nightshift.service`) — it does not re-run.
 exit "$rc"
