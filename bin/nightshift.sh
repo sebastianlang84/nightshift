@@ -535,6 +535,14 @@ mock_fix() { # workdir item_dir — applies the fix for THIS finding (dispatched
 }
 mock_review() { # workdir item_dir
   local _wd="$1" id="$2"
+  # Deterministic `abandon`, so the reviewer's give-up verdict is reachable in mock mode like every
+  # other path. The trigger is a sentinel PATH, not content in the worktree: a test must be able to
+  # arm it MID-loop (from a failing test_cmd, say) without planting a file in the tree that is about
+  # to be committed.
+  if [ -n "${NIGHTSHIFT_MOCK_ABANDON_IF:-}" ] && [ -e "${NIGHTSHIFT_MOCK_ABANDON_IF:-}" ]; then
+    jq -nc '{verdict:"abandon",reason:"mock: abandon sentinel present."}' > "$id/review.md"
+    return 0
+  fi
   jq -nc '{verdict:"ship",reason:"Typo fix; single file, reversible, no behaviour change — clears the smallness bar."}' > "$id/review.md"
 }
 mock_advise() { # workdir item_dir — deterministic second-opinion from the branch's finding type
@@ -1748,6 +1756,12 @@ main() {
       iter=0; verdict="revise"; gate=""
       while [ "$iter" -lt "$MAX_FIX_ITER" ]; do
         iter=$((iter + 1))
+        # Cleared per ITERATION, not per finding: only the attempt the loop ends on may classify the
+        # item below. A `fail` carried over from an earlier iteration would outrank a later `abandon`
+        # — which breaks out before the gate is ever consulted — and label it `tests-failed`. That is
+        # a different outcome on purpose (ADR 0022 §3), and unlike `abandoned` it does not latch the
+        # finding, so the reviewer's refusal would come back for a fresh attempt every night.
+        gate=""
         run_agent fix "$wt" "$fd" || true
         run_agent review "$wt" "$fd" || true
         verdict=$(jq -r '.verdict' "$fd/review.md" 2>/dev/null || echo abandon)
@@ -1773,7 +1787,7 @@ main() {
         # Recorded as a fact about this attempt, not a verdict on the defect — the finding stays
         # unlatched so a later night may try again.
         ledger_append "$(basename "$fd")" "$repo" "$fp" "" "" "tests-failed" "$summary" "" "" "" "$dim" "" "$csig"
-        log "  $(basename "$repo"): test gate refused all $MAX_FIX_ITER attempts — not shipped ($fp)"
+        log "  $(basename "$repo"): test gate refused every ship attempt in $MAX_FIX_ITER iterations — not shipped ($fp)"
       else
         ledger_append "$(basename "$fd")" "$repo" "$fp" "" "" "abandoned" "$summary" "" "" "" "$dim" "" "$csig"
         log "  $(basename "$repo"): abandoned ($fp)"
