@@ -137,6 +137,28 @@ grep -q "previous attempt broke" <<<"$withlog" || fail "the Fix stage is never t
 grep -q "test_thing.py::test_it" <<<"$withlog" || fail "the Fix stage does not receive the failing output"
 rm -f "$pid/tests.log"
 
+# --- 2d. a red gate must not outlive its iteration ----------------------------
+# `tests-failed` and `abandoned` are distinct outcomes on purpose (ADR 0022 §3), and only
+# `abandoned` latches the finding (already_acted). So a gate failure from an EARLIER iteration must
+# not classify an item that the reviewer then gave up on — otherwise the night reports that the
+# suite refused a fix nobody ever tried to ship, and the abandoned finding stays eligible for a
+# fresh attempt every subsequent night.
+# Iteration 1: the reviewer ships, the suite goes red (and arms the sentinel on its way out).
+# Iteration 2: the sentinel makes the reviewer abandon, which breaks out before the gate runs.
+# The sentinel lives outside the worktree, so it never reaches a commit.
+( export NIGHTSHIFT_MOCK_ABANDON_IF="$TMP/abandon-now"
+  run_night abandons "touch $TMP/abandon-now; exit 1" )
+d="$TMP/abandons"; LEDGER="$d/state/ledger.jsonl"
+
+grep -q "gate overrules ship" "$d/err" "$d/out" \
+  || { cat "$d/err" >&2; fail "the red first suite was not reported as a retry"; }
+jq -e 'select(.outcome=="abandoned")' "$LEDGER" >/dev/null 2>&1 \
+  || { jq -c . "$LEDGER" >&2; fail "a reviewer abandon was not recorded as abandoned"; }
+if jq -e 'select(.outcome=="tests-failed")' "$LEDGER" >/dev/null 2>&1; then
+  jq -c . "$LEDGER" >&2
+  fail "a stale gate=fail relabelled the reviewer's abandon as tests-failed — the finding never latches"
+fi
+
 # --- 3. no test_cmd: ships as before, but the run says it is ungated ----------
 run_night ungated ''
 d="$TMP/ungated"; LEDGER="$d/state/ledger.jsonl"
