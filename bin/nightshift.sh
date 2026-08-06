@@ -337,6 +337,27 @@ codex_stage_home() {
 }
 
 # --------------------------------------------------------------- run_agent ----
+# A stage that fails because the agent CLI has no usable credentials is NOT a quiet night: every
+# later stage fails the same way, in a second or two, and the night still exits rc=0 having written
+# a negative recon cache and an `empty` ledger row per repo — i.e. an infrastructure outage forges
+# the record of a clean fleet. Observed 2026-08-05: all 8 stages died with `authentication_failed`
+# ("Not logged in · Please run /login"), the log said "nothing worth doing" four times, and the four
+# resulting `empty` rows are fiction. So classify the failure once and let main() abort the night.
+AGENT_FATAL=""         # non-empty = the agent itself is unusable; set by run_agent, read by main()
+AGENT_FATAL_AGENT=""   # WHICH adapter died — the advisor may legitimately run on a different one
+# Credential-failure signatures, matched against the stage's captured stderr AND raw stdout (the
+# claude CLI reports the failure as a JSON result object on stdout, codex on stderr). Deliberately
+# broad: a false positive costs one aborted night, a false negative costs a forged clean fleet.
+AGENT_AUTH_RE='not logged in|/login|authentication_failed|invalid api key|unauthorized|oauth token|credentials? (not found|expired|invalid)|codex login'
+agent_credentials_failed() { # file… -> 0 if any readable file carries a credential-failure signature
+  local f
+  for f in "$@"; do
+    [ -s "$f" ] || continue
+    grep -qiE "$AGENT_AUTH_RE" "$f" 2>/dev/null && return 0
+  done
+  return 1
+}
+
 run_agent() { # stage workdir item_dir
   local stage="$1" workdir="$2" item_dir="$3" start end status=0 usage='{}'
   start=$(date +%s)
@@ -346,6 +367,27 @@ run_agent() { # stage workdir item_dir
     codex)  codex_run "$stage" "$workdir" "$item_dir" || status=$? ;;
     *) log "unknown NIGHTSHIFT_AGENT=$NIGHTSHIFT_AGENT (expected mock, claude, or codex)"; status=2 ;;
   esac
+  # A non-zero stage is reported as a FAILURE, not absorbed into "found nothing". The exit code has
+  # always been recorded in runs.jsonl, but nothing ever read it back out — so a stage that could not
+  # run at all was indistinguishable, in the night log and in the digest, from one that ran and had
+  # nothing to say. Both adapters leave the CLI's own diagnosis in $stage.err (stderr) and
+  # .raw_$stage (unparsed stdout); the last non-blank stderr line goes straight into the log so the
+  # morning does not start with an archaeology session.
+  if [ "$status" -ne 0 ]; then
+    local errf="$item_dir/$stage.err" rawf="$item_dir/.raw_$stage" detail=""
+    if [ -s "$errf" ]; then
+      detail="$(tr -d '\r' < "$errf" | grep -v '^[[:space:]]*$' | tail -n 1 | cut -c1-200 || true)"
+      [ -z "$detail" ] || detail=" · $detail"
+    fi
+    log "  stage $stage FAILED (exit $status)${detail}"
+    [ -s "$errf" ] && log "  stage $stage: stderr in $errf"
+    if [ -z "$AGENT_FATAL" ] && agent_credentials_failed "$errf" "$rawf"; then
+      AGENT_FATAL="$NIGHTSHIFT_AGENT has no usable credentials (stage $stage)"
+      AGENT_FATAL_AGENT="$NIGHTSHIFT_AGENT"
+      log "FATAL: $AGENT_FATAL — aborting the night rather than recording a clean fleet."
+      log "FATAL: re-authenticate the $NIGHTSHIFT_AGENT CLI, then run bin/nightshift.sh again."
+    fi
+  fi
   # Each real adapter drops ONE compact JSON object per stage (model_id + token/cost counters).
   # Missing, empty or unparsable -> {}, and every derived telemetry field degrades to null; the mock
   # agent never writes one. Telemetry must never be able to fail a stage.
@@ -651,10 +693,18 @@ repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
   # and is NOT covered by --setting-sources. A stage worktree is throwaway, so there is nothing to
   # read — but the memory writer is a write path OUTSIDE the worktree that the PreToolUse guard
   # never sees (R8). Off for stages: nightshift's memory is its ledger, not a per-cwd store.
-  out="$(cd "$wd" && \
+  # stdout and stderr both go to FILES, and the exit code is inspected afterwards, rather than the
+  # older `out="$(… 2>/dev/null)" || return 1`. That form discarded the CLI's diagnosis twice over:
+  # stderr went to /dev/null, and a non-zero exit dropped the captured stdout on the floor with it —
+  # so a stage that never started left an empty item dir and no trace of why (see AGENT_FATAL above).
+  # Keeping both lets run_agent report the reason and recognise a credential failure.
+  local rawf="$id/.raw_$stage" errf="$id/$stage.err" rc=0
+  (cd "$wd" && \
     GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="$HOOKS_DIR" \
     NIGHTSHIFT_WORKTREE="$wd" CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 \
-    claude -p "$prompt" --output-format json --settings "$STATE_DIR/claude-settings.json" --tools "$tools" "${model_arg[@]}" "${sources_arg[@]}" $cm_flags $flags </dev/null 2>/dev/null)" || return 1
+    claude -p "$prompt" --output-format json --settings "$STATE_DIR/claude-settings.json" --tools "$tools" "${model_arg[@]}" "${sources_arg[@]}" $cm_flags $flags </dev/null) >"$rawf" 2>"$errf" || rc=$?
+  [ "$rc" -eq 0 ] || return 1
+  out="$(cat "$rawf")"
   # `claude -p --output-format json` is NOT a stable shape. Sometimes it is a single
   # result object ({result,usage,total_cost_usd}); sometimes a JSON ARRAY of events with
   # the result object as one element (observed with claude 2.1.197, e.g. when a
@@ -754,11 +804,15 @@ code instead of reading files blindly. Your cwd is a throwaway worktree with NO 
 repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
   fi
 
-  events="$id/.codex_events_$stage"
+  # Same capture contract as the claude half: stderr to $stage.err, unparsed stdout to .raw_$stage
+  # (here the event stream, which is also what codex uses to report an auth failure), so run_agent
+  # can name the reason a stage died and spot a credential failure. Codex's stderr previously landed
+  # unlabelled in the night log; per stage and per item dir it is attributable.
+  events="$id/.raw_$stage"
   if ! (cd "$wd" && printf '%s' "$prompt" | \
     GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="$HOOKS_DIR" \
     CODEX_HOME="$cx_home" \
-    codex "${args[@]}" - > "$events"); then
+    codex "${args[@]}" - > "$events" 2>"$id/$stage.err"); then
     return 1
   fi
   # Telemetry sidecar for run_agent — same object contract as the claude adapter. Codex's event
@@ -1014,6 +1068,14 @@ ensure_recon() { # repo -> refresh the recon cache if missing / HEAD changed / o
     run_agent recon "$wt" "$id" || true; remove_worktree "$repo" "$wt"
   else
     log "  $(basename "$repo"): recon worktree failed — skipping recon (never the live checkout)"
+    return 0
+  fi
+  # An agent that cannot authenticate produces no recon result — but that is a statement about the
+  # CLI, not about the repo, and caching it would be wrong twice: the negative cache asserts "recon
+  # found nothing here" and its backoff then suppresses the retry for 6h, so the operator's fix does
+  # not take effect on the next run either. Leave the cache untouched and let main() end the night.
+  if [ -n "$AGENT_FATAL" ]; then
+    log "  $(basename "$repo"): recon skipped — agent unavailable (cache left untouched)"
     return 0
   fi
   # Write atomically (temp + rename): a failed/partial jq must never truncate a good prior cache.
@@ -1335,6 +1397,14 @@ advise_branches() {
   # Dynamic-scope override: run_agent reads the global NIGHTSHIFT_AGENT; a local here rebinds it for
   # every advise call without disturbing the night's own adapter.
   local NIGHTSHIFT_AGENT="${NIGHTSHIFT_ADVISOR_AGENT:-$NIGHTSHIFT_AGENT}"
+  # If the advisor runs on the adapter that just failed to authenticate, every call would die the
+  # same way and stamp "?" over every open branch in the digest. A DIFFERENT vendor is unaffected by
+  # the outage, and its second opinion on already-pushed branches is still worth having — so gate on
+  # which adapter died, not merely on the fact that one did.
+  if [ -n "$AGENT_FATAL" ] && [ "$NIGHTSHIFT_AGENT" = "$AGENT_FATAL_AGENT" ]; then
+    log "branch review: skipped — $AGENT_FATAL"
+    return 0
+  fi
   local i path base branches ref name id wt rec reason out=""
   for i in "${!REPO_PATHS[@]}"; do
     path="${REPO_PATHS[$i]}"; [ -d "$path/.git" ] || continue
@@ -1375,6 +1445,10 @@ write_digest() { # made open status [advice]
     [ -f "$LEDGER" ] && fcount=$(jq -s --arg n "$NIGHT" '[.[]|select(.night==$n and .outcome=="finding")]|length' "$LEDGER" 2>/dev/null || echo 0)
     echo "- agent: \`$NIGHTSHIFT_AGENT\` · shipped this run: ${made} · surfaced (findings): ${fcount} · open (unmerged): ${open}/${MAX_OPEN} (cap)"
     [ "$status" = budget ] && echo "- **Stopped: time budget exhausted** (\`${MAX_RUN_SECONDS:-?}s\`) — the night ended on the spend cap, not for lack of work."
+    # An aborted night must announce itself in the ONE artifact the operator actually reads in the
+    # morning. Without this the digest of a credential outage is indistinguishable from a clean
+    # fleet: same "shipped: 0", same empty tables, no reason given.
+    [ "$status" = agent_unavailable ] && echo "- **ABORTED: the \`$NIGHTSHIFT_AGENT\` agent could not run** — ${AGENT_FATAL:-no usable credentials}. Nothing below reflects the state of the code: re-authenticate the CLI and run the night again. No recon caches or \`empty\` rows were written."
     if [ -f "$RUNSLOG" ]; then
       runs=$(grep -c "\"night\":\"$NIGHT\"" "$RUNSLOG" || true)
       dur=$(jq -s --arg n "$NIGHT" '[.[]|select(.night==$n)|.duration_s]|add // 0' "$RUNSLOG")
@@ -1603,6 +1677,9 @@ main() {
   esac
 
   local made=0 considered=0 findings=0 repo mode cfgbase id fp fnj iter verdict wt base b summary open="" pass=0 progress ship_progress stop_reason=ok disp rfind farr n_find k fd dim
+  # verify_findings above is the night's first agent call of all. If the credentials are already
+  # dead there, every later stage is too — skip straight to the digest so the abort is on record.
+  if [ -n "$AGENT_FATAL" ]; then stop_reason=agent_unavailable; fi
   # No per-night production cap. The ONLY cap is the count of OPEN (unmerged) nightshift/* branches:
   # work continues while fewer than max_open_branches are unmerged; merging/closing frees slots and
   # work resumes; when merging stops it fills to the cap and stops. "All night" continuous operation
@@ -1610,6 +1687,9 @@ main() {
   while true; do
     [ "$made" -ge "$MAX_RUN_BRANCHES" ] && { log "safety ceiling ($MAX_RUN_BRANCHES) reached — stop"; break; }
     if over_budget; then log "time budget (${MAX_RUN_SECONDS}s) exhausted — stop"; stop_reason=budget; break; fi
+    # The single gate every pass goes through — it catches a credential failure raised by
+    # verify_findings before the loop as well as one raised by any stage inside a previous pass.
+    if [ -n "$AGENT_FATAL" ]; then stop_reason=agent_unavailable; break; fi
     # Reconcile once at the pass boundary. All inner cap checks reuse this total; successful pushes
     # increment it below, eliminating a fleet-wide network fetch for every repo and finding.
     refresh_open_branch_refs
@@ -1655,6 +1735,12 @@ main() {
     # (ADR 0010 + 0015) — recon steers the order, it never drops a lens. The lens and the recon
     # orientation notes are injected into explore; the lens is stamped onto every finding.
     ensure_recon "$repo"
+    # Recon is the night's first agent call per repo, so it is usually where a credential failure
+    # surfaces. Stop here rather than spending an Explore that will die the same way.
+    if [ -n "$AGENT_FATAL" ]; then
+      remove_worktree "$repo" "$wt"
+      stop_reason=agent_unavailable; break
+    fi
     dim=$(select_dimension "$repo")
     export NIGHTSHIFT_DIMENSION="$dim"
     NIGHTSHIFT_RECON_NOTES="$(jq -r '.notes // ""' "$(recon_cache_path "$repo")" 2>/dev/null || true)"
@@ -1664,6 +1750,13 @@ main() {
     NIGHTSHIFT_KNOWN_WORK="$(known_work "$repo")"; export NIGHTSHIFT_KNOWN_WORK
     log "  $(basename "$repo") [$mode]: lens=${dim:-none} · budget=$rfind"
     run_agent explore "$wt" "$id" || true
+    # Bail out BEFORE anything derived from this stage is recorded. A dead agent must not advance the
+    # dimension rotation, must not count as `considered`, and above all must not append the `empty`
+    # ledger row below — that row is the fleet's memory of "this lens was clean on this night".
+    if [ -n "$AGENT_FATAL" ]; then
+      remove_worktree "$repo" "$wt"
+      stop_reason=agent_unavailable; break
+    fi
     considered=$((considered + 1))
     # Mark this (repo,dim) as serviced NOW — regardless of what Explore found — so the rotation
     # advances to the next lens next run even when this pass surfaced nothing (ADR 0010).
@@ -1795,9 +1888,9 @@ main() {
       remove_worktree "$repo" "$wt"
       [ -n "$b" ] && git -C "$repo" branch -q -D "$b" >/dev/null 2>&1 || true
     done
-    case "$stop_reason" in backpressure|budget) break ;; esac
+    case "$stop_reason" in backpressure|budget|agent_unavailable) break ;; esac
   done < <(select_order)
-    [ "$stop_reason" = budget ] && break
+    case "$stop_reason" in budget|agent_unavailable) break ;; esac
     # Gate on SHIPPABLE progress. Findings surface once (they dedup/latch), so a pass that only
     # surfaced findings must not spin the loop — else a nondeterministic Findings-only fleet never
     # halts. Always emit an explicit stop reason.
@@ -1815,6 +1908,14 @@ main() {
   if [ -z "$open" ]; then refresh_open_branch_refs; open=$(open_branch_count); fi
   local advice; advice="$(advise_branches)"
   write_digest "$made" "$open" "$stop_reason" "$advice"
+  # An aborted night exits NON-ZERO. `nightshift-cron.sh` records the rc in the day's log and the
+  # systemd unit surfaces it as a failed service — the two places an operator finds out something
+  # broke without reading a digest. The old unconditional rc=0 meant a credential outage looked, to
+  # every layer above, exactly like a night that simply found nothing.
+  if [ -n "$AGENT_FATAL" ]; then
+    log "night ABORTED: $AGENT_FATAL — $considered repos considered, nothing recorded."
+    return 3
+  fi
   log "night done: $made shipped this run, $considered considered, $open now open (cap $MAX_OPEN)."
 }
 

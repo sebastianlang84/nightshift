@@ -59,6 +59,8 @@ The decisions behind this live in the ADRs, not here — this section points, it
   the run pipeline, the budget cap, the force-push hook.
 - [ADR 0005](docs/adr/0005-configurable-limits-in-rulebook.md) — per-run bounds in the rulebook.
 - [ADR 0022](docs/adr/0022-a-repos-own-tests-gate-the-ship.md) — a repo's own tests gate the ship.
+- [ADR 0023](docs/adr/0023-an-unusable-agent-aborts-the-night.md) — an agent that cannot
+  authenticate aborts the night; an outage must never forge the record of a clean fleet.
 
 ## Relationship to `nightly-review-pipeline`
 

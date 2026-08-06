@@ -207,6 +207,18 @@ never push outside `nightshift/*` (see [`docs/design/hook-spec.md`](design/hook-
   `NIGHTSHIFT_ADVISOR_AGENT` (e.g. `codex` when the night runs on `claude`) for a different vendor's
   eyes. It never merges or pushes. Costs extra tokens, so it is off by default.
 - **Logs:** `bin/schedule.sh logs [N]` or `journalctl --user -u nightshift.service`.
+- **An aborted night (exit 3):** the night stopped because the agent CLI could not authenticate
+  ([ADR 0023](adr/0023-an-unusable-agent-aborts-the-night.md)). The digest says `ABORTED` instead of
+  reporting a clean fleet, the day's log carries a `FATAL:` line naming the stage, and the systemd
+  unit is marked failed. Nothing was recorded — no recon caches, no `empty` ledger rows — so there is
+  no state to clean up. Log in to the agent CLI again (`claude` / `codex login`), then re-run:
+  ```
+  bin/nightshift-cron.sh          # same launcher the timer uses (honours the single-instance lock)
+  ```
+- **A single failed stage:** any stage exiting non-zero is logged as `stage <name> FAILED (exit N)`
+  with the last line of its stderr. The full output is kept in the run's item directory:
+  `runs/<date>/<item>/<stage>.err` (stderr) and `.raw_<stage>` (the CLI's unparsed stdout). A
+  one-off failure is not fatal — the night carries on and the repo is picked up on the next pass.
 
 ## Teardown
 
