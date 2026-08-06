@@ -1005,8 +1005,16 @@ median_gap() { # repo D -> median inter-service interval (secs) across the repo'
   while IFS= read -r ts; do
     [ -n "$ts" ] || continue
     e=$(date -d "$ts" +%s 2>/dev/null || echo 0); [ "$e" -gt 0 ] && eps+=("$e")
-  done < <(jq -r --arg r "$repo" \
-            'select(.repo==$r and (.outcome=="finding" or .outcome=="shipped" or .outcome=="abandoned" or .outcome=="empty")) | .ts' \
+  # `-s` (slurp) rather than the streaming form: a retracted row is identified by an entry that
+  # appears LATER in the append-only ledger, so the whole file has to be in hand before any row can
+  # be judged. A retracted `empty` never counted as a service — it is the record of a night that
+  # claimed to have reviewed something without doing so (ADR 0023), and letting it shorten the
+  # measured cadence would make every lens look more overdue than it is.
+  done < <(jq -rs --arg r "$repo" \
+            '[.[]|select(.outcome=="retracted")|.item] as $void
+             | .[]|select(.repo==$r and ([.item]|inside($void)|not)
+                          and (.outcome=="finding" or .outcome=="shipped" or .outcome=="abandoned" or .outcome=="empty"))
+             | .ts' \
             "$LEDGER" 2>/dev/null || true)
   n=${#eps[@]}
   [ "$n" -lt "$D" ] && { echo "$boot"; return; }
@@ -1492,7 +1500,9 @@ write_digest() { # made open status [advice]
     # rulebook, so surface a suggestion rather than acting. Driven by Explore's own conclusion, not by
     # recon repeating itself (which would be a circular doom loop).
     [ -f "$LEDGER" ] && jq -rs '
-      [.[] | select(.dimension!=null and (.outcome=="empty" or .outcome=="finding" or .outcome=="shipped" or .outcome=="abandoned"))]
+      [.[]|select(.outcome=="retracted")|.item] as $void
+      | [.[] | select(.dimension!=null and ([.item]|inside($void)|not)
+                      and (.outcome=="empty" or .outcome=="finding" or .outcome=="shipped" or .outcome=="abandoned"))]
       | group_by([.repo,.dimension])
       | map(sort_by(.ts) | .[-3:])
       | map(select(length==3 and all(.[]; .outcome=="empty" and .scope=="out_of_scope")))

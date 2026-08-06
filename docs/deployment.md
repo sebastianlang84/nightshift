@@ -143,7 +143,7 @@ these flags, is what confines the agent (see [`docs/design/risk-analysis.md`](de
 
 | Path | What | Override |
 |------|------|----------|
-| `state/ledger.jsonl` | The memory: findings, shipped, abandoned, verdicts (append-only) | `NIGHTSHIFT_STATE_DIR` |
+| `state/ledger.jsonl` | The memory: findings, shipped, abandoned, verdicts, retractions (append-only) | `NIGHTSHIFT_STATE_DIR` |
 | `state/runs.jsonl` | Per-stage telemetry (real `model_id`, `context_window`, input/output/cache tokens, cost, duration) | `NIGHTSHIFT_STATE_DIR` |
 | `state/findings-probe.json` | Freshness snapshot of every open finding (`untouched` / `code_changed` / `unknown` plus verify results) — derived, disposable, rewritten in place by harvest; world-readable for the dashboard. Never hand-edit it: the ledger is the record ([ADR 0021](adr/0021-closing-open-findings.md)) | `NIGHTSHIFT_STATE_DIR` |
 | `state/recon/` | Per-repo recon caches (derived, disposable) | `NIGHTSHIFT_STATE_DIR` |
@@ -215,6 +215,15 @@ never push outside `nightshift/*` (see [`docs/design/hook-spec.md`](design/hook-
   ```
   bin/nightshift-cron.sh          # same launcher the timer uses (honours the single-instance lock)
   ```
+- **Withdrawing a night that lied:** a night that ran *before* the abort path existed (or one whose
+  stages failed some other way) may have left `empty` rows claiming a lens was reviewed and clean.
+  The ledger is append-only, so the claim is withdrawn rather than deleted:
+  ```
+  bin/harvest.sh retract 2026-08-05 "agent credentials dead — no stage ran"
+  ```
+  One `retracted` row is appended per affected item. The original rows stay visible, and the readers
+  that treat an `empty` row as evidence — the service cadence and the ADR 0015 exclusion window —
+  skip them. Idempotent, and scoped to the single night you name.
 - **A single failed stage:** any stage exiting non-zero is logged as `stage <name> FAILED (exit N)`
   with the last line of its stderr. The full output is kept in the run's item directory:
   `runs/<date>/<item>/<stage>.err` (stderr) and `.raw_<stage>` (the CLI's unparsed stdout). A

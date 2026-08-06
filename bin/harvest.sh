@@ -35,6 +35,7 @@
 #   harvest.sh todos           # list open findings, numbered, with freshness state
 #   harvest.sh close <#|sel> [reason]             # record `resolved` for one open finding
 #   harvest.sh probe           # re-run the freshness probe, print the table
+#   harvest.sh retract <night> [reason]           # withdraw a night's `empty` rows as evidence
 #   harvest.sh --help          # print the usage above (see usage(), which this mirrors)
 # Any other argument is an error (exit 2), never a silent fall-through to the
 # argument-less form — that form WRITES to the ledger. See the dispatch in main.
@@ -330,6 +331,47 @@ close_todo() { # <n|selector> [reason]
   run_probe >/dev/null || true
 }
 
+# ------------------------------------------------------------------ retract ----
+# Withdraw a night's `empty` rows as EVIDENCE. An `empty` row is a claim about a repository —
+# "this lens was reviewed on this night and was clean" — and the digest's coverage view and the
+# service cadence both read it as one. A night whose stages never ran produces rows that make that
+# claim without anything behind it (ADR 0023: the 2026-08-05 credential outage produced four).
+#
+# The ledger is append-only, so a wrong row is withdrawn, never deleted: this appends one
+# `outcome:"retracted"` row per affected item, and the readers skip any item so named. The row
+# stays visible — the record shows both what was claimed and that it was withdrawn.
+retract_night() { # <night> [reason]
+  local night="$1" reason="${2:-}" rows n=0 row item repo dim
+  case "$night" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
+    *) echo "retract takes a night as YYYY-MM-DD (got '$night')" >&2; exit 2 ;;
+  esac
+  # Only `empty` rows, and only those not already retracted — so re-running is a no-op rather than
+  # a second pile of retraction rows.
+  rows=$(jq -sc --arg n "$night" \
+    '[.[]|select(.outcome=="retracted")|.item] as $done
+     | [.[]|select(.night==$n and .outcome=="empty" and ([.item]|inside($done)|not))]' "$LEDGER")
+  if [ "$rows" = "[]" ]; then
+    echo "nothing to retract for $night (no un-retracted \`empty\` rows)"; return 0
+  fi
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    item=$(jq -r '.item' <<<"$row"); repo=$(jq -r '.repo' <<<"$row")
+    dim=$(jq -r '.dimension // ""' <<<"$row")
+    jq -nc --arg item "$item" --arg repo "$repo" --arg dim "$dim" --arg rn "$night" \
+           --arg reason "$reason" --arg ts "$(date -Iseconds)" \
+           --arg night "$(date +%F)" --argjson sv "$SCHEMA_VERSION" \
+      '{night:$night,item:$item,repo:$repo,fingerprint:null,branch:null,sha:null,
+        outcome:"retracted",retracts:"empty",retracted_night:$rn,
+        dimension:($dim|if .=="" then null else . end),
+        reason:($reason|if .=="" then null else . end),
+        source:"manual",ts:$ts,schema_version:$sv}' >> "$LEDGER"
+    n=$((n + 1))
+    printf 'retracted: %s × %s [item=%s]\n' "$(basename "$repo")" "${dim:-—}" "$item"
+  done < <(jq -c '.[]' <<<"$rows")
+  printf '%d `empty` row(s) from %s withdrawn as evidence%s\n' "$n" "$night" "${reason:+ ($reason)}"
+}
+
 # --------------------------------------------------------------------- main ----
 usage() {
   cat <<'EOF'
@@ -342,6 +384,8 @@ usage:
   harvest.sh todos                              list open findings, numbered, with freshness state
   harvest.sh close <#|sel> [reason]             record `resolved` for one open finding
   harvest.sh probe                              re-run the finding freshness probe, print the table
+  harvest.sh retract <YYYY-MM-DD> [reason]      withdraw that night's `empty` rows as evidence
+                                                (a night whose stages never ran claimed nothing real)
   harvest.sh --help                             print this
 EOF
 }
@@ -360,6 +404,7 @@ case "${1:-}" in
   close)     ;;                                  # arity checked below, run after the ledger checks
   todos)     ;;                                  # read-only finding surfaces, run after the checks
   probe)     ;;
+  retract)   ;;                                  # arity checked below, like verdict/close
   *)         printf 'unknown argument: %s\n' "$1" >&2; usage >&2; exit 2 ;;
 esac
 # Arity, checked here so a malformed command line fails fast and identically whatever
@@ -373,6 +418,9 @@ case "${1:-}" in
   close)
     [ "$#" -ge 2 ] && [ "$#" -le 3 ] \
       || { echo "close takes <#|selector> [reason] (quote a multi-word reason)" >&2; usage >&2; exit 2; } ;;
+  retract)
+    [ "$#" -ge 2 ] && [ "$#" -le 3 ] \
+      || { echo "retract takes <YYYY-MM-DD> [reason] (quote a multi-word reason)" >&2; usage >&2; exit 2; } ;;
   *)
     [ "$#" -le 1 ] || { printf 'unexpected extra arguments: %s\n' "${*:2}" >&2; usage >&2; exit 2; } ;;
 esac
@@ -391,6 +439,7 @@ case "${1:-}" in
   todos)   list_todos;        exit 0 ;;
   close)   shift; close_todo "$@"; exit 0 ;;
   probe)   run_probe --print; exit 0 ;;
+  retract) shift; retract_night "$@"; exit 0 ;;
 esac
 
 # prefetch each repo once

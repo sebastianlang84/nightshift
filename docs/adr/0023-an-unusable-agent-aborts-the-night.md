@@ -96,6 +96,15 @@ sees and can re-run. A false negative costs a forged record of a clean fleet, wh
 - `NIGHTSHIFT_ADVISOR_AGENT` is gated on *which* adapter died, not on the fact that one did: an
   advisor on a different vendor is unaffected by the outage and still gives a usable second opinion
   on already-pushed branches.
+- **The rows already written stay written.** This ADR stops the forgery; it does not undo the four
+  `empty` rows of 2026-08-05, and the ledger is append-only by design (ADR 0007). They are withdrawn
+  instead: `bin/harvest.sh retract <night> [reason]` appends one `outcome:"retracted"` row per
+  affected item, and the two readers that treat an `empty` row as evidence skip any item so named —
+  `service_cadence` (which a phantom service makes look busier than it is) and ADR 0015's
+  exclusion-suggestion window (where a phantom row occupies a slot and *masks* a real signal). The
+  original rows remain visible, so the record shows both what was claimed and that it was withdrawn.
+  Applied to 2026-08-05 on 2026-08-06; covered by
+  [`tests/test-retract-empty-night.sh`](../../tests/test-retract-empty-night.sh).
 - Regression coverage: [`tests/test-agent-auth-abort.sh`](../../tests/test-agent-auth-abort.sh)
   drives a stubbed `claude` that fails the way the real one did, and asserts the exit code, the
   captured reason, the early stop, and the *absence* of every artifact that made 2026-08-05 look
