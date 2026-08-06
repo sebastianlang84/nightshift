@@ -42,6 +42,9 @@ expect deny "$(w Write "$TMP/worktree-evil/x")"         "prefix-sibling is not '
 # --- Bash confinement must not regress ---
 expect deny  '{"tool_name":"Bash","tool_input":{"command":"git push --no-verify origin nightshift/x"}}' "bash --no-verify"
 expect deny  '{"tool_name":"Bash","tool_input":{"command":"GIT_CONFIG_COUNT=0 git push"}}'               "bash GIT_CONFIG_* override"
+# Widening, not disabling: pre-push takes its allowed namespace from NIGHTSHIFT_BRANCH_PREFIX,
+# so `=m` makes refs/heads/main match with the hook still installed and running.
+expect deny  '{"tool_name":"Bash","tool_input":{"command":"NIGHTSHIFT_BRANCH_PREFIX=m git push origin HEAD:main"}}' "bash NIGHTSHIFT_BRANCH_PREFIX widening"
 expect allow '{"tool_name":"Bash","tool_input":{"command":"grep -r TODO ."}}'                            "benign bash allowed"
 
 # --- fallback: no env, cwd from payload confines correctly ---

@@ -2,8 +2,8 @@
 # nightshift confinement hook — Layer 2 (hook-spec.md, re-review §2a + §2b).
 #
 # A Claude Code PreToolUse hook. Reads the tool-call JSON on stdin. Two jobs:
-#  (1) Bash: stop the agent DISABLING Layer 1 (hooks/pre-push) — the hard "which
-#      ref" question is Layer 1's, on resolved refs.
+#  (1) Bash: stop the agent DISABLING Layer 1 (hooks/pre-push) or WIDENING what it
+#      allows — the hard "which ref" question is Layer 1's, on resolved refs.
 #  (2) Write/Edit: confine file writes to the current worktree. The Fix stage grants
 #      Write/Edit but no Bash; those tools take ABSOLUTE paths, so without this the
 #      agent could edit the runner, hooks, ~/.claude, systemd units, or another repo
@@ -36,6 +36,17 @@ if [ -n "$cmd" ]; then
     # string in a command is safe.
     *GIT_CONFIG_COUNT*|*GIT_CONFIG_KEY*|*GIT_CONFIG_VALUE*|*GIT_CONFIG_GLOBAL*|*GIT_CONFIG_SYSTEM*)
                                deny "setting GIT_CONFIG_* would override the injected core.hooksPath (Layer 1 confinement)" ;;
+    # The patterns above stop the hook being turned OFF; this one stops it being told to
+    # allow MORE. hooks/pre-push builds its allowed namespace from the environment
+    # (refs/heads/${NIGHTSHIFT_BRANCH_PREFIX:-nightshift/}) and accepts any ref with that
+    # prefix, so `NIGHTSHIFT_BRANCH_PREFIX=m git push origin HEAD:main` leaves the hook
+    # installed and running while making refs/heads/main match — a full bypass. Same
+    # reasoning as GIT_CONFIG_* above: the Runner exports this as process env
+    # (nightshift.sh), never as an agent command, so denying the string in a command is
+    # safe. Like core.hooksPath, a command that merely mentions the name is denied too —
+    # a nuisance false deny beats a false allow on the branch-only guarantee.
+    *NIGHTSHIFT_BRANCH_PREFIX*)
+                               deny "setting NIGHTSHIFT_BRANCH_PREFIX would widen the branch namespace pre-push allows (Layer 1 confinement)" ;;
   esac
   exit 0   # a Bash call has no file_path to confine
 fi
