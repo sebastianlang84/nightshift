@@ -43,14 +43,16 @@ normal clone).
 The `PreToolUse` guard does two things, dispatched on the tool call it receives:
 
 **(a) Bash — anti-bypass.** Layer 1's one loophole: `git push --no-verify` skips `pre-push` hooks. So
-the guard denies any Bash command that would disable or relocate the hook. Plain string checks, no ref
-parsing:
+the guard denies any Bash command that would disable, relocate, or *widen* the hook. Plain string
+checks, no ref parsing:
 
 - deny if the command contains `--no-verify`
 - deny if it sets `core.hooksPath` (e.g. `-c core.hooksPath=…` or `git config … core.hooksPath`)
 - deny other `-c`/config or `GIT_CONFIG_*` overrides that turn hooks off
+- deny if it sets `NIGHTSHIFT_BRANCH_PREFIX` — the env Layer 1 reads to build its allowed namespace
 
-The hard work (which ref) is git's job via Layer 1; this part only stops the agent switching it off.
+The hard work (which ref) is git's job via Layer 1; this part only stops the agent switching it off or
+redefining what it permits.
 
 **(b) Write/Edit — worktree confinement (R8).** The Fix stage grants `Write`/`Edit` but no `Bash`, and
 those tools accept **absolute paths** — so without a check the agent could edit the runner, hooks,
@@ -76,6 +78,13 @@ alone would never fire on a `Write`, leaving (b) dead.
   overrides, **and** any `GIT_CONFIG_*` env manipulation (`GIT_CONFIG_COUNT`/`KEY`/`VALUE`/`GLOBAL`/
   `SYSTEM`) — otherwise an agent could disable Layer 1 by overriding the very env that injects it
   (e.g. `GIT_CONFIG_COUNT=0 git push …`) without ever naming `core.hooksPath`. Benign commands pass.
+- **The mirror image of that hole:** Layer 1 reads its *allowed* namespace from process env too
+  (`refs/heads/${NIGHTSHIFT_BRANCH_PREFIX:-nightshift/}`, exported by the Runner from the rulebook's
+  `branch_prefix`), and any non-empty value only ever widens it — `NIGHTSHIFT_BRANCH_PREFIX=m git push
+  origin HEAD:main` makes `refs/heads/main` match the prefix with the hook still installed and
+  running. So the guard denies that name as well. Both denials rest on the same fact: the Runner
+  supplies this env to the agent process, never as a command string, so no legitimate agent command
+  contains it.
 
 **Residual — now verified (2026-07-09):** the sandbox uses `--dangerously-skip-permissions`, and the
 open question was whether a PreToolUse hook fires under that mode. **It does** — an adversarial test

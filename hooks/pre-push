@@ -8,6 +8,10 @@
 # git into the ref list below — we just check the result.
 set -euo pipefail
 
+# The allowed namespace is Runner-owned PROCESS ENV (bin/nightshift.sh exports it from the
+# rulebook's branch_prefix). It is trusted input: any non-empty value widens what is accepted
+# below — `NIGHTSHIFT_BRANCH_PREFIX=m` makes refs/heads/main match. An agent command that sets
+# it is therefore denied at Layer 2 (hooks/pretooluse-guard.sh), alongside GIT_CONFIG_*.
 prefix="refs/heads/${NIGHTSHIFT_BRANCH_PREFIX:-nightshift/}"
 zero="0000000000000000000000000000000000000000"
 
