@@ -102,14 +102,17 @@ def targets(fingerprint: str) -> list[str]:
 
 
 def dimension(row: dict) -> str:
-    """The review lens. Explicit field on post-ADR-0010 rows; older ones only carry it inside the
-    fingerprint's middle segment (`<paths>:<dim>:<anchor>`), which is what the dashboard reads too."""
-    for field in ("dimension", "type"):
-        val = row.get(field)
-        if isinstance(val, str) and val:
-            return val
-    parts = str(row.get("fingerprint") or "").split(":")
-    return parts[1] if len(parts) >= 3 and parts[1] else ""
+    """The review lens the finding was found under (ADR 0010: correctness|security|craft|…).
+
+    The explicit field is the only thing that can answer this, and a missing one cannot be
+    reconstructed. Neither the row's `type` nor the fingerprint's middle segment is a lens: both
+    hold the finding TYPE (bug|typo|doc|cleanup|…) — ADR 0014 builds the fingerprint as
+    `sorted(files):type:anchor`, see targets() above — and ADR 0011 keeps the fingerprint
+    deliberately dimension-free. Reading either would stamp the row with a value from the wrong
+    vocabulary. So pre-ADR-0010 rows stay dimension-null, which is that ADR's own consequence and
+    is what `harvest.sh todos` and the dashboard render as an empty lens."""
+    val = row.get("dimension")
+    return val if isinstance(val, str) and val else ""
 
 
 def path_like(name: str) -> bool:
