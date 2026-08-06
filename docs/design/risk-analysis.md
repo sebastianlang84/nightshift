@@ -8,6 +8,8 @@
 - Reviewed: independent adversarial pass by a second model (Fable, 2026-07-10) against the code.
   It found the register understated the write-primitive threat — see [R8](#r8)–[R13](#r13), which
   materially revised §2 and the §6 residual statement below.
+- Re-statused 2026-08-06 against the runner: [N3](#n3) and [N4](#n4) had landed in code while the
+  register still carried [R9](#r9)/[R10](#r10) as **Open** and both mitigations as future work.
 
 Read alongside: [hook-spec.md](hook-spec.md) (git confinement), [autonomy-and-shutoff.md](autonomy-and-shutoff.md)
 (kill-switch design, not yet built), [constitution-and-rulebook.md](constitution-and-rulebook.md),
@@ -79,9 +81,9 @@ Severity = impact × likelihood given the controls above. Status: **Open** / **P
 |----|------|----------|--------|
 | [R8](#r8) | Write/Edit accept **absolute paths** → code execution as `llmadmin` with no `Bash` | **High** | **Mitigated** |
 | [R1](#r1) | Secret exfiltration via prompt-injection → commit content → pushed branch | **High** | **Open** |
-| [R9](#r9) | New **untracked** files bypass the review evidence chain, then get committed | **High** | **Open** |
+| [R9](#r9) | New **untracked** files bypass the review evidence chain, then get committed | **High** | **Mitigated** |
 | [R2](#r2) | All containment is application-layer, on a `docker`/`sudo` account (host-root blast radius if a layer fails) | **High** | **Partial** |
-| [R10](#r10) | `~/.local/bin` first on PATH → a write primitive hijacks the Runner's own tools | Med–High | **Open** |
+| [R10](#r10) | `~/.local/bin` on PATH → a write primitive hijacks the Runner's own tools | Med–High | **Partial** |
 | [R3](#r3) | `--dangerously-skip-permissions` is the default for *all* runs (single line of defense for command exec) | Medium | **Partial** |
 | [R5](#r5) | Prompt injection from untrusted repo content skews findings/fixes (persists across stages) | Medium | **Partial** |
 | [R12](#r12) | `gh` token over-scope (`admin:public_key`) + PR body is an unscanned API exfil channel | Medium | **Partial** |
@@ -139,14 +141,14 @@ On drift, the run continues until a cap (C6) stops it.
 Target-repo content is untrusted and reaches the prompt. Injection could steer what the agent flags
 or how it "fixes" code. Worse, it is **second-order**: the explore stage's output — itself derived
 from untrusted content — is re-embedded verbatim as `### finding.json` into the fix **and** review
-prompts ([nightshift.sh:210-214](../../bin/nightshift.sh)), and the working-tree diff (also
-attacker-influenced) is embedded into review ([nightshift.sh:218-219](../../bin/nightshift.sh)). So
+prompts ([nightshift.sh:465-468](../../bin/nightshift.sh)), and the staged diff (also
+attacker-influenced) is embedded into review ([nightshift.sh:470-478](../../bin/nightshift.sh)). So
 the same adversary shapes both the instruction the fixer follows and the diff the reviewer signs off.
 Backstopped by C5 (human review before merge) for correctness — but **not** for the R1 exfil variant
-(damage done at push time), and R9 shows the review evidence itself is incomplete.
+(damage done at push time). R9's evidence gap is closed, so what the reviewer sees is now complete;
+whether it is *read* adversarially is not something the mechanism can guarantee.
 
-*Residual: human review covers merge-time correctness; the push-time secrecy risk is R1; the
-evidence-completeness gap is R9.*
+*Residual: human review covers merge-time correctness; the push-time secrecy risk is R1.*
 
 ### R6 — Unrestricted network egress <a id="r6"></a>
 Nothing at the OS level restricts where the agent process can talk. Today the allowlist grants no
@@ -179,29 +181,49 @@ see hook-spec.md), in addition to the deterministic unit tests. [M2](#m2) (OS sa
 defense-in-depth.*
 
 ### R9 — Untracked files bypass the review evidence chain <a id="r9"></a>
-Review is shown `git -C "$wd" diff` ([nightshift.sh:219](../../bin/nightshift.sh)) — a plain diff
-shows **tracked modifications only**, not new untracked files. finalize then stages everything with
-`git add -A` ([nightshift.sh:374](../../bin/nightshift.sh)) and pushes. A fix stage that *creates* a
-new file (a secret dump, a malicious `.github/` workflow, a planted binary) is invisible to the
-reviewer yet committed and pushed to the `nightshift/*` branch.
+Review was shown a plain `git -C "$wd" diff`, which reports **tracked modifications only**, not new
+untracked files, while finalize stages everything with `git add -A`
+([nightshift.sh:1199](../../bin/nightshift.sh)) and pushes. A fix stage that *creates* a new file (a
+secret dump, a malicious `.github/` workflow, a planted binary) was invisible to the reviewer yet
+committed and pushed to the `nightshift/*` branch.
 
-*Residual: undermines C5 — the reviewer's own evidence omits the payload.* Closed by [N3](#n3).
+*Mitigated by [N3](#n3) (implemented): the review prompt now runs `git -C "$wd" add -A` and embeds
+`git -C "$wd" diff --staged` ([nightshift.sh:470-478](../../bin/nightshift.sh)), so the reviewer's
+evidence is by construction the same index finalize commits — new files included. Both stagings
+honour the target repo's `.gitignore` identically, so an ignored file is absent from review **and**
+from the commit; the evidence chain stays complete.*
 
-### R10 — `~/.local/bin` first on PATH → write primitive hijacks the Runner <a id="r10"></a>
-The launcher prepends `$HOME/.local/bin` to PATH ([nightshift-cron.sh:16](../../bin/nightshift-cron.sh))
-and the Runner calls `jq`, `git`, `gh`, `python3`, `codemap` **unqualified** throughout (e.g.
-[nightshift.sh:369,374,376,386](../../bin/nightshift.sh)). Chained with R8: a fix stage that writes
-`~/.local/bin/jq` gets that binary executed **by the Runner** on the next `jq` call in the same run —
-turning a write-only agent into RCE without the agent executing anything itself.
+*Residual: the set of changed files is shown, not constrained — N3's stronger half (assert in
+finalize that the committed paths equal the finding's declared `files`) is not implemented, so an
+extra path still ships if the reviewer reads past it. That is a review-attention gap, not an
+evidence gap.*
 
-*Residual: unmitigated; amplifies R8.* Closed by [N4](#n4).
+### R10 — `~/.local/bin` on PATH → write primitive hijacks the Runner <a id="r10"></a>
+The Runner calls `jq`, `git`, `gh`, `python3`, `codemap` **unqualified** throughout (e.g.
+[nightshift.sh:1184,1199,1220](../../bin/nightshift.sh)), and the launcher must put `$HOME/.local/bin`
+on PATH because the agent CLIs live there. Chained with R8: a fix stage that writes `~/.local/bin/jq`
+would get that binary executed **by the Runner** on the next `jq` call in the same run — turning a
+write-only agent into RCE without the agent executing anything itself.
+
+*Partially mitigated by [N4](#n4) (implemented): the launcher now exports
+`PATH=/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$PATH`
+([nightshift-cron.sh:20](../../bin/nightshift-cron.sh)), so a planted `~/.local/bin/jq` — or `git`,
+`python3` — is shadowed by the system copy and never reached.*
+
+*Residual: the reorder protects only tools that also exist in a system dir. Anything resolved solely
+from `~/.local/bin` is still hijackable by a plant of the same name — `gh` is called unqualified
+([nightshift.sh:1107,1139](../../bin/nightshift.sh)) and is named in the launcher as one of the
+tools that may live only there. N4's stronger half (resolve the Runner's tools to absolute paths
+once at start) would close that remainder; [N1](#n1) is what currently keeps the write primitive out
+of `~/.local/bin` in the first place, so this is defense-in-depth behind N1, not the front line.*
 
 ### R11 — Git-confinement layers guard an already-closed door <a id="r11"></a>
 C3 (pre-push) and C4 (PreToolUse guard) only bite if the agent can run `git` / set `GIT_CONFIG_*` —
 but no stage grants `Bash`, so it cannot. The Runner always issues `push -u origin "$branch"` with
 `branch=nightshift/*` ([nightshift.sh:380](../../bin/nightshift.sh)), so even a disabled hook cannot
 redirect the refspec. The two layers are therefore **latent** insurance against a future `Bash`
-grant, not active containment — while the live exposure (R8/R9) has no enforcement layer at all.
+grant, not active containment — the live exposure (R8/R9) was left without one until N1 and N3
+supplied it.
 Not a vulnerability; a mis-allocation of defense effort that the register originally mispresented as
 core containment. C4 also carries an unverified prototype assumption (its PreToolUse I/O contract).
 
@@ -254,10 +276,11 @@ uncategorized in merge-rate breakdowns; and the guard is bypassable with the ove
 ## 5. Recommended / planned mitigations
 
 **Priority order** (risk reduced per unit of effort), revised after the R8–R13 findings:
-[N1](#n1) → [N4](#n4) → [N3](#n3) → [M1](#m1) → [M2](#m2) → [N2](#n2) → [N6](#n6) → [N5](#n5) →
-[M3](#m3) → [M4](#m4) → [N7](#n7)/[M5](#m5). N1+N3+N4 together turn today's "write-only agent = RCE as
-a `docker`/`sudo` account" into "a compromised fix stage is confined to the worktree and fully
-visible to review" — the largest reduction available before the account (M1) and OS-sandbox (M2) work.
+~~[N1](#n1) → [N4](#n4) → [N3](#n3)~~ (all three landed) → [M1](#m1) → [M2](#m2) → [N2](#n2) →
+[N6](#n6) → [N5](#n5) → [M3](#m3) → [M4](#m4) → [N7](#n7)/[M5](#m5). N1+N3+N4 together turned
+"write-only agent = RCE as a `docker`/`sudo` account" into "a compromised fix stage is confined to
+the worktree and fully visible to review" — the largest reduction available before the account (M1)
+and OS-sandbox (M2) work, which are now the head of the queue.
 
 ### M1 — Dedicated unprivileged service account <a id="m1"></a>
 Run nightshift as an account that is **not** in `docker` or `sudo` and cannot read other services'
@@ -297,16 +320,18 @@ relocate `HOOKS_DIR` to a root-owned path. The agent has no `Bash`, so it cannot
 `Write` over an immutable file fails. Backstops R8 even if N1 is bypassed.
 
 ### N3 — Feed the reviewer the full change; refuse hidden files <a id="n3"></a>
-**Closes R9.** Replace `git -C "$wd" diff` ([nightshift.sh:219](../../bin/nightshift.sh)) with
-`git -C "$wd" add -A && git -C "$wd" diff --staged` so review sees exactly what finalize commits.
-Better: in finalize, after `add -A`, assert the changed-file set equals the finding's declared
-file(s) and abandon/flag on any extra path.
+**Closes R9. Implemented.** The review prompt stages the worktree (`git -C "$wd" add -A`) and embeds
+`git -C "$wd" diff --staged` ([nightshift.sh:470-478](../../bin/nightshift.sh)), so review sees
+exactly the index finalize commits ([nightshift.sh:1199](../../bin/nightshift.sh)) — untracked files
+included. *Still open, the stronger half:* in finalize, after `add -A`, assert the changed-file set
+equals the finding's declared file(s) and abandon/flag on any extra path.
 
 ### N4 — Pin the Runner's own tool paths <a id="n4"></a>
-**Closes R10.** Put system dirs before `~/.local/bin` in
-[nightshift-cron.sh:16](../../bin/nightshift-cron.sh), or resolve `jq`/`git`/`gh`/`python3` to
-absolute paths once at Runner start and call via those. Stops a planted binary from hijacking the
-orchestrator.
+**Addresses R10. Partially implemented.** The launcher puts the system dirs ahead of `~/.local/bin`
+([nightshift-cron.sh:20](../../bin/nightshift-cron.sh)), so a plant cannot shadow a Runner tool that
+also exists in `/usr/bin`. *Still open, the remainder:* resolve `jq`/`git`/`gh`/`python3`/`codemap`
+to absolute paths once at Runner start and call via those — the only form that also covers a tool
+resolved solely from `~/.local/bin` (today: `gh`).
 
 ### N5 — Move lock + worktrees to a private dir <a id="n5"></a>
 **Closes R13.** Default `LOCK` and `WORKTREES_DIR` to `${XDG_RUNTIME_DIR:-$HOME/.local/state/nightshift}`
@@ -328,15 +353,17 @@ primary containment.
 
 With C1–C8, the *destructive-git* class (repo destruction, force-push to `main`, auto-merge, push
 outside `nightshift/*`) is structurally blocked. The independent review corrected the rest: **"no
-`Bash`" is not "no code execution."** N1 now neutralises the direct R8 path by confining Claude's
-`Write`/`Edit` tools to the worktree. The material residuals are secret exfiltration (R1), the
-review-evidence gap (R9), and single-tier containment on a `docker`/`sudo` (host-root-capable)
-account (R2); the Runner PATH chain (R10) remains relevant as defense-in-depth if the application
-guard fails. For Codex, workspace sandboxing narrows arbitrary-write exposure, while permitted
-in-worktree commands and the missing per-stage turn cap are adapter-specific residuals.
+`Bash`" is not "no code execution."** The write-primitive chain it exposed is now largely answered in
+code: **N1** confines Claude's `Write`/`Edit` to the worktree (R8), **N3** makes the reviewer's diff
+the staged index finalize commits (R9), and **N4** puts the system dirs ahead of `~/.local/bin` so a
+plant cannot shadow the Runner's own tools (R10, partially — a tool resolved only from `~/.local/bin`
+is still hijackable). The material residuals are therefore secret exfiltration (R1) and single-tier
+containment on a `docker`/`sudo` (host-root-capable) account (R2). For Codex, workspace sandboxing
+narrows arbitrary-write exposure, while permitted in-worktree commands and the missing per-stage turn
+cap are adapter-specific residuals.
 
-Ordered response after the implemented **N1**: **N3** and **N4** close the review-evidence and
-PATH-hijack chains. **M1** (dedicated unprivileged account) then collapses the R2 blast radius. Until
-N3/N4 + M1 are in place, unattended operation on the shared host still carries understood
-exfiltration, review-integrity, and defense-in-depth gaps that the daytime-testing phase is expected
-to keep bounded by attention, not by architecture.
+Ordered response after the implemented **N1/N3/N4**: **M1** (dedicated unprivileged account) collapses
+the R2 blast radius, then **M2** (OS sandbox) closes the R1 exfil chain and R6. Until M1 + M2 are in
+place, unattended operation on the shared host still carries an understood exfiltration gap and
+single-tier containment on an over-privileged account — kept bounded, in the daytime-testing phase,
+by attention rather than by architecture.
