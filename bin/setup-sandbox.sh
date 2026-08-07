@@ -1,11 +1,24 @@
 #!/usr/bin/env bash
 # Create a throwaway target repo (+ a local bare remote) with a planted, obvious
 # improvement, and write a rulebook.yaml pointing nightshift at it. Zero risk to
-# real repos — everything lives under ./sandbox.
+# real repos — everything lives under ./sandbox (or the directory named as $1).
+#
+#   setup-sandbox.sh [dir]    # default: $NIGHTSHIFT_HOME/sandbox
 set -euo pipefail
 
 HOME_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SB="$HOME_DIR/sandbox"
+SB="${1:-$HOME_DIR/sandbox}"
+
+# A caller-named sandbox (schedule.sh dry-run passes a fresh mktemp dir) meets an `rm -rf` two lines
+# down, so a mistyped path would delete an operator's directory. The default path keeps its old
+# behaviour — it is this script's own dir and gets rebuilt on every run — but an explicit one may
+# only be absolute and empty/absent.
+if [ "$#" -gt 0 ]; then
+  case "$SB" in /*) ;; *) echo "sandbox dir must be an absolute path: $SB" >&2; exit 2 ;; esac
+  if [ -n "$(ls -A "$SB" 2>/dev/null)" ]; then
+    echo "refusing to wipe non-empty $SB — name a fresh directory" >&2; exit 2
+  fi
+fi
 
 rm -rf "$SB"
 mkdir -p "$SB"

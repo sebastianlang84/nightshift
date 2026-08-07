@@ -64,10 +64,19 @@ ledgers diverge silently: duplicate branches, broken caps and rotation). See
    bin/schedule.sh enable      # start the nightly timer + enable linger (fires while logged out)
    bin/schedule.sh status      # confirm; also reports any drop-in overrides
    ```
-5. **Prove the wiring** without spending quota:
+5. **Prove the wiring** without spending quota — and without touching the installation:
    ```
-   bin/schedule.sh dry-run     # runs the launcher now with the mock agent
+   bin/schedule.sh dry-run     # the real launcher + orchestrator, mock agent, throwaway sandbox
    ```
+   It builds a disposable sandbox (`bin/setup-sandbox.sh` — a target repo whose `origin` is a local
+   bare remote) under `$TMPDIR` and runs the night against *that*: its own rulebook, state, runs,
+   digests, worktrees, launcher log and flock. So it exercises the whole path, push included, while
+   writing nothing under `NIGHTSHIFT_HOME` — no ledger rows, no `empty` rows that the cadence and the
+   [ADR 0015](adr/0015-recon-reprioritizes-never-excludes.md) exclusion window would later read as a
+   lens having been reviewed, no overwritten digest, and no mock-authored branch on a real `origin`.
+   Your own `rulebook.yaml` is not read by the run; it is parsed read-only first, so a malformed one
+   still fails the dry-run rather than waiting for 04:00. The sandbox path is printed — inspect its
+   digest, then `rm -rf` it.
 
 ### Model and flags (optional, per host)
 
