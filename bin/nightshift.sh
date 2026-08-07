@@ -400,6 +400,35 @@ run_agent() { # stage workdir item_dir
   return "$status"
 }
 
+# ----------------------------------------------------------- commit subject ----
+# A host repo's `commit-msg` gate reads the Conventional Commits type as a CHECKED CLAIM about user
+# visibility — git-workflow's changelog-check.sh demands a CHANGELOG entry for `feat|fix|perf`,
+# exempts `refactor|test|chore|docs|ci|build|style|revert`, and treats an UNPARSEABLE subject as
+# user-visible so a malformed message never becomes a bypass. The fixed `nightshift: ` subject was
+# exactly that unparseable case: every change touching a code-classified file was read as
+# user-visible and blocked for a missing CHANGELOG entry — and the Fix stage could not satisfy the
+# gate by choosing a better subject, because it does not write the subject. (Observed 2026-08-07:
+# pi-ext-auth lost two comment-only `doc` findings that way, and two `bug` fixes on 08-05.)
+#
+# An unrecognised finding type deliberately yields NOTHING here, which restores the old subject and
+# with it the gate's fail-closed default: nightshift must never under-claim its way past a gate.
+commit_type() { # finding_type -> conventional commits type, or empty when unknown
+  case "$1" in
+    bug|typo)                        printf 'fix' ;;
+    doc)                             printf 'docs' ;;
+    convention)                      printf 'chore' ;;
+    cleanup|smell|naming|complexity)  printf 'refactor' ;;
+  esac
+}
+
+# The `nightshift` scope keeps authorship visible in `git log --oneline`, which the old fixed prefix
+# carried and the committer identity alone does not show. A scope is optional in the grammar every
+# such gate parses, so carrying it costs the type nothing.
+commit_subject() { # finding_type summary -> subject line
+  local ct; ct="$(commit_type "$1")"
+  if [ -n "$ct" ]; then printf '%s(nightshift): %s' "$ct" "$2"; else printf 'nightshift: %s' "$2"; fi
+}
+
 stage_prompt() { # stage workdir item_dir -> prompt on stdout
   local stage="$1" wd="$2" id="$3" prompt
   prompt="$(cat "$NIGHTSHIFT_HOME/prompts/$stage.md")
@@ -434,15 +463,34 @@ if it is genuinely ONE coherent, reviewable improvement — never bundle unrelat
     # exists to prevent.
     case "$hooks" in "" ) ;; /* ) ;; * ) hooks="$wd/$hooks" ;; esac
     [ -n "$hooks" ] || hooks="$(git -C "$wd" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)/hooks"
-    [ -f "$hooks/pre-commit" ] && gates="$gates
-- A \`pre-commit\` hook is installed (\`$hooks/pre-commit\`) and runs on the runner's commit. Read it
+    # BOTH message hooks, not just `pre-commit`: a repo that moved its CHANGELOG check to
+    # `commit-msg` (which alone can see the commit type) was reported as ungated, and the Fix stage
+    # was never told about the gate that then rejected its commit. pi-ext-auth is precisely that
+    # repo — its `pre-commit` is a SKILL.md lint and its `commit-msg` is the CHANGELOG gate.
+    for f in pre-commit commit-msg; do
+      [ -f "$hooks/$f" ] && gates="$gates
+- A \`$f\` hook is installed (\`$hooks/$f\`) and runs on the runner's commit. Read it
   if you are unsure what it demands of the files you touched."
-    [ -n "$gates" ] && prompt="$prompt
+    done
+    if [ -n "$gates" ]; then
+      # Name the subject VERBATIM. A hook that reads the commit type decides against this exact
+      # line, and the Fix stage has no other way to know it — left to guess, it reasoned about a
+      # subject it would never get and concluded a gate would pass that then blocked it.
+      local subj
+      subj="$(commit_subject "$(jq -r '.type // "change"' "$id/finding.json" 2>/dev/null || true)" \
+                             "$(jq -r '.summary // ""'   "$id/finding.json" 2>/dev/null || true)")"
+      prompt="$prompt
 
 ## Gates this repo applies to the commit
 The runner commits your working tree exactly as you leave it, with the repo's own hooks active. A
-rejected commit discards the ENTIRE fix — there is no second attempt. Satisfy these as part of the
-change:$gates"
+rejected commit discards the ENTIRE fix — there is no second attempt. You do NOT write the commit
+message and cannot change it; the runner's subject line will be exactly:
+
+    $subj
+
+Judge any hook that reads the subject against THAT line, not against one you would have written.
+Satisfy these as part of the change:$gates"
+    fi
     # A tests.log here means the PREVIOUS iteration of this same loop passed review and then broke
     # the repo's suite (ADR 0022). run_test_gate deletes the file the moment the suite is green, so
     # its presence is always about the attempt that is still in the working tree.
@@ -1275,7 +1323,7 @@ finalize() { # repo worktree item_dir [seq] [base] -> echoes branch name
   # (Observed 2026-08-02: partflow's CHANGELOG pre-commit hook rejected a deps cleanup; the empty
   # branch shipped anyway. `set -e` cannot catch it — finalize runs inside an `if` condition.)
   if ! git -C "$wt" -c user.name=nightshift -c user.email=nightshift@localhost \
-       commit -q -m "nightshift: $(jq -r '.summary' "$id/finding.json")
+       commit -q -m "$(commit_subject "$type" "$(jq -r '.summary' "$id/finding.json")")
 
 $(cat "$id/worknote.md")"; then
     log "  $(basename "$repo"): commit rejected (repo hook, or nothing to commit) — not shipped: $branch"
