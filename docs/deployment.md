@@ -167,6 +167,11 @@ these flags, is what confines the agent (see [`docs/design/risk-analysis.md`](de
 The ledger IS the installation. Back it up / move it with the installation; losing it loses dedup,
 backpressure, and rotation history.
 
+If you redirect state, **export `NIGHTSHIFT_STATE_DIR` in the shell you run the daily commands from
+too** — [`bin/harvest.sh`](../bin/harvest.sh) reads it as well, so `todos`/`close`/`verdict` reach
+the same ledger the night wrote. (It also still accepts a bare `STATE_DIR`, which wins when both are
+set; that is how `bin/nightshift.sh` hands its own run's state dir to the harvest it invokes.)
+
 ## Branch-only operation across Git hosts
 
 The credential-free baseline is **push a branch, nothing else**: Nightshift pushes `nightshift/*`

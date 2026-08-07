@@ -1671,9 +1671,10 @@ main() {
   # dropped) so the morning digest scoreboard is current. Non-fatal — a harvest
   # hiccup must never block the night's work.
   if [ -x "$NIGHTSHIFT_HOME/bin/harvest.sh" ]; then
-    # Pass THIS run's state/ledger/rulebook through: harvest honours STATE_DIR/LEDGER/RULEBOOK, but
-    # nightshift.sh names them NIGHTSHIFT_STATE_DIR/… — without this bridge an isolated run (e.g. an
-    # e2e test with NIGHTSHIFT_STATE_DIR set) would silently reconcile the LIVE ledger instead.
+    # Pass THIS run's state/ledger/rulebook through explicitly: they are resolved here (LEDGER and
+    # RULEBOOK independently of STATE_DIR) and never exported, so without this bridge an isolated
+    # run (e.g. an e2e test) would silently reconcile a different ledger than the one it writes.
+    # harvest.sh reads NIGHTSHIFT_STATE_DIR on its own too; the explicit STATE_DIR below still wins.
     STATE_DIR="$STATE_DIR" LEDGER="$LEDGER" RULEBOOK="$RULEBOOK" \
       "$NIGHTSHIFT_HOME/bin/harvest.sh" >/dev/null 2>&1 || log "harvest: skipped (non-fatal)"
   fi
