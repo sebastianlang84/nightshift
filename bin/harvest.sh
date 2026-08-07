@@ -42,7 +42,14 @@
 set -euo pipefail
 
 NIGHTSHIFT_HOME="${NIGHTSHIFT_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-STATE_DIR="${STATE_DIR:-$NIGHTSHIFT_HOME/state}"
+# Where the ledger lives. `NIGHTSHIFT_STATE_DIR` is the name every other entry point reads
+# (bin/nightshift.sh, bin/setup-sandbox.sh) and the one operators are given as THE override for
+# state/ — so it must land here too: an operator who exports it and then runs the documented
+# `harvest.sh todos`/`close`/`verdict` would otherwise silently read AND WRITE the default ledger
+# rather than their redirected one, with nothing to warn them (the ADR 0017 split-state guard sits
+# in bin/nightshift.sh, not here). The bare `STATE_DIR` still wins: bin/nightshift.sh and the tests
+# hand THIS run's state dir down under that name, and it must beat an exported outer value.
+STATE_DIR="${STATE_DIR:-${NIGHTSHIFT_STATE_DIR:-$NIGHTSHIFT_HOME/state}}"
 LEDGER="${LEDGER:-$STATE_DIR/ledger.jsonl}"
 RULEBOOK="${RULEBOOK:-$NIGHTSHIFT_HOME/rulebook.yaml}"
 [ -f "$RULEBOOK" ] || RULEBOOK="$NIGHTSHIFT_HOME/rulebook.example.yaml"
