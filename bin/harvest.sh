@@ -163,8 +163,14 @@ reconcile() { # repo base branch sha [pr_url]
   fi
   # 4/5. ref on origin -> open; ref gone -> dropped. Distinguish a real 'gone' from a failed
   #      probe: capture ls-remote's exit status separately from its output and fail closed.
-  local refs rc
-  refs="$(git -C "$repo" ls-remote --heads origin "$branch" 2>/dev/null)"; rc=$?
+  #      `|| rc=$?` and not `…)"; rc=$?`: a simple command that is only an assignment carries the
+  #      command substitution's status, so under `set -e` (top of this file) a failing ls-remote
+  #      aborted the shell AT the assignment — `rc=$?` never ran and the skip rung below was dead
+  #      code. One blind probe then killed harvest mid-loop (the caller is a bare `now=$(reconcile
+  #      …)`), leaving the remaining branches unreconciled and the orphan sweep and findings probe
+  #      unrun, all swallowed upstream as "harvest: skipped (non-fatal)".
+  local refs rc=0
+  refs="$(git -C "$repo" ls-remote --heads origin "$branch" 2>/dev/null)" || rc=$?
   [ "$rc" -ne 0 ] && { echo skip; return; }
   [ -n "$refs" ] && { echo open; return; }
   echo dropped
