@@ -36,8 +36,11 @@ set_origin() { git -C "$REPO" remote remove origin 2>/dev/null || true; git -C "
 REPO_PATHS=("$REPO")            # the guard iterates this global (populated by load_rulebook in prod)
 NIGHTSHIFT_HOME="$TMP/home"; mkdir -p "$NIGHTSHIFT_HOME/state"
 
-# runs the guard in a subshell so its `exit 1` doesn't kill the test; echoes "rc=<n>" + any output
-run_guard() { local out rc; out="$( ( guard_state_remote_incoherence ) 2>&1 )"; rc=$?; printf '%s\nrc=%s' "$out" "$rc"; }
+# runs the guard in a subshell so its `exit 1` doesn't kill the test; echoes "rc=<n>" + any output.
+# `|| rc=$?`, never `…)"; rc=$?`: an assignment-only simple command carries the substitution's
+# status, so under this file's `set -e` an aborting guard killed run_guard AT the assignment —
+# rc=$? never ran, nothing was printed, and every rc=1 assertion below was unreachable.
+run_guard() { local out rc=0; out="$( ( guard_state_remote_incoherence ) 2>&1 )" || rc=$?; printf '%s\nrc=%s' "$out" "$rc"; }
 
 # Case 1: non-canonical ledger + NETWORK origin, no override -> must ABORT (rc=1) and name the repo.
 STATE_DIR="$TMP/state"                       # != $NIGHTSHIFT_HOME/state
