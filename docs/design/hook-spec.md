@@ -62,6 +62,11 @@ symlinks in existing prefixes), and denies anything not equal to or strictly ben
 root. The root is the Runner-injected `NIGHTSHIFT_WORKTREE` (primary), else the payload `.cwd`, else
 `$PWD`. Containment is trailing-slash-safe (a prefix-sibling like `…/worktree-evil` is *not* inside).
 
+**The denial itself is built with `jq`,** not string-interpolated: its reason quotes the resolved
+target, i.e. an agent-supplied path, and a quote/backslash/control character in that path would
+otherwise emit malformed JSON from the very call that is supposed to block the write. If `jq` is
+unavailable the guard still denies, with a fixed reason — this path fails closed.
+
 **Matcher.** The guard is registered for `Bash|Write|Edit|MultiEdit|NotebookEdit` — a `matcher:"Bash"`
 alone would never fire on a `Write`, leaving (b) dead.
 
