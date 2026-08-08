@@ -16,8 +16,22 @@ set -euo pipefail
 input="$(cat)"
 
 deny() {
-  # Block the tool call with a reason.
-  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"nightshift: %s"}}\n' "$1"
+  # Block the tool call with a reason. The reason carries an agent-supplied value — the
+  # Layer 2(b) call site embeds the resolved write target — so it MUST be JSON-escaped:
+  # interpolating a path containing a double quote, a backslash or a control character
+  # into a hand-built string literal emits INVALID JSON from the one code path whose job
+  # is to block the call. jq -nc --arg escapes, like every other JSON emitter in the repo.
+  local out
+  if out="$(jq -nc --arg reason "nightshift: $1" \
+      '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$reason}}' \
+      2>/dev/null)"; then
+    printf '%s\n' "$out"
+  else
+    # jq missing or failed: still deny, with a fixed reason that needs no escaping. A
+    # confinement hook fails closed — an unparseable (or absent) response would be a
+    # denial the CLI cannot act on.
+    printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"nightshift: tool call denied by the confinement guard"}}\n'
+  fi
   exit 0
 }
 
