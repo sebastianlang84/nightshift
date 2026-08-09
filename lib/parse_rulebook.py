@@ -5,6 +5,27 @@ Handles exactly the shape we control: top-level `branch_prefix`, a `limits:` map
 and a `repos:` list of `{path, mode}`. Not a general YAML parser on purpose (no deps)."""
 import sys
 
+# Every mapping section's key set is CLOSED: the emitters at the bottom of main() read exactly
+# these keys and nothing else, so a key outside the set can only be a typo — and tolerating one is
+# silent, which is the worst way for governance to fail. `max_open_branchs: 12` leaves the ONLY
+# throughput cap at its default 2; `test-cmd:` on a repo leaves `test_cmd` empty, so that repo ships
+# UNGATED past its ADR 0022 ship gate; `ttl-days:` or a misspelled `enabled` quietly re-enables recon
+# or resets its TTL. Reject the complement instead — the standard `agent:` has always applied.
+LIMIT_KEYS = (
+    "max_open_branches",
+    "max_branches_per_run",
+    "max_fix_iterations",
+    "max_files_per_change",
+    "max_lines_per_change",
+    "max_run_minutes",
+    "test_timeout_seconds",
+    "max_findings_per_item",
+    "max_verifies_per_run",
+)
+RECON_KEYS = ("enabled", "ttl_days")
+AGENT_KEYS = ("claude_model", "codex_model")
+REPO_KEYS = ("path", "mode", "base", "findings", "dimensions", "test_cmd")
+
 
 def val(raw: str) -> str:
     """Take a scalar value, dropping any trailing inline `# comment`."""
@@ -24,6 +45,29 @@ def quoted_val(raw: str) -> str:
             raise SystemExit(f"unterminated quoted value: {s}")
         return s[1:end]
     return val(raw)
+
+
+def put(
+    target: dict[str, str],
+    section: str,
+    s: str,
+    allowed: tuple[str, ...],
+    read=val,
+) -> None:
+    """Record one `key: value` line of a mapping section, refusing anything off its key set.
+
+    A missing colon, an unknown key, or the same key twice are all misconfigs, and every one of
+    them has the same silent outcome if waved through: the knob falls back to the parser's default
+    and the night runs on governance the human did not write. Fail loudly instead."""
+    k, sep, v = s.partition(":")
+    key = k.strip()
+    if not sep:
+        raise SystemExit(f"{section}: expected `key: value`, got: {s}")
+    if key not in allowed:
+        raise SystemExit(f"{section}: unknown key '{key}' (expected one of: {', '.join(allowed)})")
+    if key in target:
+        raise SystemExit(f"{section}: duplicate key '{key}'")
+    target[key] = read(v)
 
 
 def main(path: str) -> None:
@@ -67,27 +111,13 @@ def main(path: str) -> None:
                 elif head == "repos:":
                     section = "repos"
             elif section == "limits":
-                k, _, v = s.partition(":")
-                limits[k.strip()] = val(v)
+                put(limits, "limits", s, LIMIT_KEYS)
             elif section == "recon":
-                k, _, v = s.partition(":")
-                recon[k.strip()] = val(v)
+                put(recon, "recon", s, RECON_KEYS)
             elif section == "agent":
-                # This block decides which model does the work, so every way of getting it subtly
-                # wrong must fail loudly rather than fall through to the CLI default — that silent
-                # fallback is the exact failure this block exists to prevent. A missing colon, an
-                # unknown key (a `claude-model:` typo), or the same key twice are all misconfigs.
-                k, sep, v = s.partition(":")
-                key = k.strip()
-                if not sep:
-                    raise SystemExit(f"agent: expected `key: value`, got: {s}")
-                if key not in ("claude_model", "codex_model"):
-                    raise SystemExit(
-                        f"agent: unknown key '{key}' (expected claude_model or codex_model)"
-                    )
-                if key in agent:
-                    raise SystemExit(f"agent: duplicate key '{key}'")
-                agent[key] = quoted_val(v)
+                # A model id may legitimately be quoted (and contain a `#`), so this section — and
+                # only this one — reads its scalars with quoted_val.
+                put(agent, "agent", s, AGENT_KEYS, quoted_val)
             elif section == "dimensions":
                 if s.startswith("- "):
                     dims.append(val(s[2:]))
@@ -98,11 +128,9 @@ def main(path: str) -> None:
                     cur = {}
                     s = s[2:].strip()
                     if s:
-                        k, _, v = s.partition(":")
-                        cur[k.strip()] = val(v)
+                        put(cur, "repos", s, REPO_KEYS)
                 elif cur is not None:
-                    k, _, v = s.partition(":")
-                    cur[k.strip()] = val(v)
+                    put(cur, "repos", s, REPO_KEYS)
         if cur:
             repos.append(cur)
 
