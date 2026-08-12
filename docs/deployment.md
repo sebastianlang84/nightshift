@@ -42,7 +42,9 @@ ledgers diverge silently: duplicate branches, broken caps and rotation). See
 3. **Write the rulebook.** Copy `rulebook.example.yaml` to `rulebook.yaml` and list the repos this
    installation may touch, their `mode` (`branch-fix` / `findings-only`), optional `base:`,
    `dimensions:`, and the `limits:` block. The parser rejects a malformed rulebook and the run aborts
-   rather than silently servicing a partial fleet.
+   rather than silently servicing a partial fleet. A key it does not recognise counts as malformed:
+   every section takes a closed set of keys, so a typo (`max_open_branchs:`, `test-cmd:`) fails the
+   parse by name instead of dropping that knob and running the night on the default you never wrote.
 
    **Give every `branch-fix` repo a `test_cmd`** ([ADR 0022](adr/0022-a-repos-own-tests-gate-the-ship.md)).
    It is the repo's own suite, run in the worktree just before the commit and *inside* the fix↔review
@@ -217,7 +219,9 @@ never push outside `nightshift/*` (see [`docs/design/hook-spec.md`](design/hook-
 ## Daily operation
 
 - **Morning:** read `digests/<date>.md`; review open branches with `bin/review-branch.sh`; merge or
-  delete. Deleting/merging frees the open-branch cap so the next night resumes.
+  delete. Deleting/merging frees the open-branch cap so the next night resumes. The `next: merge`
+  command deletes the branch as its last step: nothing else does, and a merged-but-undeleted
+  `nightshift/*` ref lingers on origin indefinitely.
 - **Record verdicts** the machine can't derive with `bin/harvest.sh verdict <selector> <verdict>`;
   harvest also reconciles merged/dropped branches automatically each run.
 - **Clear open findings** — the work items nightshift reported but did not fix. A finding has **no

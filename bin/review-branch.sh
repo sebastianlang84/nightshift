@@ -147,13 +147,20 @@ review_branch() { # repo base branchref
   fi
   printf 'VERDICT: %s\n' "$verdict"
   printf 'next:\n'
+  # The merge command deletes the branch itself: nothing else ever does. harvest reconciles a
+  # merged branch to a `merged` verdict and stops there, and the cap counts with `--no-merged`,
+  # so a merged-but-undeleted ref is invisible to both — it simply accumulates on origin until an
+  # operator sweeps it by hand. Only the `reject` path below used to delete anything, which is why
+  # accepted branches were the ones that piled up. A merge that leaves its branch behind is not
+  # finished.
   case "$basebranch" in
     main|master)
-      printf '  merge : git -C %q checkout %s && git -C %q merge --no-ff %q && git -C %q push origin %s\n' \
-        "$repo" "$basebranch" "$repo" "$name" "$repo" "$basebranch" ;;
+      printf '  merge : git -C %q checkout %s && git -C %q merge --no-ff %q && git -C %q push origin %s && git -C %q push origin --delete %q\n' \
+        "$repo" "$basebranch" "$repo" "$name" "$repo" "$basebranch" "$repo" "$name" ;;
     *)
-      printf '  merge : gitflow base (%s) — open a PR: %s -> %s (do not push %s directly)\n' \
-        "$basebranch" "$name" "$basebranch" "$basebranch" ;;
+      printf '  merge : gitflow base (%s) — open a PR: %s -> %s (do not push %s directly);\n' \
+        "$basebranch" "$name" "$basebranch" "$basebranch"
+      printf '          merge it with --delete-branch so the ref does not outlive the merge\n' ;;
   esac
   printf '  reject: git -C %q push origin --delete %q\n' "$repo" "$name"
 
