@@ -89,6 +89,35 @@ reject "an agent key with no colon" 'agent:
   claude_model'                     'agent: expected `key: value`'
 reject "an unterminated quote"      'agent:
   claude_model: "m'                 "unterminated quoted value"
+
+# The same standard applies to EVERY mapping section, not just `agent:`. Each section's key set is
+# closed — the parser reads exactly those keys — so a key outside one is a typo, and the only other
+# outcome is the knob silently reverting to a default the human never wrote: `max_open_branchs: 12`
+# capping throughput at 2, a misspelled `ttl_days` resetting recon's TTL.
+reject "an unknown limits key"      'limits:
+  max_open_branchs: 12'             "limits: unknown key 'max_open_branchs'"
+reject "a duplicated limits key"    'limits:
+  max_open_branches: 2
+  max_open_branches: 9'             "limits: duplicate key 'max_open_branches'"
+reject "a limits key with no colon" 'limits:
+  max_open_branches 2'              'limits: expected `key: value`'
+reject "an unknown recon key"       'recon:
+  ttl-days: 3'                      "recon: unknown key 'ttl-days'"
+
+# A repo entry's keys are closed too, and this is the misconfig with the widest blast radius:
+# `test-cmd:` parsed clean and left `test_cmd` empty, so the repo shipped UNGATED past its
+# ADR 0022 ship gate — the human had written a gate and never got one.
+cat > "$TMP/repo-key.yaml" <<'EOF'
+repos:
+  - path: /srv/example
+    mode: branch-fix
+    test-cmd: bash tests/run.sh
+EOF
+if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/repo-key.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
+  echo "parser accepted an unknown repo key" >&2
+  exit 1
+fi
+grep -q "repos: unknown key 'test-cmd'" "$TMP/stderr"
 # Tabs measure as indent 0, so a tab-indented key reads as a new top-level line and its whole
 # section is silently lost — for `repos:` that would drop the fleet, not just a model.
 printf 'agent:\n\tclaude_model: m\nrepos:\n  - path: /srv/x\n    mode: findings-only\n' > "$TMP/tabs.yaml"
@@ -116,6 +145,14 @@ grep -qx "$(printf 'claude_model\tclaude-opus-5')" "$TMP/stdout" || {
 }
 grep -qx "$(printf 'codex_model\tgpt-5 #2')" "$TMP/stdout" || {
   echo "quoted codex_model with '#' mangled: $(grep codex_model "$TMP/stdout")" >&2
+  exit 1
+}
+
+# The shipped example is the reference rulebook and the fallback every entry point parses when a host
+# has no rulebook.yaml, so it must stay inside those closed key sets: a knob documented there but
+# absent from the parser's sets would now abort every night rather than being quietly ignored.
+python3 "$ROOT/lib/parse_rulebook.py" "$ROOT/rulebook.example.yaml" >/dev/null || {
+  echo "rulebook.example.yaml no longer parses — a documented key is outside the parser's key sets" >&2
   exit 1
 }
 
