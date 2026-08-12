@@ -1166,14 +1166,48 @@ refresh_open_branch_refs() { # reconcile remote-tracking refs once per pass, not
   done
 }
 
-open_branch_count() { # count unmerged nightshift/* from the already-refreshed refs (§3e)
-  local total=0 i path base n
+SETTLED_BRANCHES=""   # newline-separated "<repo>\t<branch>" the ledger has already settled
+
+refresh_settled_branches() { # cache the branches whose latest ledger verdict is terminal
+  # The cap asks "how many decisions am I still waiting on", but `--no-merged` can only answer
+  # "is the sha an ancestor of base" — the same naive test ADR 0016 already replaced inside
+  # harvest, and it is wrong in both directions once the ref outlives the decision:
+  #   * a CLOSED PR whose branch was never deleted is a REJECTION, not a pending decision, yet
+  #     it holds a slot forever (observed 2026-08-13: market-digest's correctness-bug branch,
+  #     rejected 2026-08-09 in favour of a hand-written fix, blocked the whole fleet for four
+  #     nights — 4/4, "0 shipped, 0 considered", three nights in a row);
+  #   * a squash- or rebase-merged branch never becomes an ancestor of base (ADR 0016 §1/§2),
+  #     so a surviving ref counts as open although the change demonstrably landed.
+  # harvest already resolves both via its authoritative ladder and records the verdict. Read that
+  # instead of re-deriving a weaker answer: the ledger is the record (ADR 0021).
+  SETTLED_BRANCHES=""
+  [ -f "$LEDGER" ] || return 0
+  # Terminal set mirrors known_work()'s: merged/resolved/wontfix/dropped all mean "decided".
+  SETTLED_BRANCHES=$(jq -rs '
+    [ .[] | select(.outcome=="verdict" and .branch!=null and .repo!=null) ]
+    | group_by([.repo, .branch]) | map(sort_by(.ts) | last)
+    | map(select(.verdict=="merged" or .verdict=="resolved"
+                 or .verdict=="wontfix" or .verdict=="dropped"))
+    | map(.repo + "\t" + .branch) | join("\n")' "$LEDGER" 2>/dev/null) || SETTLED_BRANCHES=""
+}
+
+branch_is_settled() { # repo branch -> 0 when the ledger's latest verdict for it is terminal
+  [ -n "$SETTLED_BRANCHES" ] || return 1
+  printf '%s\n' "$SETTLED_BRANCHES" | grep -qxF "$1	$2"
+}
+
+open_branch_count() { # count nightshift/* still awaiting the operator's decision (§3e)
+  local total=0 i path base b
   for i in "${!REPO_PATHS[@]}"; do
     path="${REPO_PATHS[$i]}"
     [ -d "$path/.git" ] || continue
     base="$(resolve_base "$path" "${REPO_BASES[$i]:-}")"
-    n=$(git -C "$path" branch -r --no-merged "$base" 2>/dev/null | grep -c "origin/${BRANCH_PREFIX}" || true)
-    total=$((total + n))
+    while read -r b; do
+      b="${b#origin/}"
+      case "$b" in "${BRANCH_PREFIX}"*) ;; *) continue ;; esac
+      branch_is_settled "$path" "$b" && continue
+      total=$((total + 1))
+    done < <(git -C "$path" branch -r --no-merged "$base" --format='%(refname:short)' 2>/dev/null)
   done
   echo "$total"
 }
@@ -1499,7 +1533,7 @@ write_digest() { # made open status [advice]
     echo
     local fcount=0
     [ -f "$LEDGER" ] && fcount=$(jq -s --arg n "$NIGHT" '[.[]|select(.night==$n and .outcome=="finding")]|length' "$LEDGER" 2>/dev/null || echo 0)
-    echo "- agent: \`$NIGHTSHIFT_AGENT\` · shipped this run: ${made} · surfaced (findings): ${fcount} · open (unmerged): ${open}/${MAX_OPEN} (cap)"
+    echo "- agent: \`$NIGHTSHIFT_AGENT\` · shipped this run: ${made} · surfaced (findings): ${fcount} · open (awaiting your verdict): ${open}/${MAX_OPEN} (cap)"
     [ "$status" = budget ] && echo "- **Stopped: time budget exhausted** (\`${MAX_RUN_SECONDS:-?}s\`) — the night ended on the spend cap, not for lack of work."
     # An aborted night must announce itself in the ONE artifact the operator actually reads in the
     # morning. Without this the digest of a credential outage is indistinguishable from a clean
@@ -1729,7 +1763,7 @@ main() {
   # Then close the loop harvest cannot reach: open findings (no branch, no sha). Runs before the
   # night's work so a finding cleared here also drops out of tonight's known_work injection.
   verify_findings
-  log "agent=$NIGHTSHIFT_AGENT prefix=$BRANCH_PREFIX · cap: max $MAX_OPEN unmerged ${BRANCH_PREFIX} branches · run ceiling $MAX_RUN_BRANCHES · fix iters $MAX_FIX_ITER"
+  log "agent=$NIGHTSHIFT_AGENT prefix=$BRANCH_PREFIX · cap: max $MAX_OPEN undecided ${BRANCH_PREFIX} branches · run ceiling $MAX_RUN_BRANCHES · fix iters $MAX_FIX_ITER"
   case "$NIGHTSHIFT_AGENT" in
     claude) log_model_selection claude NIGHTSHIFT_CLAUDE_MODEL "$RB_CLAUDE_MODEL" ;;
     codex)  log_model_selection codex  NIGHTSHIFT_CODEX_MODEL  "$RB_CODEX_MODEL"  ;;
@@ -1739,8 +1773,10 @@ main() {
   # verify_findings above is the night's first agent call of all. If the credentials are already
   # dead there, every later stage is too — skip straight to the digest so the abort is on record.
   if [ -n "$AGENT_FATAL" ]; then stop_reason=agent_unavailable; fi
-  # No per-night production cap. The ONLY cap is the count of OPEN (unmerged) nightshift/* branches:
-  # work continues while fewer than max_open_branches are unmerged; merging/closing frees slots and
+  # No per-night production cap. The ONLY cap is the count of nightshift/* branches still AWAITING
+  # a verdict — not merely unmerged: a branch the ledger records as merged/dropped/resolved/wontfix
+  # is decided and frees its slot even if its ref survives on origin (see refresh_settled_branches).
+  # Work continues while fewer than max_open_branches are undecided; merging/closing frees slots and
   # work resumes; when merging stops it fills to the cap and stops. "All night" continuous operation
   # is bounded by this cap, by running out of new work, and by the subscription 5h window.
   while true; do
@@ -1752,6 +1788,7 @@ main() {
     # Reconcile once at the pass boundary. All inner cap checks reuse this total; successful pushes
     # increment it below, eliminating a fleet-wide network fetch for every repo and finding.
     refresh_open_branch_refs
+    refresh_settled_branches
     open=$(open_branch_count)
     if [ "$open" -ge "$MAX_OPEN" ]; then
       log "open-branch cap reached ($open/$MAX_OPEN) — stop; merge/close some to free slots"
@@ -1964,7 +2001,7 @@ main() {
   done
 
   # A zero-length run (for example an already-exhausted time budget) has not reached a pass boundary.
-  if [ -z "$open" ]; then refresh_open_branch_refs; open=$(open_branch_count); fi
+  if [ -z "$open" ]; then refresh_open_branch_refs; refresh_settled_branches; open=$(open_branch_count); fi
   local advice; advice="$(advise_branches)"
   write_digest "$made" "$open" "$stop_reason" "$advice"
   # An aborted night exits NON-ZERO. `nightshift-cron.sh` records the rc in the day's log and the

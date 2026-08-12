@@ -40,8 +40,11 @@ no terminal verdict. Terminal verdicts (`harvest.sh verdict`): `merged`/`resolve
 `wontfix` **permanently ignores** it; `dropped` (branch deleted unmerged) is a human rejection. A
 single suppression predicate (`_fp_suppressed`) drives all dedup: an identity is suppressed if it is
 permanently ignored *or* has a prior row (in the relevant outcome set) whose content signature still
-matches (see 5). Merged and dropped branches both release open-branch backpressure automatically,
-since the cap counts git reality (unmerged branches), not ledger rows.
+matches (see 5). Merged and dropped branches both release open-branch backpressure automatically.
+(This clause originally read "since the cap counts git reality (unmerged branches), not ledger
+rows" — inverted by [ADR 0025](0025-the-cap-counts-pending-verdicts-not-unmerged-refs.md): the cap
+now reads exactly these verdicts, because a rejected branch whose ref survived held its slot
+forever.)
 
 **4. Exploration receives known work.** Before Explore, the Runner injects the repo's still-open
 findings/branches (`known_work`) into the prompt with an instruction to not re-report them and keep
