@@ -93,12 +93,38 @@ agent:
 | Variable | Adapter | Effect when unset |
 |----------|---------|-------------------|
 | `NIGHTSHIFT_CLAUDE_MODEL` | claude | the rulebook's `agent.claude_model`, else no `--model` |
-| `NIGHTSHIFT_CLAUDE_FLAGS` | claude | `--dangerously-skip-permissions --max-turns 25` |
+| `NIGHTSHIFT_CLAUDE_FLAGS` | claude | `--dangerously-skip-permissions --max-turns 60` |
 | `NIGHTSHIFT_CLAUDE_SETTING_SOURCES` | claude | `--setting-sources project,local` (stage isolation) |
 | `NIGHTSHIFT_CODEX_MODEL` | codex | the rulebook's `agent.codex_model`, else no `--model` |
 | `NIGHTSHIFT_CODEX_REASONING_EFFORT` | codex | the CLI default effort applies |
 | `NIGHTSHIFT_CODEX_STAGE_HOME` | codex | `state/codex-home` (stage isolation); empty = your own `CODEX_HOME` |
 | `NIGHTSHIFT_TEST_TIMEOUT` | all | the rulebook's `limits.test_timeout_seconds`, else 600s per `test_cmd` |
+| `NIGHTSHIFT_TEST_PATH` | all | nothing is prepended, so a `test_cmd` sees the Runner's own PATH |
+
+### The ship gate needs a toolchain the service does not have
+
+A systemd user service starts with a minimal environment, and
+[`bin/nightshift-cron.sh`](../bin/nightshift-cron.sh) deliberately keeps the system directories at
+the front of `PATH` so nothing planted under `$HOME` can shadow the Runner's own `jq`/`git`/`python3`
+calls (R10/N4 in [`docs/design/risk-analysis.md`](design/risk-analysis.md)). A repo's `test_cmd`,
+however, needs the *developer* toolchain — under nvm, `/usr/bin/node` is typically several major
+versions behind, and `pnpm`/`corepack` are not in a system directory at all.
+
+So the launcher resolves the nvm bin directory of the default (else newest) installed Node into
+`NIGHTSHIFT_TEST_PATH`, and the Runner prepends **only that variable, only for the `test_cmd`
+subprocess** — which already executes the repo's own package scripts, so its `PATH` is not a
+boundary. Set the variable yourself to pick a specific toolchain; set it empty to opt out.
+
+Get this wrong and the failure is silent rather than loud: a gate that exits `9`
+(`node: bad option`) or `127` (`pnpm: command not found`) is indistinguishable from a fix that broke
+the suite, so the night discards finished work and reports it as `tests-failed`. Because
+`tests-failed` is deliberately not latched (ADR 0022), the same items are re-attempted and
+re-discarded every night. Verify a new repo's gate under the *service* environment, not an
+interactive shell:
+
+```bash
+systemd-run --user --wait --pipe --same-dir bash -lc 'cd /path/to/repo && <the test_cmd>'
+```
 
 **A machine-wide model pin in `~/.claude/settings.json` does not reach a stage.** Stage isolation
 excludes the whole `user` settings scope (see

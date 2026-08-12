@@ -54,7 +54,7 @@ These are implemented and active today. Each is enforced by mechanism, not by pr
 | C3 | **Push confinement (Layer 1)** | `hooks/pre-push` checks git's already-**resolved** refs: rejects any ref outside `nightshift/*`, plus deletes and tag pushes. Every bypass spelling (`+main`, `:branch`, `--all`, `--mirror`) is resolved by git before the hook sees it. | [pre-push](../../hooks/pre-push) |
 | C4 | **Can't disable Layer 1 (Layer 2, Claude only)** | `core.hooksPath` is injected into both adapters. Claude also has a `PreToolUse` guard denying bypass flags. Codex has no equivalent tool hook here; its sandbox is the primary agent boundary, while the Runner's final push supplies the hook independently. | [pretooluse-guard.sh](../../hooks/pretooluse-guard.sh), [nightshift.sh](../../bin/nightshift.sh) |
 | C5 | **Never merges** | Output is `nightshift/*` branches (+ optional PR on this repo only). A human reviews before any merge. | ADR 0004, `rulebook.yaml` |
-| C6 | **Runaway caps** | Claude has `--max-turns 25` per stage. Both adapters have fix-iteration, open-branch and per-run caps, single-instance `flock`, and the service's wall-clock timeout. Codex currently has no separate per-stage turn cap. | [nightshift.sh](../../bin/nightshift.sh), rulebook, [nightshift-cron.sh](../../bin/nightshift-cron.sh), [nightshift.service](../../scheduler/nightshift.service) |
+| C6 | **Runaway caps** | Claude has `--max-turns 60` per stage. Both adapters have fix-iteration, open-branch and per-run caps, single-instance `flock`, and the service's wall-clock timeout. Codex currently has no separate per-stage turn cap. | [nightshift.sh](../../bin/nightshift.sh), rulebook, [nightshift-cron.sh](../../bin/nightshift-cron.sh), [nightshift.service](../../scheduler/nightshift.service) |
 | C7 | **Report-only for sensitive repos** | `findings-only` mode reports without ever pushing (e.g. llmstack). | `rulebook.yaml` |
 | C8 | **Change-size pressure** | Soft file/line budgets injected into explore/fix prompts (15 files / 400 lines) to keep changes reviewable. | [nightshift.sh:205-207](../../bin/nightshift.sh) |
 
@@ -121,7 +121,7 @@ that should be re-verified against the installed CLI version) — the agent inhe
 the impact is removed by running under a dedicated unprivileged account — [M1](#m1).
 
 ### R3 — `--dangerously-skip-permissions` default everywhere <a id="r3"></a>
-The claude adapter defaults its flags to `--dangerously-skip-permissions --max-turns 25` for **all**
+The claude adapter defaults its flags to `--dangerously-skip-permissions --max-turns 60` for **all**
 runs, not only the sandbox ([nightshift.sh:186](../../bin/nightshift.sh)); the cron path does not
 override `NIGHTSHIFT_CLAUDE_FLAGS`. Defensible only because the `--tools` allowlist (C1) is the true
 containment — but it means command execution has exactly one line of defense, with the permission
