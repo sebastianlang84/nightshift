@@ -88,7 +88,8 @@ rewritten, so the evolution stays traceable.
 
 - **Open-branch cap = the sole throughput cap (backpressure).** `max_open_branches` (default **2**,
   a rulebook knob) = the max number of *unmerged* `nightshift/*` branches allowed to exist at once,
-  across all repos, counted live from the real remote each iteration. It is **not** a per-night
+  across all repos, counted live from the real remote each iteration. ([ADR 0025](0025-the-cap-counts-pending-verdicts-not-unmerged-refs.md)
+  narrows *unmerged* to *undecided*: a ref the ledger records as settled no longer occupies a slot.) It is **not** a per-night
   production count: merging/closing a branch frees a slot and work resumes, so continuous review lets
   it run all night; when the human stops merging it fills to the cap and stops. This one mechanism
   closes three re-review findings at once: **§2d** (litter bounded), **§5** (production self-throttles

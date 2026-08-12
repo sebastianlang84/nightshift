@@ -5,9 +5,10 @@
 branch_prefix: nightshift/
 
 limits:
-  # The ONLY throughput cap: max OPEN (unmerged) nightshift/* branches allowed to exist at once,
-  # across all repos. NOT a per-night count. Merge/close a branch and a slot frees up immediately, so
-  # if you review continuously it runs all night; if you stop, it fills to this many and stops.
+  # The ONLY throughput cap: max nightshift/* branches awaiting YOUR VERDICT at once, across all
+  # repos. NOT a per-night count. Decide a branch — merge it, or close its PR — and the slot frees
+  # up immediately (ADR 0025 reads harvest's verdict, so a rejected branch you never deleted does
+  # not keep blocking). Review continuously and it runs all night; stop, and it fills up and stops.
   max_open_branches: 2
   max_findings_per_item: 1       # N ranked findings explore may emit per repo/pass (ADR 0011). Each
                                  # ships as its OWN branch, so N × branch-fix repos can fill the cap

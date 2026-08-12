@@ -10,8 +10,8 @@ Nightshift's memory is a single append-only ledger (`state/ledger.jsonl`) local 
 
 - **dedup** — `already_done` / `already_acted` / `already_surfaced` skip a finding whose fingerprint
   is already recorded;
-- **backpressure** — the open-branch cap counts unmerged `nightshift/*` branches to decide when to
-  stop;
+- **backpressure** — the open-branch cap counts `nightshift/*` branches still awaiting a verdict to
+  decide when to stop (ADR 0025);
 - **fairness & rotation** — least-recently-serviced repo (ADR 0008) and per-dimension coverage
   (ADR 0010) are computed from ledger timestamps;
 - **harvest** — merge/drop verdicts reconcile against the same ledger.
