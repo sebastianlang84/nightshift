@@ -84,6 +84,13 @@ sees and can re-run. A false negative costs a forged record of a clean fleet, wh
 
 - A credential outage is now loud in all four places an operator might look: the night log, the
   morning digest, the process exit code, and `systemctl --user status`.
+- Three of those four are **per-run**, and the fourth reports only the *last* run. Nothing here
+  survives the next night that completes. Observed 2026-08-08..11: four consecutive nights aborted
+  exactly as designed, and the healthy night of 08-12 turned the unit green again — the outage
+  remained only in the journal and in four digests nobody re-reads. `aborted_streak()` closes that
+  gap by carrying the count into the digest, so the first night to finish after an outage still
+  names how many were lost and when the fleet was last actually serviced. It counts only nights
+  that produced a digest: a missing date is a night that never started, not a failure.
 - The rest of the fleet is *not* serviced once the agent is known dead. That is intended — those
   stages would fail identically, and each one would write another false record.
 - The classification is a **heuristic over CLI output**, not a contract. Both CLIs are free to
