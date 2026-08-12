@@ -611,6 +611,12 @@ mock_explore() { # workdir item_dir — emits the v2 container {found, findings:
   [ -f "$wd/NOSCOPE" ] && scope=out_of_scope
   jq -nc --argjson f "$arr" --arg scope "$scope" \
     '{found:($f|length>0),findings:$f} + (if ($f|length>0) then {} else {scope:$scope} end)' > "$id/finding.json"
+  # A stage that FAILS is not the same as a stage that found nothing, and a stage can fail after
+  # having written a usable verdict — the claude CLI's `--max-turns` ceiling is the live case for both.
+  # The sentinel is the exit code itself (env, not a file in the worktree) so a test can reach either
+  # half of the Runner's response: with findings on disk it must keep them, without it must record no
+  # verdict at all. finding.json is written first on purpose, exactly as the failing case leaves it.
+  return "${NIGHTSHIFT_MOCK_EXPLORE_RC:-0}"
 }
 mock_fix() { # workdir item_dir — applies the fix for THIS finding (dispatched on .file)
   local wd="$1" id="$2" file
@@ -685,7 +691,12 @@ mock_recon() { # workdir item_dir — deterministic yield straight from recon_si
 # confinement via hooks/pre-push holds regardless of Claude's permission mode).
 claude_run() { # stage workdir item_dir
   local stage="$1" wd="$2" id="$3" prompt out model
-  local flags="${NIGHTSHIFT_CLAUDE_FLAGS:---dangerously-skip-permissions --max-turns 25}"
+  # --max-turns is the C6 runaway cap (docs/design/risk-analysis.md), not a budget: the spend cap and
+  # the wall-clock bound are what limit cost. It was 25, which Explore reached and died on for 5 of 26
+  # items on 2026-08-12 — each after spending its full ~$2 of tokens and returning nothing. A ceiling
+  # that is hit routinely is the wrong ceiling: 60 still hard-stops a loop, but leaves a navigating
+  # stage room to finish. Every abort is now visible in the digest rather than read as "found nothing".
+  local flags="${NIGHTSHIFT_CLAUDE_FLAGS:---dangerously-skip-permissions --max-turns 60}"
   # Which model this stage runs on. Precedence: the env var if SET (an explicitly empty value is the
   # escape hatch — pass no --model), else the rulebook's `agent.claude_model` (ADR 0020), else
   # nothing and the CLI resolves its own default. The rulebook layer matters because stage isolation
@@ -1514,6 +1525,12 @@ write_digest() { # made open status [advice]
       runs=$(grep -c "\"night\":\"$NIGHT\"" "$RUNSLOG" || true)
       dur=$(jq -s --arg n "$NIGHT" '[.[]|select(.night==$n)|.duration_s]|add // 0' "$RUNSLOG")
       echo "- runs tonight: ${runs} stage-invocations, ${dur}s total"
+      # Stages that never finished, counted from the exit codes runs.jsonl has always recorded but
+      # nothing ever read back. They cost real tokens and produce no verdict, so the morning must see
+      # them next to the shipped count instead of having to notice their absence.
+      local nfail
+      nfail=$(jq -s --arg n "$NIGHT" '[.[]|select(.night==$n and .exit!=0)]|length' "$RUNSLOG" 2>/dev/null || echo 0)
+      [ "${nfail:-0}" -gt 0 ] && echo "- **${nfail} stage-invocation(s) did not complete** — those lenses recorded no verdict and did not advance; grep the night log for \`FAILED\`."
     fi
     # Harvest scoreboard (all-time, from bin/harvest verdict events): the human
     # feedback loop made visible. A branch with no terminal verdict counts as open.
@@ -1740,7 +1757,7 @@ main() {
     codex)  log_model_selection codex  NIGHTSHIFT_CODEX_MODEL  "$RB_CODEX_MODEL"  ;;
   esac
 
-  local made=0 considered=0 findings=0 repo mode cfgbase id fp fnj iter verdict wt base b summary open="" pass=0 progress ship_progress stop_reason=ok disp rfind farr n_find k fd dim
+  local made=0 considered=0 findings=0 repo mode cfgbase id fp fnj iter verdict wt base b summary open="" pass=0 progress ship_progress stop_reason=ok disp rfind farr n_find k fd dim explore_rc n_partial
   # verify_findings above is the night's first agent call of all. If the credentials are already
   # dead there, every later stage is too — skip straight to the digest so the abort is on record.
   if [ -n "$AGENT_FATAL" ]; then stop_reason=agent_unavailable; fi
@@ -1813,13 +1830,35 @@ main() {
     # spend its findings budget re-reporting an item the Runner would only suppress.
     NIGHTSHIFT_KNOWN_WORK="$(known_work "$repo")"; export NIGHTSHIFT_KNOWN_WORK
     log "  $(basename "$repo") [$mode]: lens=${dim:-none} · budget=$rfind"
-    run_agent explore "$wt" "$id" || true
+    explore_rc=0
+    run_agent explore "$wt" "$id" || explore_rc=$?
     # Bail out BEFORE anything derived from this stage is recorded. A dead agent must not advance the
     # dimension rotation, must not count as `considered`, and above all must not append the `empty`
     # ledger row below — that row is the fleet's memory of "this lens was clean on this night".
     if [ -n "$AGENT_FATAL" ]; then
       remove_worktree "$repo" "$wt"
       stop_reason=agent_unavailable; break
+    fi
+    # An Explore that could not run to COMPLETION is not evidence about this repo either, and the
+    # same three artifacts are at stake: the `empty` ledger row (which ADR 0023 lets the fleet trust
+    # as "this lens was clean here"), the scan marker that rotates the lens onward, and the
+    # `considered` count. A credential failure is only the loudest way to lose a stage; the turn
+    # ceiling is the quiet one. Observed 2026-08-12: five of 26 items ended in the claude CLI's
+    # `error_max_turns` after ~$2 of tokens each, and every one was logged as "nothing worth doing"
+    # and stamped as serviced — so the coverage matrix reported those lenses as freshly reviewed.
+    #
+    # Findings that DID land are kept: a stage can hit the ceiling after writing a usable verdict,
+    # and throwing that away would be a second, self-inflicted loss.
+    if [ "$explore_rc" -ne 0 ]; then
+      n_partial=$(jq -c 'if (.findings|type)=="array" then (.findings|length)
+                         elif (.found==true) then 1 else 0 end' "$id/finding.json" 2>/dev/null || echo 0)
+      case "$n_partial" in ''|*[!0-9]*) n_partial=0 ;; esac
+      if [ "$n_partial" -eq 0 ]; then
+        remove_worktree "$repo" "$wt"
+        log "  $(basename "$repo") [$mode]: explore did not complete (exit $explore_rc) — no verdict recorded for lens=${dim:-none}, rotation not advanced"
+        continue
+      fi
+      log "  $(basename "$repo"): explore exited $explore_rc but left $n_partial finding(s) — continuing with those"
     fi
     considered=$((considered + 1))
     # Mark this (repo,dim) as serviced NOW — regardless of what Explore found — so the rotation
