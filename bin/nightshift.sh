@@ -1282,7 +1282,12 @@ run_test_gate() { # repo worktree item_dir -> 0 pass/ungated, 1 fail; writes ite
   # Runs in the WORKTREE, not the repo — the worktree is what carries the fix and what is about to
   # be committed. `timeout` bounds a hanging suite so it cannot eat the night.
   # `|| trc=$?` and not `if ! …`: inside an `if !` body `$?` is the negation's 0, not the suite's.
-  ( cd "$wt" && timeout "$TEST_TIMEOUT" bash -c "$tcmd" ) >"$id/tests.log" 2>&1 || trc=$?
+  # NIGHTSHIFT_TEST_PATH is the developer toolchain (node/npm/pnpm) the repo's own suite needs but
+  # that a systemd user service does not get — bin/nightshift-cron.sh explains why it is prepended
+  # HERE and nowhere else: the Runner's own unqualified jq/git/python3 calls must keep resolving to
+  # the system dirs (R10/N4), while this subprocess already runs the repo's package scripts anyway.
+  ( cd "$wt" && export PATH="${NIGHTSHIFT_TEST_PATH:+$NIGHTSHIFT_TEST_PATH:}$PATH" \
+    && timeout "$TEST_TIMEOUT" bash -c "$tcmd" ) >"$id/tests.log" 2>&1 || trc=$?
   if [ "$trc" -ne 0 ]; then
     [ "$trc" -eq 124 ] && log "  $(basename "$repo"): test gate TIMED OUT after ${TEST_TIMEOUT}s"
     log "  $(basename "$repo"): test gate failed (rc=$trc) — see $id/tests.log"
