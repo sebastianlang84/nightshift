@@ -36,8 +36,9 @@ Then look at `digests/<date>.md`, `state/ledger.jsonl`, `state/runs.jsonl`, and 
 - **The git-confinement hook (§2a, `hook-spec.md`):** `hooks/pre-push` rejects pushes to `main`,
   `+main` (force), `:branch` (delete), and tags — while allowing `nightshift/*`. It checks git's
   *resolved* refs, so the bypass spellings are caught.
-- **Dedup (§1.7):** a finding already in the ledger (by `file:type:line-window` fingerprint) is
-  skipped on the next night — the anti-nag mechanism.
+- **Dedup (§1.7):** a finding already in the ledger (by the Runner-canonical
+  `sorted(files):type:symbol` fingerprint — line numbers excluded, ADR 0014) is skipped on the next
+  night — the anti-nag mechanism.
 - **Caps:** the global `max_open_branches` backpressure (counted from real remote branches,
   reconciling against reality, §3e) is the sole throughput governor (ADR 0004). Two hard backstops
   sit under it, both rulebook-configurable (ADR 0005): `max_branches_per_run` (per-run runaway

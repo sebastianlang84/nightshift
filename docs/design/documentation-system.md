@@ -36,7 +36,8 @@ one). Clean split: target repos carry *output*, the control repo carries *record
 rulebook.yaml              # governance: allowed repos, per-repo mode, limits — HUMAN writes
 state/
   ledger.jsonl             # append-only: every work-item outcome (incl. outcome: abandoned|deferred
-                           #   + finding fingerprint = file+type+line-window), all nights — SINGLE TRUTH
+                           #   + finding fingerprint = sorted(files):type:symbol, ADR 0014 — line
+                           #   numbers excluded), all nights — SINGLE TRUTH
   runs.jsonl               # append-only telemetry: one line per stage invocation — RUNNER writes
 runs/<date>/<item-id>/     # ephemeral per-night hand-off (archived after the night)
   finding.json             #   Explore writes

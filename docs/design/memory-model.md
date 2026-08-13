@@ -4,7 +4,8 @@
 > The two-tier split (episodic + semantic/working memory), reflect/compaction, and the self-authored
 > backlog below are **cut from v1**. v1 memory is a single central append-only `ledger.jsonl` (per-repo
 > views *derived*, never stored); the "abandoned" set is folded into the ledger as `outcome: abandoned`
-> rows carrying a finding fingerprint (file + issue-type + line-window), not a separate `abandoned.jsonl`.
+> rows carrying a finding fingerprint (`sorted(files) : type : symbol`, line numbers excluded — see
+> [ADR 0014](../adr/0014-finding-identity-and-lifecycle.md)), not a separate `abandoned.jsonl`.
 > Kept for history.
 
 - Status: **idea-stage, not decided.** Captures the 2026-07-08 discussion for review.
