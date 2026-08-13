@@ -157,3 +157,32 @@ python3 "$ROOT/lib/parse_rulebook.py" "$ROOT/rulebook.example.yaml" >/dev/null |
 }
 
 echo "test-rulebook-validation: ok"
+
+# A typo'd mode used to drop the repo from the night silently: select_order() skipped any mode it
+# did not recognise without logging, so the operator's only symptom was a repo that stopped
+# appearing in digests. Closed key sets never covered the mode VALUE — now they do.
+cat > "$TMP/rulebook-mode.yaml" <<'YAML'
+repos:
+  - path: /srv/example
+    mode: brnach-fix
+YAML
+
+if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/rulebook-mode.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
+  echo "parser accepted an unknown repo mode" >&2
+  exit 1
+fi
+grep -q "unknown mode 'brnach-fix'" "$TMP/stderr"
+
+# Both implemented modes must still parse.
+cat > "$TMP/rulebook-mode-ok.yaml" <<'YAML'
+repos:
+  - path: /srv/a
+    mode: branch-fix
+  - path: /srv/b
+    mode: findings-only
+  - path: /srv/c
+YAML
+python3 "$ROOT/lib/parse_rulebook.py" "$TMP/rulebook-mode-ok.yaml" >"$TMP/stdout" 2>"$TMP/stderr"
+[ "$(grep -c '^repo' "$TMP/stdout")" = 3 ] || { echo "valid modes rejected" >&2; exit 1; }
+# The default for an omitted mode is findings-only and must stay valid.
+grep -q "path=/srv/c	mode=findings-only" "$TMP/stdout"

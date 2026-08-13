@@ -921,7 +921,13 @@ select_order() { # emit "path<TAB>mode<TAB>base", least-recently-serviced repo f
   local i path mode base ct st
   for i in "${!REPO_PATHS[@]}"; do
     path="${REPO_PATHS[$i]}"; mode="${REPO_MODES[$i]}"; base="${REPO_BASES[$i]:-}"
-    case "$mode" in branch-fix|findings-only) ;; *) continue ;; esac
+    # The parser rejects an unknown mode outright, so this is defence in depth — but it must still
+    # SAY something. A bare `continue` here is what made a typo'd mode invisible: the repo vanished
+    # from the night with no line in the log and no entry in the digest.
+    case "$mode" in
+      branch-fix|findings-only) ;;
+      *) log "skip $path (unknown mode '$mode' — the rulebook parser should have refused this)"; continue ;;
+    esac
     [ -d "$path/.git" ] || { log "skip $path (not a git repo)"; continue; }
     ct=$(git -C "$path" log -1 --format=%ct 2>/dev/null || echo 0)   # human commit recency
     st=$(last_serviced_epoch "$path")                                # nightshift last touched
