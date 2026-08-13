@@ -102,6 +102,8 @@ rewritten, so the evolution stays traceable.
 - **Finding-identity survives and is still required (§1.7).** The branch cap governs *throughput*;
   it does not prevent *repetition*. A crude finding-identity rule (e.g. file path + finding type +
   line-window) is needed by night two so a human-rejected (deleted) branch is not re-proposed.
+  ([ADR 0014](0014-finding-identity-and-lifecycle.md) supplies that rule and drops the line-window
+  from it — see the annotation on the §1.7 resolution below.)
 - **Branch-only is now mechanically enforced (§2a) → [`hook-spec.md`](../design/hook-spec.md).**
   A git `pre-push` hook checks the *resolved* refs (immune to the `+`/`:`/`--all`/`--mirror`
   spellings) and rejects anything outside `refs/heads/<branch_prefix>*`, plus deletes and tags; a
@@ -124,6 +126,10 @@ rewritten, so the evolution stays traceable.
 - **Finding-identity rule (§1.7 resolved).** Two findings are "the same" if they share **file +
   issue-type + line-window** (not prose wording). This fingerprint is stored *in the ledger row*, so
   an abandoned/rejected finding is not re-proposed.
+  ([ADR 0014](0014-finding-identity-and-lifecycle.md) replaced the line-window with a semantic
+  anchor: identity is `sorted(files) : normalized(type) : symbol` — else a normalized snippet —
+  computed by the Runner's `finding_fingerprint`, which excludes line numbers by construction,
+  because they drift under any edit above the finding. Ledger-row storage is unchanged.)
 - **Ledger ownership gaps (§3a–c) — prototype defaults.** (a) No separate `abandoned.jsonl`: an
   abandoned finding is a `ledger.jsonl` row with `outcome: abandoned|deferred` + the fingerprint;
   Select filters the ledger (resolves the dual-write). (b) The distilled/"already-done-here" views
