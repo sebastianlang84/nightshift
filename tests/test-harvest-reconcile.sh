@@ -105,10 +105,13 @@ dimensions:
 repos:
   - path: $TMP/repoA
     mode: branch-fix
+    test_cmd: true
   - path: $TMP/repoB
     mode: branch-fix
+    test_cmd: true
   - path: $TMP/repoC
     mode: branch-fix
+    test_cmd: true
 EOF
 
 ship() { # repo branch sha

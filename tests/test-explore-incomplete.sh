@@ -47,9 +47,11 @@ dimensions:
 repos:
   - path: $d/repo-a
     mode: branch-fix
+    test_cmd: true
     base: main
   - path: $d/repo-b
     mode: branch-fix
+    test_cmd: true
     base: main
 EOF
 }

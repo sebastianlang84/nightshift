@@ -33,6 +33,7 @@ dimensions:
 repos:
   - path: $TMP/repo
     mode: branch-fix
+    test_cmd: true
     findings: 2
 EOF
 

@@ -67,6 +67,7 @@ dimensions:
 repos:
   - path: $BTMP/repo
     mode: branch-fix
+    test_cmd: true
 EOF
 brun() {
   RULEBOOK="$BTMP/rulebook.yaml" NIGHTSHIFT_AGENT=mock NIGHTSHIFT_CODEMAP=0 NIGHTSHIFT_OPEN_PR=0 \

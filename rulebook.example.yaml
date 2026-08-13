@@ -30,6 +30,13 @@ limits:
                                  # Omit = no time cap. Env override (seconds): NIGHTSHIFT_MAX_RUN_SECONDS.
   test_timeout_seconds: 600      # HARD ceiling for ONE repo's `test_cmd` ship gate (ADR 0022), so a
                                  # hanging suite cannot eat the night. Env override: NIGHTSHIFT_TEST_TIMEOUT.
+                                 # Doubles as the gate's per-process CPU-seconds cap (ADR 0026).
+  test_memory_mb: 4096           # Gate sandbox memory ceiling (ADR 0026), as RLIMIT_AS — ADDRESS
+                                 # SPACE, not resident memory, so keep it generous: a modern Node or
+                                 # JVM reserves gigabytes it never touches. 0 = no cap.
+  test_max_procs: 2048           # Gate sandbox process ceiling (ADR 0026), as RLIMIT_NPROC — a
+                                 # fork-bomb bound. The kernel charges it to the ACCOUNT, not to the
+                                 # sandbox, so keep it well above the host's idle count. 0 = no cap.
 
 # Which MODEL each adapter runs its stages on (ADR 0020). Declare it here, not in the CLI's own
 # config: stage isolation (ADR 0019) drops the CLI's `user` settings scope, so a machine-wide pin in
@@ -75,14 +82,21 @@ repos:
   #                              # off the integration branch, not production `main`.
   #   findings: 5                # OPTIONAL per-repo override of max_findings_per_item
   #   dimensions: security,infra,docs  # OPTIONAL per-repo lens set (comma-separated); beats the global list
-  #   test_cmd: uv run pytest -q # OPTIONAL ship gate (ADR 0022): the repo's own suite, run in the
-  #                              # WORKTREE right before the commit, INSIDE the fix<->review loop.
-  #                              # A red suite is a revision request, not a death sentence: the Fix
-  #                              # stage gets the failing output back and repairs its own regression,
-  #                              # up to max_fix_iterations. Only an item still red after those is
-  #                              # refused (ledger `tests-failed`, no branch) — and the finding stays
-  #                              # unlatched, so a later night may retry it. Omit and the repo ships
-  #                              # UNGATED — the Review stage proves the finding is fixed, never that
-  #                              # nothing else broke. Keep it FAST: it runs once per shipped finding
-  #                              # and up to max_fix_iterations times for one that keeps breaking.
+  #   test_net: false            # OPTIONAL (ADR 0026): network egress for THIS repo's gate sandbox.
+  #                              # Off by default, and off is what you want unless the suite installs
+  #                              # dependencies as it runs (`npm ci`, `uv run --with-requirements`).
+  #                              # Even with it on the sandbox holds no credentials, so the channel
+  #                              # carries worktree content, not your SSH key — but it IS a channel.
+  #   test_cmd: uv run pytest -q # REQUIRED for branch-fix (ADR 0022/0026): the repo's own suite, run
+  #                              # in a disposable bwrap sandbox over the WORKTREE right before the
+  #                              # commit, INSIDE the fix<->review loop. A red suite is a revision
+  #                              # request, not a death sentence: the Fix stage gets the failing
+  #                              # output back and repairs its own regression, up to
+  #                              # max_fix_iterations. Only an item still red after those is refused
+  #                              # (ledger `tests-failed`, no branch) — and the finding stays
+  #                              # unlatched, so a later night may retry it. A repo with no suite to
+  #                              # declare belongs in `findings-only`: the parse ABORTS on a
+  #                              # branch-fix repo without this key rather than ship ungated.
+  #                              # Keep it FAST: it runs once per shipped finding and up to
+  #                              # max_fix_iterations times for one that keeps breaking.
   #                              # Must be one line; no tabs. Runs under `bash -c` in the worktree.

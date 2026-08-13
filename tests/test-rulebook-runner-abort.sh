@@ -32,8 +32,10 @@ dimensions:
 repos:
   - path: $TMP/repo1
     mode: branch-fix
+    test_cmd: true
   - path: /srv/second
     mode: branch-fix
+    test_cmd: true
     findings: nope
   - path: /srv/third
     mode: findings-only

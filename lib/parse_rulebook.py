@@ -19,12 +19,15 @@ LIMIT_KEYS = (
     "max_lines_per_change",
     "max_run_minutes",
     "test_timeout_seconds",
+    "test_memory_mb",
+    "test_max_procs",
     "max_findings_per_item",
     "max_verifies_per_run",
 )
 RECON_KEYS = ("enabled", "ttl_days")
 AGENT_KEYS = ("claude_model", "codex_model")
-REPO_KEYS = ("path", "mode", "base", "findings", "dimensions", "test_cmd")
+# `test_cmd` MUST stay last — see the emitter at the bottom of main(). A new field goes before it.
+REPO_KEYS = ("path", "mode", "base", "findings", "dimensions", "test_net", "test_cmd")
 # The modes the Runner actually implements. A repo whose mode is not in here is a typo, not a
 # feature request — see the validation below for why that must abort rather than be skipped.
 REPO_MODES = ("findings-only", "branch-fix")
@@ -178,6 +181,19 @@ def main(path: str) -> None:
     if not tts.isdecimal() or int(tts) < 1:
         raise SystemExit("limits.test_timeout_seconds must be a positive integer")
     print(f"test_timeout_seconds\t{tts}")
+    # Resource ceilings for the sandboxed gate (ADR 0026), applied as rlimits inside the sandbox.
+    # `test_memory_mb` is RLIMIT_AS — ADDRESS SPACE, not RSS, so it must stay generous: a modern
+    # Node or JVM reserves gigabytes of virtual memory it never touches. 0 = no address-space cap.
+    tmb = limits.get("test_memory_mb", "4096")
+    if not tmb.isdecimal():
+        raise SystemExit("limits.test_memory_mb must be a non-negative integer")
+    print(f"test_memory_mb\t{tmb}")
+    # RLIMIT_NPROC. The kernel charges this to the ACCOUNT, not to the sandbox, so a value below the
+    # host's idle process count makes every gate fail to fork. 0 = no process cap.
+    tmp_ = limits.get("test_max_procs", "2048")
+    if not tmp_.isdecimal():
+        raise SystemExit("limits.test_max_procs must be a non-negative integer")
+    print(f"test_max_procs\t{tmp_}")
     # Findings emitted per repo per pass. Default 1 keeps a rulebook that omits the key at the
     # pre-v2 single-finding behavior; the live rulebook sets it explicitly (ADR 0011).
     # A hand-set 0 forces n_find=0 in the Runner (MAX_FINDINGS=0 → repo_findings 0 → the
@@ -245,13 +261,31 @@ def main(path: str) -> None:
                 f"repo {r.get('path', '')}: unknown mode {mode!r} — "
                 f"expected one of {', '.join(sorted(REPO_MODES))}"
             )
-        # test_cmd is optional: empty means "no ship gate" (ADR 0022). It rides the same TSV as
-        # every other repo field and MUST stay last — a command legitimately contains spaces, and
-        # bash's `read` soaks the remainder into the final variable. A tab would split it in two.
+        # test_cmd MUST stay last on the row — a command legitimately contains spaces, and bash's
+        # `read` soaks the remainder into the final variable. A tab would split it in two.
         test_cmd = r.get("test_cmd", "")
         if "\t" in test_cmd:
             raise SystemExit(
                 f"repo {r.get('path', '')}: test_cmd must not contain a tab"
+            )
+        # ADR 0026 closes the ungated ship path that ADR 0022 §4 left open. A `branch-fix` repo
+        # pushes machine-written code that a human is invited to merge, and the Review stage only
+        # ever proves the FINDING is fixed — never that nothing else broke. Shipping with no suite
+        # at all was a silent gap: `shipping UNGATED` scrolled past in a log nobody reads at 04:00.
+        # A repo with no runnable suite is not a repo nightshift may write branches for; say so with
+        # `mode: findings-only`, which reports without ever pushing. Refuse the silence instead.
+        if mode == "branch-fix" and not test_cmd:
+            raise SystemExit(
+                f"repo {r.get('path', '')}: mode branch-fix requires a test_cmd (ADR 0026) — "
+                "give the repo its ship gate, or set mode: findings-only"
+            )
+        # Whether that gate's sandbox gets network egress (ADR 0026). Default false: `npm ci` and
+        # `uv run --with-requirements` need it, most suites do not, and the flag makes the repos
+        # that do an explicit, per-repo host decision rather than a fleet-wide default.
+        test_net = r.get("test_net", "false")
+        if test_net not in ("true", "false"):
+            raise SystemExit(
+                f"repo {r.get('path', '')}: test_net must be true or false, got {test_net!r}"
             )
         print(
             "repo"
@@ -260,6 +294,7 @@ def main(path: str) -> None:
             f"\tbase={r.get('base', '')}"
             f"\tfindings={findings}"
             f"\tdimensions={r.get('dimensions', '')}"
+            f"\ttest_net={test_net}"
             f"\ttest_cmd={test_cmd}"
         )
 

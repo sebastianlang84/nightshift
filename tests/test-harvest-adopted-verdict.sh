@@ -54,6 +54,7 @@ dimensions:
 repos:
   - path: $TMP/repo
     mode: branch-fix
+    test_cmd: true
 EOF
 
 run() { STATE_DIR="$TMP/state" LEDGER="$LEDGER" RULEBOOK="$TMP/rulebook.yaml" bash "$ROOT/bin/harvest.sh"; }

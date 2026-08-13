@@ -10,6 +10,10 @@
   materially revised §2 and the §6 residual statement below.
 - Re-statused 2026-08-06 against the runner: [N3](#n3) and [N4](#n4) had landed in code while the
   register still carried [R9](#r9)/[R10](#r10) as **Open** and both mitigations as future work.
+- Second independent adversarial pass, cross-vendor (gpt-5.6-sol, 2026-08-14). Its top finding was
+  [R15](#r15): the register tracked what the *agent* may execute and never asked what the **Runner**
+  executes on its behalf — the ADR 0022 ship gate ran candidate-authored `package.json` lifecycle
+  scripts unconfined. Closed by [N8](#n8)/[C9](#2-containment-in-place).
 
 Read alongside: [hook-spec.md](hook-spec.md) (git confinement), [autonomy-and-shutoff.md](autonomy-and-shutoff.md)
 (kill-switch design, not yet built), [constitution-and-rulebook.md](constitution-and-rulebook.md),
@@ -57,6 +61,7 @@ These are implemented and active today. Each is enforced by mechanism, not by pr
 | C6 | **Runaway caps** | Claude has `--max-turns 60` per stage. Both adapters have fix-iteration, open-branch and per-run caps, single-instance `flock`, and the service's wall-clock timeout. Codex currently has no separate per-stage turn cap. | [nightshift.sh](../../bin/nightshift.sh), rulebook, [nightshift-cron.sh](../../bin/nightshift-cron.sh), [nightshift.service](../../scheduler/nightshift.service) |
 | C7 | **Report-only for sensitive repos** | `findings-only` mode reports without ever pushing (e.g. llmstack). | `rulebook.yaml` |
 | C8 | **Change-size pressure** | Soft file/line budgets injected into explore/fix prompts (15 files / 400 lines) to keep changes reviewable. | [nightshift.sh:205-207](../../bin/nightshift.sh) |
+| C9 | **Ship-gate sandbox** | The one component that deliberately *executes* candidate content runs under `bwrap`: no `$HOME`, `/etc` by allowlist, no docker socket, no network unless the repo opts in, allowlisted environment, writable only the worktree + a throwaway HOME, rlimits. No sandbox ⇒ no ship. | `build_test_sandbox`/`run_test_gate` in [nightshift.sh](../../bin/nightshift.sh), ADR 0026 |
 
 **Consequence — and its limit.** The *destructive-git* class is structurally blocked: no merge, no
 push outside `nightshift/*`, no direct repo access. But "no `Bash`" was **over-read** in the first
@@ -79,6 +84,7 @@ Severity = impact × likelihood given the controls above. Status: **Open** / **P
 
 | ID | Risk | Severity | Status |
 |----|------|----------|--------|
+| [R15](#r15) | The **ship gate executes** candidate-controlled repo content (`npm ci` lifecycle scripts) as `llmadmin` | **High** | **Mitigated** |
 | [R8](#r8) | Write/Edit accept **absolute paths** → code execution as `llmadmin` with no `Bash` | **High** | **Mitigated** |
 | [R1](#r1) | Secret exfiltration via prompt-injection → commit content → pushed branch | **High** | **Open** |
 | [R9](#r9) | New **untracked** files bypass the review evidence chain, then get committed | **High** | **Mitigated** |
@@ -271,16 +277,45 @@ Two-layer mitigation:
 *Residual: adopted rows carry no dimension/type/proof provenance (genuinely unknown), so they are
 uncategorized in merge-rate breakdowns; and the guard is bypassable with the override flag.*
 
+### R15 — the ship gate executes candidate-controlled repository content <a id="r15"></a>
+Named the single highest-priority finding by an independent cross-vendor architecture review
+(gpt-5.6-sol, 2026-08-14). `run_test_gate` (ADR 0022) exists to run the target repo's **own** suite
+against the worktree the Fix stage just wrote, and it did so through an unsandboxed `bash -c` as
+`llmadmin`. For a JS repo the declared command is `npm ci && npm test`, which executes `preinstall`
+/ `prepare` / `pretest` lifecycle scripts out of a `package.json` the agent may have modified.
+
+That inverted the whole containment story. C1 removes `Bash` from every stage; N1 confines
+`Write`/`Edit` to the worktree — and then the Runner itself took the file the agent wrote and
+executed it, with the account's full ambient authority: `~/.ssh`, the `gh` token, `~/.claude` /
+`~/.codex`, `/etc` secrets, the docker socket (host root), `sudo`. A `pretest` that exfiltrates a
+key and exits 0 is reported by the night as **a passing gate**. Live every night since 2026-08-04,
+independent of any auto-merge plan, and reached before a human ever sees the branch.
+
+*Mitigated by [N8](#n8) (implemented, ADR [0026](../adr/0026-the-ship-gate-runs-in-a-sandbox.md)):
+the gate runs in a disposable bubblewrap sandbox — `$HOME` unbound, `/etc` reduced to a named
+allowlist, no docker socket, network denied unless the repo opts in with `test_net: true`, the
+environment an allowlist rather than an inheritance, writable only the worktree and a throwaway
+HOME, plus `RLIMIT_NPROC`/`RLIMIT_AS`/`RLIMIT_CPU` and a size-capped `/tmp`. A missing or
+unconstructable sandbox refuses the ship instead of running unconfined. Covered by
+`tests/test-gate-sandbox.sh`.*
+
+*Residual: the worktree stays writable and is what `finalize` commits, so a `pretest` can still
+modify the tree after review saw the staged diff — this is [R9](#r9)'s unimplemented stronger half
+(N3), backstopped by C5. `test_net: true` is a real egress channel for worktree content, though
+credential-free. `RLIMIT_AS` bounds address space, not RSS. Kernel unprivileged user namespaces and
+bubblewrap are now in the trust base.*
+
 ---
 
 ## 5. Recommended / planned mitigations
 
-**Priority order** (risk reduced per unit of effort), revised after the R8–R13 findings:
-~~[N1](#n1) → [N4](#n4) → [N3](#n3)~~ (all three landed) → [M1](#m1) → [M2](#m2) → [N2](#n2) →
-[N6](#n6) → [N5](#n5) → [M3](#m3) → [M4](#m4) → [N7](#n7)/[M5](#m5). N1+N3+N4 together turned
-"write-only agent = RCE as a `docker`/`sudo` account" into "a compromised fix stage is confined to
-the worktree and fully visible to review" — the largest reduction available before the account (M1)
-and OS-sandbox (M2) work, which are now the head of the queue.
+**Priority order** (risk reduced per unit of effort), revised after the R8–R13 findings and again
+after R15: ~~[N1](#n1) → [N4](#n4) → [N3](#n3) → [N8](#n8)~~ (all four landed) → [M1](#m1) →
+[M2](#m2) → [N2](#n2) → [N6](#n6) → [N5](#n5) → [M3](#m3) → [M4](#m4) → [N7](#n7)/[M5](#m5).
+N1+N3+N4 together turned "write-only agent = RCE as a `docker`/`sudo` account" into "a compromised
+fix stage is confined to the worktree and fully visible to review". N8 then closed the remaining
+execution path — the Runner's own ship gate, which took what the agent wrote and ran it. What is
+left at the head of the queue is the account (M1) and the sandbox around the *agent* process (M2).
 
 ### M1 — Dedicated unprivileged service account <a id="m1"></a>
 Run nightshift as an account that is **not** in `docker` or `sudo` and cannot read other services'
@@ -290,7 +325,10 @@ what R1 can even read. **Highest priority.**
 ### M2 — OS sandbox around the agent process <a id="m2"></a>
 Wrap `claude` in a filesystem/network jail (bubblewrap or a systemd sandbox profile):
 restrict `Read` scope to the worktree, deny network egress to everything except the Anthropic API.
-Closes the R1 exfil chain and R6.
+Closes the R1 exfil chain and R6. **Half-done:** [N8](#n8) applies exactly this treatment to the
+ship gate, which was the more urgent target because it executes rather than reads. The agent
+process itself is still unconfined, so M2 remains open — and N8's `build_test_sandbox` is the
+mechanism to reuse when it is taken on.
 
 ### M3 — Content secret-scanning in pre-push <a id="m3"></a>
 Extend the confinement so `pre-push` (or a pre-commit step) scans **diff content** for key material,
@@ -342,6 +380,20 @@ with `mkdir -m 700`. Removes the shared-`/tmp` DoS and symlink surface without r
 committed diff (the `gh` API path never touches pre-push). Re-issue the `gh` token without
 `admin:public_key` — the PR flow needs only `repo` / pull-request scope.
 
+### N8 — Sandbox the ship gate <a id="n8"></a>
+**Closes R15. Implemented** — ADR [0026](../adr/0026-the-ship-gate-runs-in-a-sandbox.md).
+`build_test_sandbox` / `run_test_gate` ([nightshift.sh](../../bin/nightshift.sh)) run the repo's
+`test_cmd` under `bwrap` with `--unshare-all` (network re-shared only for a repo declaring
+`test_net: true`), `--clearenv` plus an eight-variable allowlist, `/usr` read-only, a file-by-file
+`/etc` allowlist, size-capped tmpfs on `/tmp` and `/run`, and exactly two writable paths: the
+worktree and a disposable HOME. `NIGHTSHIFT_TEST_SANDBOX_ROBIND` is the host's escape hatch for a
+dependency outside `/usr`, and a bind that would re-expose `$HOME` is refused with a log line.
+Absent or unconstructable sandbox → the gate returns "could not run", the item is refused without
+consuming fix iterations, and nothing ships. The same ADR closes the ungated ship path: a
+`branch-fix` repo without a `test_cmd` now aborts the parse instead of shipping with
+`shipping UNGATED` in the log. **This is the gate-shaped half of [M2](#m2)**; the agent process
+itself is still unsandboxed, so M2 stays open for `claude`/`codex`.
+
 ### N7 — Re-label the latent defense-in-depth <a id="n7"></a>
 **Addresses R11.** Document C3/C4 as latent (they activate only if a future stage gains `Bash`) and
 redirect guard effort to Write/Edit (N1). Keep the Bash guard as a tripwire, but do not count it as
@@ -351,19 +403,24 @@ primary containment.
 
 ## 6. Residual risk statement
 
-With C1–C8, the *destructive-git* class (repo destruction, force-push to `main`, auto-merge, push
-outside `nightshift/*`) is structurally blocked. The independent review corrected the rest: **"no
-`Bash`" is not "no code execution."** The write-primitive chain it exposed is now largely answered in
-code: **N1** confines Claude's `Write`/`Edit` to the worktree (R8), **N3** makes the reviewer's diff
-the staged index finalize commits (R9), and **N4** puts the system dirs ahead of `~/.local/bin` so a
-plant cannot shadow the Runner's own tools (R10, partially — a tool resolved only from `~/.local/bin`
-is still hijackable). The material residuals are therefore secret exfiltration (R1) and single-tier
+With C1–C9, the *destructive-git* class (repo destruction, force-push to `main`, auto-merge, push
+outside `nightshift/*`) is structurally blocked. The two independent reviews each corrected the same
+kind of error, one level apart. The first: **"no `Bash`" is not "no code execution"** — answered by
+**N1** (Claude's `Write`/`Edit` confined to the worktree, R8), **N3** (the reviewer's diff is the
+staged index finalize commits, R9) and **N4** (system dirs ahead of `~/.local/bin`, R10 partially —
+a tool resolved only from `~/.local/bin` is still hijackable). The second: **confining what the
+agent may execute says nothing about what the Runner executes on its behalf** — the ship gate ran
+candidate-authored lifecycle scripts as this account, answered by **N8** (R15).
+
+The material residuals are therefore secret exfiltration by the *agent* (R1) and single-tier
 containment on a `docker`/`sudo` (host-root-capable) account (R2). For Codex, workspace sandboxing
 narrows arbitrary-write exposure, while permitted in-worktree commands and the missing per-stage turn
 cap are adapter-specific residuals.
 
-Ordered response after the implemented **N1/N3/N4**: **M1** (dedicated unprivileged account) collapses
-the R2 blast radius, then **M2** (OS sandbox) closes the R1 exfil chain and R6. Until M1 + M2 are in
-place, unattended operation on the shared host still carries an understood exfiltration gap and
-single-tier containment on an over-privileged account — kept bounded, in the daytime-testing phase,
-by attention rather than by architecture.
+Ordered response after the implemented **N1/N3/N4/N8**: **M1** (dedicated unprivileged account)
+collapses the R2 blast radius, then **M2** (OS sandbox around the agent process) closes the R1 exfil
+chain and R6 — now half-built, since N8 supplies the mechanism. Until M1 + M2 are in place,
+unattended operation on the shared host still carries an understood exfiltration gap and single-tier
+containment on an over-privileged account — kept bounded, in the daytime-testing phase, by attention
+rather than by architecture. **No autonomous landing** (auto-merge of any kind) may be enabled while
+R1/R2 stand.

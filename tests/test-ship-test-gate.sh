@@ -9,7 +9,8 @@ set -euo pipefail
 #   fails  -> the failing output goes back to the Fix stage, which repairs its own regression
 #   fails every iteration -> ledger `tests-failed`, no branch anywhere, the finding stays unlatched
 #   passes -> ships exactly as before
-#   absent -> ships UNGATED, and the run says so out loud
+#   absent on a branch-fix repo -> the run ABORTS (ADR 0026; ADR 0022 §4 used to ship it ungated)
+#   unsandboxable -> refused without retrying, because that is a host problem (ADR 0026)
 # Throwing the fix away on the first red suite was the wrong reaction: the Fix stage caused the
 # breakage, is still in the loop with budget left, and is the thing best placed to repair it.
 
@@ -27,6 +28,10 @@ run_night() {
   git -C "$d/repo" remote add origin "$d/remote.git"
   # `teh` is what the mock Explore stage finds and the mock Fix stage repairs.
   printf '# Demo\n\nThis is teh demo.\n' > "$d/repo/README.md"
+  # Since ADR 0026 the gate is sandboxed, so a `test_cmd` can write nowhere but the worktree. The
+  # cases below that need a marker surviving between fix iterations therefore keep it IN the tree
+  # and out of the commit by ignoring it — finalize's `git add -A` honours .gitignore.
+  printf '.gate-marker\n' > "$d/repo/.gitignore"
   git -C "$d/repo" -c user.name=test -c user.email=test@localhost add -A
   git -C "$d/repo" -c user.name=test -c user.email=test@localhost commit -q -m initial
   git -C "$d/repo" push -q -u origin main
@@ -103,8 +108,9 @@ git -C "$d/remote.git" for-each-ref --format='%(refname)' 'refs/heads/nightshift
 
 
 # --- 2b. red once, green on the retry: the item ships instead of dying --------
-# The marker lives OUTSIDE the worktree so the gate's own bookkeeping never lands in the commit.
-run_night retries "test -f $TMP/retries-seen || { touch $TMP/retries-seen; exit 1; }"
+# The marker is gitignored, so the gate's own bookkeeping never lands in the commit — and it has to
+# live in the worktree, because the sandbox (ADR 0026) gives a test_cmd nowhere else to write.
+run_night retries 'test -f .gate-marker || { touch .gate-marker; exit 1; }'
 d="$TMP/retries"; LEDGER="$d/state/ledger.jsonl"
 
 grep -q "gate overrules ship" "$d/err" "$d/out" || { cat "$d/err" >&2; fail "the first red suite was not reported as a retry"; }
@@ -145,9 +151,10 @@ rm -f "$pid/tests.log"
 # fresh attempt every subsequent night.
 # Iteration 1: the reviewer ships, the suite goes red (and arms the sentinel on its way out).
 # Iteration 2: the sentinel makes the reviewer abandon, which breaks out before the gate runs.
-# The sentinel lives outside the worktree, so it never reaches a commit.
-( export NIGHTSHIFT_MOCK_ABANDON_IF="$TMP/abandon-now"
-  run_night abandons "touch $TMP/abandon-now; exit 1" )
+# A relative sentinel resolves against the worktree (mock_review) and is gitignored, so it never
+# reaches a commit — the sandboxed gate cannot write anywhere else.
+( export NIGHTSHIFT_MOCK_ABANDON_IF=".gate-marker"
+  run_night abandons 'touch .gate-marker; exit 1' )
 d="$TMP/abandons"; LEDGER="$d/state/ledger.jsonl"
 
 grep -q "gate overrules ship" "$d/err" "$d/out" \
@@ -159,14 +166,55 @@ if jq -e 'select(.outcome=="tests-failed")' "$LEDGER" >/dev/null 2>&1; then
   fail "a stale gate=fail relabelled the reviewer's abandon as tests-failed — the finding never latches"
 fi
 
-# --- 3. no test_cmd: ships as before, but the run says it is ungated ----------
+# --- 3. no test_cmd on a branch-fix repo: the night refuses to start ----------
+# ADR 0026 revises ADR 0022 §4. "Ships ungated, and the log says so" was the last silent path to a
+# merge-ready branch with no regression check at all, and its warning scrolled past at 04:00. A repo
+# with no suite to declare belongs in `findings-only`, which reports without ever pushing.
+set +e
 run_night ungated ''
+rc=$?
+set -e
 d="$TMP/ungated"; LEDGER="$d/state/ledger.jsonl"
 
-grep -q "shipping UNGATED" "$d/err" "$d/out" \
-  || { cat "$d/err" >&2; fail "an ungated repo shipped without saying so"; }
-jq -e 'select(.outcome=="shipped")' "$LEDGER" >/dev/null 2>&1 \
-  || { jq -c . "$LEDGER" >&2; fail "an ungated repo must still ship (backward compatibility)"; }
+[ "$rc" -ne 0 ] || { cat "$d/err" >&2; fail "a branch-fix repo with no test_cmd must abort the run"; }
+grep -q "requires a test_cmd" "$d/err" \
+  || { cat "$d/err" >&2; fail "the abort does not name the missing ship gate"; }
+if [ -f "$LEDGER" ] && jq -e 'select(.outcome=="shipped")' "$LEDGER" >/dev/null 2>&1; then
+  jq -c . "$LEDGER" >&2; fail "an ungated branch-fix repo shipped anyway"
+fi
+
+# --- 3b. no sandbox for the gate: refused, and WITHOUT burning fix iterations -
+# The gate executes candidate-authored code (ADR 0026), so a missing sandbox is a refusal to ship,
+# never a licence to run it unconfined. And it is not a regression: handing a host problem back to
+# the Fix stage would spend every remaining iteration, every night, on something no model can fix.
+# The PATH below mirrors the system bin dirs with exactly one binary removed, so the night fails for
+# the reason under test rather than because the Runner lost `jq`.
+NOBWRAP="$TMP/nobwrap"; mkdir -p "$NOBWRAP"
+for dir in /usr/local/bin /usr/bin /bin; do
+  [ -d "$dir" ] || continue
+  for p in "$dir"/*; do
+    n="${p##*/}"; [ "$n" = bwrap ] && continue
+    [ -e "$NOBWRAP/$n" ] || ln -s "$p" "$NOBWRAP/$n" 2>/dev/null || true
+  done
+done
+# NIGHTSHIFT_TEST_SANDBOX is set explicitly so the case holds on a host that opted the rest of the
+# suite out (a CI runner without user namespaces) — and, because bwrap is absent from the PATH
+# above, it holds identically on a host that has bwrap. The refusal is what is under test.
+( export PATH="$NOBWRAP" NIGHTSHIFT_TEST_SANDBOX=bwrap; run_night nosandbox 'true' )
+d="$TMP/nosandbox"; LEDGER="$d/state/ledger.jsonl"
+
+grep -q "no sandbox (bwrap missing)" "$d/err" "$d/out" \
+  || { cat "$d/err" >&2; fail "a gate with no sandbox did not say why it could not run"; }
+if [ -f "$LEDGER" ] && jq -e 'select(.outcome=="shipped")' "$LEDGER" >/dev/null 2>&1; then
+  jq -c . "$LEDGER" >&2; fail "a branch shipped although the gate could not be sandboxed"
+fi
+jq -e 'select(.outcome=="tests-failed")' "$LEDGER" >/dev/null 2>&1 \
+  || { jq -c . "$LEDGER" >&2; fail "an unsandboxable gate must be recorded as tests-failed"; }
+[ "$(grep -c "no sandbox (bwrap missing)" "$d/err")" -eq 1 ] \
+  || { cat "$d/err" >&2; fail "the unrunnable gate was retried — a host problem is not a revision request"; }
+if git -C "$d/remote.git" for-each-ref --format='%(refname)' 'refs/heads/nightshift/*' | grep -q .; then
+  fail "a nightshift/* branch reached the remote although the gate could not run"
+fi
 
 # --- 4. a hanging suite is bounded, not waited on -----------------------------
 ( export NIGHTSHIFT_TEST_TIMEOUT=1; run_night hangs 'sleep 30' )

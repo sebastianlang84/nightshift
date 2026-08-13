@@ -44,9 +44,11 @@ dimensions:
 repos:
   - path: $TMP/repo-a
     mode: branch-fix
+    test_cmd: true
     base: main
   - path: $TMP/repo-b
     mode: branch-fix
+    test_cmd: true
     base: main
 EOF
 

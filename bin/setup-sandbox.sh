@@ -61,6 +61,11 @@ dimensions:
 repos:
   - path: $SB/target
     mode: branch-fix
+    # A branch-fix repo must declare a ship gate (ADR 0026) — the parse aborts without one. The demo
+    # project has no suite, so this is the smallest command that runs: it exercises the sandboxed
+    # gate path end to end while gating nothing, which is honest for a throwaway sandbox and would
+    # not be for a real repo.
+    test_cmd: python3 -c "import app; assert app.greet('x') == 'hello x'"
 EOF
 
 echo "sandbox ready: $SB"

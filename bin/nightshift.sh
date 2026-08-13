@@ -64,7 +64,7 @@ if [ "$NIGHTSHIFT_AGENT" = claude ] && [ -n "${HOME:-}" ]; then
 fi
 
 # ---------------------------------------------------------------- rulebook ----
-declare -a REPO_PATHS=() REPO_MODES=() REPO_BASES=() REPO_FINDINGS=() REPO_DIMS=() REPO_TEST_CMDS=() DIMENSIONS=()
+declare -a REPO_PATHS=() REPO_MODES=() REPO_BASES=() REPO_FINDINGS=() REPO_DIMS=() REPO_TEST_NETS=() REPO_TEST_CMDS=() DIMENSIONS=()
 # Rulebook-declared model per adapter (ADR 0020); empty = the rulebook declares none. Kept separate
 # from the NIGHTSHIFT_*_MODEL env vars so the precedence env > rulebook > CLI default stays legible.
 RB_CLAUDE_MODEL="" RB_CODEX_MODEL="" RB_MAX_VERIFY=""
@@ -86,7 +86,7 @@ log_model_selection() { # adapter env_var_name rulebook_value
 }
 
 load_rulebook() {
-  local tag a b c d e f rb_run_branches="" parsed
+  local tag a b c d e f g rb_run_branches="" parsed
   # Capture the parser's output AND its exit status. Reading it directly via
   # `done < <(python3 …)` hides a nonzero exit from `set -euo pipefail`, so a
   # mid-stream parse error (e.g. a bad `findings:` on repo #2) silently truncated
@@ -94,7 +94,7 @@ load_rulebook() {
   # run proceeded on a partial fleet. Fail closed instead: abort the whole run.
   parsed="$(python3 "$NIGHTSHIFT_HOME/lib/parse_rulebook.py" "$RULEBOOK")" \
     || { log "rulebook parse failed ($RULEBOOK) — aborting run"; exit 1; }
-  while IFS=$'\t' read -r tag a b c d e f; do
+  while IFS=$'\t' read -r tag a b c d e f g; do
     case "$tag" in
       prefix)                BRANCH_PREFIX="$a" ;;
       max_open)              MAX_OPEN="$a" ;;
@@ -106,12 +106,14 @@ load_rulebook() {
       max_fix_iterations)    MAX_FIX_ITER="$a" ;;
       max_run_minutes)       RB_MAX_RUN_MINUTES="$a" ;;
       test_timeout_seconds)  TEST_TIMEOUT="$a" ;;
+      test_memory_mb)        TEST_MEMORY_MB="$a" ;;
+      test_max_procs)        TEST_MAX_PROCS="$a" ;;
       max_files)             MAX_FILES="$a" ;;
       max_lines)             MAX_LINES="$a" ;;
       claude_model)          RB_CLAUDE_MODEL="$a" ;;
       codex_model)           RB_CODEX_MODEL="$a" ;;
       dimension)             DIMENSIONS+=("$a") ;;
-      repo)                  REPO_PATHS+=("${a#path=}"); REPO_MODES+=("${b#mode=}"); REPO_BASES+=("${c#base=}"); REPO_FINDINGS+=("${d#findings=}"); REPO_DIMS+=("${e#dimensions=}"); REPO_TEST_CMDS+=("${f#test_cmd=}") ;;
+      repo)                  REPO_PATHS+=("${a#path=}"); REPO_MODES+=("${b#mode=}"); REPO_BASES+=("${c#base=}"); REPO_FINDINGS+=("${d#findings=}"); REPO_DIMS+=("${e#dimensions=}"); REPO_TEST_NETS+=("${f#test_net=}"); REPO_TEST_CMDS+=("${g#test_cmd=}") ;;
     esac
   done <<< "$parsed"
   MAX_FINDINGS="${MAX_FINDINGS:-1}"
@@ -119,6 +121,9 @@ load_rulebook() {
   # Ship gate ceiling (ADR 0022). Env override for a one-off, else the rulebook (which the
   # parser already defaulted and validated), else 600s.
   TEST_TIMEOUT="${NIGHTSHIFT_TEST_TIMEOUT:-${TEST_TIMEOUT:-600}}"
+  # Resource ceilings inside the gate's sandbox (ADR 0026). Same precedence as the timeout above.
+  TEST_MEMORY_MB="${NIGHTSHIFT_TEST_MEMORY_MB:-${TEST_MEMORY_MB:-4096}}"
+  TEST_MAX_PROCS="${NIGHTSHIFT_TEST_MAX_PROCS:-${TEST_MAX_PROCS:-2048}}"
   # How many open findings the verify phase may re-check per night. Bounds what closure can cost:
   # every candidate is one read-only stage call. 0 disables the phase (the deterministic probe
   # still runs — it is free). Env override for a one-off, else the rulebook, else 5.
@@ -636,12 +641,15 @@ mock_fix() { # workdir item_dir — applies the fix for THIS finding (dispatched
   esac
 }
 mock_review() { # workdir item_dir
-  local _wd="$1" id="$2"
+  local _wd="$1" id="$2" sentinel="${NIGHTSHIFT_MOCK_ABANDON_IF:-}"
   # Deterministic `abandon`, so the reviewer's give-up verdict is reachable in mock mode like every
-  # other path. The trigger is a sentinel PATH, not content in the worktree: a test must be able to
-  # arm it MID-loop (from a failing test_cmd, say) without planting a file in the tree that is about
-  # to be committed.
-  if [ -n "${NIGHTSHIFT_MOCK_ABANDON_IF:-}" ] && [ -e "${NIGHTSHIFT_MOCK_ABANDON_IF:-}" ]; then
+  # other path. The trigger is a sentinel PATH, not content in the worktree, because a test must be
+  # able to arm it MID-loop — from a failing test_cmd, say.
+  # A RELATIVE sentinel resolves against the worktree, which is the only place a test_cmd can write
+  # since ADR 0026 sandboxed the gate. Keeping it out of the commit is then the fixture's job (a
+  # .gitignore entry), not the path's.
+  case "$sentinel" in ""|/*) ;; *) sentinel="$_wd/$sentinel" ;; esac
+  if [ -n "$sentinel" ] && [ -e "$sentinel" ]; then
     jq -nc '{verdict:"abandon",reason:"mock: abandon sentinel present."}' > "$id/review.md"
     return 0
   fi
@@ -951,10 +959,11 @@ repo_findings() { # repo -> per-repo `findings:` override from the rulebook, els
   echo "$MAX_FINDINGS"
 }
 
-repo_test_cmd() { # repo -> the repo's ship-gate command, or "" for an ungated repo (ADR 0022)
+repo_test_cmd() { # repo -> the repo's ship-gate command, or "" for a findings-only repo (ADR 0022)
   # Deliberately has NO global fallback: a test command is repo-specific by nature, and inheriting
-  # some fleet-wide default would run the wrong suite. Absent means ungated, which is a real and
-  # legitimate state (a repo may genuinely have no runner) — finalize logs it so it stays visible.
+  # some fleet-wide default would run the wrong suite. Empty is reachable only for a `findings-only`
+  # repo — the parser refuses a `branch-fix` repo without one (ADR 0026), because a repo nightshift
+  # pushes branches for must have something that can say the repo is still whole.
   local repo="$1" i
   for i in "${!REPO_PATHS[@]}"; do
     if [ "${REPO_PATHS[$i]}" = "$repo" ]; then
@@ -962,6 +971,20 @@ repo_test_cmd() { # repo -> the repo's ship-gate command, or "" for an ungated r
     fi
   done
   echo ""
+}
+
+repo_test_net() { # repo -> 1 if this repo's gate sandbox gets network egress, else 0 (ADR 0026)
+  # Off unless the rulebook says otherwise, and it is per repo on purpose: `npm ci` needs a registry
+  # and `uv run --with-requirements` needs an index, while most suites need nothing at all. Granting
+  # egress fleet-wide to satisfy two repos would hand every other suite an exfil channel for free.
+  local repo="$1" i
+  for i in "${!REPO_PATHS[@]}"; do
+    if [ "${REPO_PATHS[$i]}" = "$repo" ]; then
+      [ "${REPO_TEST_NETS[$i]:-false}" = true ] && { echo 1; return; }
+      break
+    fi
+  done
+  echo 0
 }
 
 repo_dimensions() { # repo -> candidate dimensions, space-separated, in priority order (ADR 0010)
@@ -1358,24 +1381,174 @@ open_pr() { # repo wt branch item_dir base -> echoes PR url ("" if none)
 # it: a failure is a revision request, not a death sentence. The Fix stage caused the breakage and
 # is still in the loop with budget left, so it gets the failing output back and repairs its own
 # damage (see stage_prompt). Only an item that leaves the loop still broken is refused.
-run_test_gate() { # repo worktree item_dir -> 0 pass/ungated, 1 fail; writes item_dir/tests.log on failure
-  local repo="$1" wt="$2" id="$3" tcmd trc=0
+# The gate EXECUTES candidate-controlled repository content — `npm ci` alone runs preinstall /
+# prepare / pretest straight out of a package.json the Fix stage may just have written. Unsandboxed,
+# that is the most direct route there is from a prompt-injected fix to full host execution as this
+# account: SSH keys, the gh token, ~/.claude and ~/.codex credentials, /etc secrets, the docker
+# socket (host-root equivalent), sudo. So it does not run as this account. See ADR 0026.
+#
+# bubblewrap: no daemon, no setuid, no privileged helper, one process per gate, and the filesystem
+# is an ALLOWLIST — nothing is visible unless it was bound in. Nothing else on this host removes
+# credential reach as cheaply; docker would grant the very socket that is the risk.
+TEST_SANDBOX="${NIGHTSHIFT_TEST_SANDBOX:-bwrap}"
+declare -a TEST_SANDBOX_ARGV=()
+
+_test_robind() { # path -> append a read-only bind, refusing anything that would re-expose $HOME
+  local p="$1" rp
+  [ -n "$p" ] || return 0
+  rp="$(realpath -m -- "$p" 2>/dev/null || printf '%s' "$p")"
+  case "$rp" in /usr|/usr/*) return 0 ;; esac   # already bound whole
+  # `/`, `/home`, `$HOME` — a bind of any ancestor of $HOME hands the suite ~/.ssh and the gh token
+  # back, i.e. exactly the reach this sandbox exists to remove. Refuse it out loud; a silently
+  # widened sandbox is worse than none, because the ADR says it is closed.
+  if [ -n "${HOME:-}" ] && { [ "$rp" = "$HOME" ] || [ "${HOME#"$rp"/}" != "$HOME" ]; }; then
+    log "  test sandbox: REFUSING read-only bind $p — it contains \$HOME"
+    return 0
+  fi
+  [ -e "$rp" ] || return 0
+  TEST_SANDBOX_ARGV+=( --ro-bind "$rp" "$rp" )
+}
+
+build_test_sandbox() { # worktree sandbox_home net(0|1) -> fills TEST_SANDBOX_ARGV
+  local wt="$1" sbhome="$2" net="$3" p
+  local -a extra=()
+  TEST_SANDBOX_ARGV=(
+    bwrap
+    --die-with-parent          # the sandbox can never outlive the `timeout` that bounds it
+    --new-session              # its own session: no controlling tty, so no TIOCSTI back into ours
+    --unshare-user --unshare-ipc --unshare-pid --unshare-uts --unshare-cgroup
+    --clearenv                 # the environment is an allowlist, built at the bottom of this function
+    --proc /proc --dev /dev
+    --size $((1024 * 1024 * 1024)) --tmpfs /tmp   # /tmp is RAM: uncapped, a suite could OOM the host
+    --tmpfs /run
+    --ro-bind /usr /usr
+  )
+  [ "$net" = 1 ] || TEST_SANDBOX_ARGV+=( --unshare-net )
+  # merged-/usr: reproduce whatever /bin, /lib … are on this host, so an absolute `#!` still resolves.
+  for p in /bin /sbin /lib /lib64 /lib32 /libx32; do
+    if [ -L "$p" ]; then TEST_SANDBOX_ARGV+=( --symlink "$(readlink "$p")" "$p" )
+    elif [ -d "$p" ]; then TEST_SANDBOX_ARGV+=( --ro-bind "$p" "$p" ); fi
+  done
+  # /etc is an ALLOWLIST and never a whole-directory bind: /etc/ai_stack and its neighbours are
+  # precisely the secrets the gate must not reach. `-try` because the set spans distributions.
+  for p in /etc/passwd /etc/group /etc/nsswitch.conf /etc/localtime /etc/alternatives \
+           /etc/ssl /etc/pki /etc/ca-certificates /etc/ca-certificates.conf; do
+    TEST_SANDBOX_ARGV+=( --ro-bind-try "$p" "$p" )
+  done
+  # Resolver config buys nothing without egress, so it is bound only when egress is granted.
+  [ "$net" = 1 ] && TEST_SANDBOX_ARGV+=(
+    --ro-bind-try /etc/resolv.conf /etc/resolv.conf --ro-bind-try /etc/hosts /etc/hosts )
+  # The developer toolchain lives under nvm, i.e. under $HOME, which is NOT bound. Bind the bin dir
+  # and its parent: node resolves its own lib/ and include/ relative to `..`.
+  if [ -n "${NIGHTSHIFT_TEST_PATH:-}" ]; then
+    _test_robind "$(dirname -- "$NIGHTSHIFT_TEST_PATH")"
+    _test_robind "$NIGHTSHIFT_TEST_PATH"
+  fi
+  # Host-declared extras — a warmed dependency cache, a shared toolchain, a runtime outside /usr.
+  IFS=: read -r -a extra <<<"${NIGHTSHIFT_TEST_SANDBOX_ROBIND:-}"
+  for p in ${extra[@]+"${extra[@]}"}; do _test_robind "$p"; done
+  # The ONLY writable paths: the worktree (which is what is about to be committed) and a HOME.
+  TEST_SANDBOX_ARGV+=( --bind "$wt" "$wt" --bind "$sbhome" "$sbhome" --chdir "$wt" )
+  # --clearenv dropped everything, SSH_AUTH_SOCK / GH_TOKEN / GITHUB_TOKEN / ANTHROPIC_API_KEY /
+  # AWS_* / DOCKER_HOST included. What a suite legitimately needs is short, and it is listed here.
+  TEST_SANDBOX_ARGV+=(
+    --setenv HOME "$sbhome"
+    --setenv PATH "${NIGHTSHIFT_TEST_PATH:+$NIGHTSHIFT_TEST_PATH:}/usr/local/bin:/usr/bin:/bin"
+    --setenv TMPDIR /tmp
+    --setenv TERM dumb
+    --setenv LANG "${LANG:-C.UTF-8}"
+    --setenv LC_ALL "${LC_ALL:-C.UTF-8}"
+    --setenv USER "${USER:-nightshift}"
+    --setenv NIGHTSHIFT_TEST_SANDBOX_ACTIVE 1
+  )
+  # One escape hatch, host-declared by NAME: a suite that needs UV_CACHE_DIR or CARGO_HOME says so
+  # in the environment the operator controls, rather than the gate inheriting the whole session.
+  local -a pass=()
+  IFS=', ' read -r -a pass <<<"${NIGHTSHIFT_TEST_ENV_PASS:-}"
+  for p in ${pass[@]+"${pass[@]}"}; do
+    # `continue`, not `[ -n "$p" ] && …`: a trailing separator yields an empty field, whose failing
+    # test would be the loop's exit status and would abort the whole night under `set -e`.
+    [ -n "$p" ] || continue
+    TEST_SANDBOX_ARGV+=( --setenv "$p" "${!p-}" )
+  done
+}
+
+# Runs as pid 1 of the sandbox. rlimits are set HERE and not by the Runner, because they must bound
+# the suite without bounding the Runner. `timeout` already caps wall clock; these cap what a suite
+# can do inside that window. Kept as a fixed literal: the command itself arrives via the environment
+# so nothing the rulebook wrote is ever spliced into this script.
+TEST_GATE_INNER='
+[ "${NIGHTSHIFT_GATE_MAX_PROCS:-0}" -gt 0 ] && ulimit -u "$NIGHTSHIFT_GATE_MAX_PROCS" 2>/dev/null
+[ "${NIGHTSHIFT_GATE_MEM_MB:-0}"    -gt 0 ] && ulimit -v $((NIGHTSHIFT_GATE_MEM_MB * 1024)) 2>/dev/null
+[ "${NIGHTSHIFT_GATE_CPU_S:-0}"     -gt 0 ] && ulimit -t "$NIGHTSHIFT_GATE_CPU_S" 2>/dev/null
+exec bash -c "$NIGHTSHIFT_GATE_CMD"
+'
+
+run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 the gate could not run at all
+  local repo="$1" wt="$2" id="$3" tcmd net trc=0 sbhome persist=0
   tcmd=$(repo_test_cmd "$repo")
   if [ -z "$tcmd" ]; then
+    # Only reachable for a findings-only repo, which never ships — the parser refuses a branch-fix
+    # repo with no test_cmd (ADR 0026). Kept as a guard, not as a shipping path.
     log "  $(basename "$repo"): no test_cmd in the rulebook — shipping UNGATED"
     return 0
   fi
-  # Runs in the WORKTREE, not the repo — the worktree is what carries the fix and what is about to
-  # be committed. `timeout` bounds a hanging suite so it cannot eat the night.
+  net=$(repo_test_net "$repo")
+
+  # A gate that cannot be sandboxed does not run. Not "runs anyway with a warning": the whole point
+  # of ADR 0026 is that executing this content as this account is the exposure, so the absence of
+  # the sandbox is a refusal to ship, not a licence to ship faster.
+  if [ "$TEST_SANDBOX" != none ] && ! command -v bwrap >/dev/null 2>&1; then
+    printf 'nightshift: bwrap is not installed, so the ship gate has no sandbox.\n%s\n' \
+      "Install bubblewrap, or accept the risk explicitly with NIGHTSHIFT_TEST_SANDBOX=none." \
+      >"$id/tests.log"
+    log "  $(basename "$repo"): test gate cannot run — no sandbox (bwrap missing) — NOT shipping"
+    return 2
+  fi
+
+  # HOME is disposable by default, so nothing a suite writes survives into the next night — and a
+  # poisoned dependency cache is a cross-run write channel. An operator who cannot afford a cold
+  # cache every gate can pin one with NIGHTSHIFT_TEST_SANDBOX_HOME and owns that trade.
+  if [ -n "${NIGHTSHIFT_TEST_SANDBOX_HOME:-}" ]; then
+    sbhome="$NIGHTSHIFT_TEST_SANDBOX_HOME"; persist=1; mkdir -p "$sbhome"
+  else
+    sbhome="$(mktemp -d "$WORKTREES_DIR/gate-home.XXXXXX")"
+  fi
+
   # `|| trc=$?` and not `if ! …`: inside an `if !` body `$?` is the negation's 0, not the suite's.
-  # NIGHTSHIFT_TEST_PATH is the developer toolchain (node/npm/pnpm) the repo's own suite needs but
-  # that a systemd user service does not get — bin/nightshift-cron.sh explains why it is prepended
-  # HERE and nowhere else: the Runner's own unqualified jq/git/python3 calls must keep resolving to
-  # the system dirs (R10/N4), while this subprocess already runs the repo's package scripts anyway.
-  ( cd "$wt" && export PATH="${NIGHTSHIFT_TEST_PATH:+$NIGHTSHIFT_TEST_PATH:}$PATH" \
-    && timeout "$TEST_TIMEOUT" bash -c "$tcmd" ) >"$id/tests.log" 2>&1 || trc=$?
+  if [ "$TEST_SANDBOX" = none ]; then
+    # NIGHTSHIFT_TEST_PATH is the developer toolchain (node/npm/pnpm) the repo's own suite needs but
+    # that a systemd user service does not get — bin/nightshift-cron.sh explains why it is prepended
+    # HERE and nowhere else: the Runner's own unqualified jq/git/python3 calls must keep resolving to
+    # the system dirs (R10/N4), while this subprocess already runs the repo's package scripts anyway.
+    log "  $(basename "$repo"): test gate sandbox DISABLED (NIGHTSHIFT_TEST_SANDBOX=none) — the suite runs with this account's full reach"
+    ( cd "$wt" && export PATH="${NIGHTSHIFT_TEST_PATH:+$NIGHTSHIFT_TEST_PATH:}$PATH" \
+      && timeout "$TEST_TIMEOUT" bash -c "$tcmd" ) >"$id/tests.log" 2>&1 || trc=$?
+  else
+    build_test_sandbox "$wt" "$sbhome" "$net"
+    # `--chdir "$wt"` above is what puts the suite in the WORKTREE rather than the repo: the worktree
+    # is what carries the fix and what is about to be committed.
+    timeout "$TEST_TIMEOUT" \
+      "${TEST_SANDBOX_ARGV[@]}" \
+      --setenv NIGHTSHIFT_GATE_CMD "$tcmd" \
+      --setenv NIGHTSHIFT_GATE_MAX_PROCS "$TEST_MAX_PROCS" \
+      --setenv NIGHTSHIFT_GATE_MEM_MB "$TEST_MEMORY_MB" \
+      --setenv NIGHTSHIFT_GATE_CPU_S "$TEST_TIMEOUT" \
+      -- /bin/bash -c "$TEST_GATE_INNER" >"$id/tests.log" 2>&1 || trc=$?
+  fi
+  [ "$persist" = 1 ] || rm -rf "$sbhome"
+
   if [ "$trc" -ne 0 ]; then
     [ "$trc" -eq 124 ] && log "  $(basename "$repo"): test gate TIMED OUT after ${TEST_TIMEOUT}s"
+    # 125 is bubblewrap's own "I could not build the sandbox" — a host problem, never a regression
+    # the Fix stage can repair. Handing it back as "your change broke the suite" would burn every
+    # remaining fix iteration, every night, on a misconfiguration no model can fix. (`timeout` also
+    # uses 125 for its own failure, which means the same thing here. A suite that itself exits 125
+    # is misread as one — the cost is a refusal without a retry, never a ship, so it errs safe.)
+    if [ "$trc" -eq 125 ] && [ "$TEST_SANDBOX" != none ]; then
+      log "  $(basename "$repo"): test gate could not START its sandbox — NOT shipping (see $id/tests.log)"
+      return 2
+    fi
     log "  $(basename "$repo"): test gate failed (rc=$trc) — see $id/tests.log"
     return 1
   fi
@@ -2084,8 +2257,12 @@ main() {
           # is the repo still whole? — and it OVERRULES a ship (ADR 0022). A failure is not the end
           # of the item: the Fix stage broke it, is still in the loop, and gets the failing output
           # back on the next turn. Only running out of iterations refuses the item.
-          if run_test_gate "$repo" "$wt" "$fd"; then gate=pass; break; fi
+          grc=0; run_test_gate "$repo" "$wt" "$fd" || grc=$?
+          if [ "$grc" -eq 0 ]; then gate=pass; break; fi
           gate=fail; verdict=revise
+          # rc=2 is "the gate could not run" (no sandbox, ADR 0026) — a host problem, not a
+          # regression, so there is nothing for another fix iteration to repair. Refuse now.
+          [ "$grc" -eq 2 ] && break
           log "  $(basename "$repo"): gate overrules ship — fix attempt $iter/$MAX_FIX_ITER broke the suite"
         fi
       done

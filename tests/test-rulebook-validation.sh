@@ -106,7 +106,8 @@ reject "an unknown recon key"       'recon:
 
 # A repo entry's keys are closed too, and this is the misconfig with the widest blast radius:
 # `test-cmd:` parsed clean and left `test_cmd` empty, so the repo shipped UNGATED past its
-# ADR 0022 ship gate — the human had written a gate and never got one.
+# ADR 0022 ship gate — the human had written a gate and never got one. (ADR 0026 now refuses an
+# empty `test_cmd` on a branch-fix repo outright; the closed key set is still what names the typo.)
 cat > "$TMP/repo-key.yaml" <<'EOF'
 repos:
   - path: /srv/example
@@ -173,11 +174,46 @@ if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/rulebook-mode.yaml" >"$TMP/stdout
 fi
 grep -q "unknown mode 'brnach-fix'" "$TMP/stderr"
 
+# ADR 0026 closes the ungated ship path ADR 0022 §4 left open: `branch-fix` means nightshift pushes
+# machine-written code for a human to merge, and Review only ever proves the FINDING is fixed. A
+# repo with no suite to declare belongs in `findings-only`, which never pushes — so the silence is
+# refused rather than logged as `shipping UNGATED` at 04:00 where nobody reads it.
+cat > "$TMP/ungated.yaml" <<'YAML'
+repos:
+  - path: /srv/ungated
+    mode: branch-fix
+YAML
+if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/ungated.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
+  echo "parser accepted a branch-fix repo with no test_cmd — the ungated ship path is back" >&2
+  exit 1
+fi
+grep -q "mode branch-fix requires a test_cmd" "$TMP/stderr"
+# …and only for branch-fix: a findings-only repo never ships, so it needs no gate.
+printf 'repos:\n  - path: /srv/report\n    mode: findings-only\n' > "$TMP/report.yaml"
+python3 "$ROOT/lib/parse_rulebook.py" "$TMP/report.yaml" >/dev/null 2>&1 \
+  || { echo "a findings-only repo must not need a test_cmd" >&2; exit 1; }
+
+# test_net decides whether the gate's sandbox gets network egress (ADR 0026). A typo there is a
+# silently *weaker* or *broken* gate, so the value set is closed like every mode and key above.
+cat > "$TMP/testnet.yaml" <<'YAML'
+repos:
+  - path: /srv/example
+    mode: branch-fix
+    test_net: yes
+    test_cmd: true
+YAML
+if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/testnet.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
+  echo "parser accepted a non-boolean test_net" >&2
+  exit 1
+fi
+grep -q "test_net must be true or false" "$TMP/stderr"
+
 # Both implemented modes must still parse.
 cat > "$TMP/rulebook-mode-ok.yaml" <<'YAML'
 repos:
   - path: /srv/a
     mode: branch-fix
+    test_cmd: true
   - path: /srv/b
     mode: findings-only
   - path: /srv/c
