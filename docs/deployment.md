@@ -164,8 +164,18 @@ these flags, is what confines the agent (see [`docs/design/risk-analysis.md`](de
 
 ## Working on nightshift itself
 
-- The suite IS `tests/*.sh` — there is no runner: `for t in tests/*.sh; do bash "$t" || break; done`.
-  [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs the same loop on every push and PR.
+- The suite IS `tests/*.sh` — there is no runner. Run it in a subshell that accumulates the status,
+  so a failing test is visible in `$?` and can gate a `&&`:
+
+  ```sh
+  (rc=0; for t in tests/*.sh; do bash "$t" || { echo "FAIL $t"; rc=1; }; done; exit $rc)
+  ```
+
+  The accumulator is the point. A bare `for t in tests/*.sh; do bash "$t"; done` exits with the
+  status of the LAST test only, and a `|| break` variant exits 0 for every outcome (`break` itself
+  succeeds and is the last command run) — both report a red suite as green.
+  [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs the same tests on every push and
+  PR, with the same per-test `rc=1` accumulation and a final `exit $rc`.
 - **Turn the doc guard on once per clone:** `git config core.hooksPath .githooks`. The
   [`pre-commit`](../.githooks/pre-commit) hook runs `lib/check_docs.py` (0.05s) and refuses a commit
   whose docs name something that is not there: a dead relative link, an `ADR 00NN` with no file, a
