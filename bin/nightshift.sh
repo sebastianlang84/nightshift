@@ -1583,6 +1583,32 @@ advise_branches() {
 }
 
 # ------------------------------------------------------------------- digest ----
+
+# An aborted night exits 3 and systemd marks the unit failed (ADR 0023) — but `systemctl status`
+# reports only the LAST run, so the next night that completes wipes the outage from the one place
+# an operator would notice it without reading anything. Observed 2026-08-08..11: four consecutive
+# nights died on `Not logged in`, each exited 3, each digest said ABORTED — and the healthy night
+# of 08-12 turned the unit green again, leaving four lost nights visible only in the journal.
+# So the streak is carried forward INTO the digest: the first digest that completes after an
+# outage still names how many nights were lost and when the fleet was last actually serviced.
+#
+# Counts only nights that HAVE a digest. A missing date is a night that never started (host off,
+# timer disarmed, holiday) — indistinguishable here from a deliberate pause, and a false "nights
+# lost" on every return from a break would train the reader to skip the line.
+aborted_streak() { # -> "<count> <newest-aborted> <oldest-aborted> <last-completed|->"; nights before $NIGHT
+  local f b count=0 newest="-" oldest="-" last_ok="-"
+  while IFS= read -r f; do
+    b="$(basename "$f" .md)"
+    [[ "$b" < "$NIGHT" ]] || continue
+    if grep -q '^- \*\*ABORTED:' "$f" 2>/dev/null; then
+      count=$((count + 1)); oldest="$b"; [ "$newest" = - ] && newest="$b"
+    else
+      last_ok="$b"; break
+    fi
+  done < <(find "$DIGEST_DIR" -maxdepth 1 -name '*.md' 2>/dev/null | sort -r)
+  printf '%s %s %s %s\n' "$count" "$newest" "$oldest" "$last_ok"
+}
+
 write_digest() { # made open status [advice]
   local made="$1" open="$2" status="$3" advice="${4:-}" f="$DIGEST_DIR/$NIGHT.md" runs dur
   {
@@ -1596,6 +1622,19 @@ write_digest() { # made open status [advice]
     # morning. Without this the digest of a credential outage is indistinguishable from a clean
     # fleet: same "shipped: 0", same empty tables, no reason given.
     [ "$status" = agent_unavailable ] && echo "- **ABORTED: the \`$NIGHTSHIFT_AGENT\` agent could not run** — ${AGENT_FATAL:-no usable credentials}. Nothing below reflects the state of the code: re-authenticate the CLI and run the night again. No recon caches or \`empty\` rows were written."
+    # Outage continuity — see aborted_streak(). Printed on BOTH paths: while the outage lasts it
+    # counts up, and the night that finally completes reports the gap once before it disappears.
+    local n_ab newest oldest last_ok span
+    read -r n_ab newest oldest last_ok <<< "$(aborted_streak)"
+    if [ "${n_ab:-0}" -gt 0 ]; then
+      [ "$oldest" = "$newest" ] && span="$newest" || span="$oldest … $newest"
+      [ "$last_ok" = - ] && last_ok="none on record"
+      if [ "$status" = agent_unavailable ]; then
+        echo "- **$((n_ab + 1)) nights in a row have not completed** ($oldest onward) — last completed run: ${last_ok}."
+      else
+        echo "- **$n_ab earlier night(s) did not complete** ($span) — tonight is the first to finish since; the fleet was last serviced ${last_ok}."
+      fi
+    fi
     if [ -f "$RUNSLOG" ]; then
       runs=$(grep -c "\"night\":\"$NIGHT\"" "$RUNSLOG" || true)
       dur=$(jq -s --arg n "$NIGHT" '[.[]|select(.night==$n)|.duration_s]|add // 0' "$RUNSLOG")
