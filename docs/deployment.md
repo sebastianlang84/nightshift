@@ -130,9 +130,14 @@ operationally:
   `/etc` beyond a named allowlist; no docker socket; and **no network** unless the repo sets
   `test_net: true`. The environment is an allowlist, so `SSH_AUTH_SOCK`/`GH_TOKEN`/`ANTHROPIC_API_KEY`
   are absent by construction. Writable: the worktree and a disposable `HOME`.
-- **A suite that needs something from outside `/usr` must have it bound in.** The nvm toolchain is
-  handled for you (`NIGHTSHIFT_TEST_PATH` and its parent are bound read-only); everything else goes
-  in `NIGHTSHIFT_TEST_SANDBOX_ROBIND`. A bind that would re-expose `$HOME` is refused with a log line.
+- **A suite that needs something from outside `/usr` must have it bound in.** Every entry of
+  `NIGHTSHIFT_TEST_PATH` is bound read-only *and* put on the gate's `PATH` — it is a `:`-separated
+  list, so the fleet's `node` (nvm) and `uv` (`~/.local/bin`) travel together. Anything a suite needs
+  but does not execute from `PATH` goes in `NIGHTSHIFT_TEST_SANDBOX_ROBIND`. A bind that would
+  re-expose `$HOME` is refused with a log line.
+- **Git works inside the gate.** The worktree is a linked one, so its `.git` is a file pointing into
+  the repo; the repo's git dir is bound **read-only** for that reason. A suite may read git history;
+  it cannot plant a hook or move a ref in the real repository.
 - **A suite that needs one more variable** names it in `NIGHTSHIFT_TEST_ENV_PASS` (e.g.
   `UV_CACHE_DIR,CARGO_HOME`) rather than the gate inheriting the session.
 - A gate that fails only under the sandbox is almost always one of three things: a dependency
@@ -154,9 +159,23 @@ So the launcher resolves the nvm bin directory of the default (else newest) inst
 `NIGHTSHIFT_TEST_PATH`, and the Runner prepends **only that variable, only for the `test_cmd`
 subprocess** — which already executes the repo's own package scripts, so its `PATH` is not a
 boundary. Set the variable yourself to pick a specific toolchain; set it empty to opt out. Since
-ADR 0026 that directory and its parent are also what gets **bound into the sandbox**, where `$HOME`
-does not exist at all — so the variable is now how the toolchain is *reachable*, not merely how it
-is found first.
+ADR 0026 those directories are also what gets **bound into the sandbox**, where `$HOME` does not
+exist at all — so the variable is now how the toolchain is *reachable*, not merely how it is found
+first.
+
+It is read as a **`:`-separated PATH fragment**, because one directory is not enough: this fleet
+needs `node` from nvm and `uv` from `~/.local/bin` in the same gate, and a directory that is bound
+but not on `PATH` (or on `PATH` but not bound) leaves the tool exactly as unreachable as before.
+
+```bash
+NIGHTSHIFT_TEST_PATH="$HOME/.nvm/versions/node/v24.13.0/bin:$HOME/.local/bin"
+```
+
+A **self-contained node install** also gets its prefix bound (node resolves its own libraries via
+`..`). That is deliberately narrow: it requires both a `node` binary in the listed directory *and* a
+node-modules tree under the prefix. Binding the parent of any bin directory — or of any directory
+that merely has a node-modules tree beside it — would mount `~/.local`, npm's global prefix on this
+host, and with it `~/.local/share`, into a sandbox whose entire purpose is that `$HOME` is not in it.
 
 Get this wrong and the failure is silent rather than loud: a gate that exits `9`
 (`node: bad option`) or `127` (`pnpm: command not found`) is indistinguishable from a fix that broke

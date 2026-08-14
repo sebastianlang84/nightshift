@@ -32,6 +32,12 @@ export PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:${PATH:-}"
 # fixes were discarded as "the fix broke the suite" that night, and the same work is re-attempted and
 # re-discarded every night because `tests-failed` is deliberately not latched (ADR 0022).
 #
+# Since ADR 0026 the variable does more than order PATH: the gate runs in a bwrap sandbox with no
+# $HOME at all, so these directories are also the ones BOUND into it. A tool that is not named here
+# is not merely found late — it does not exist inside the gate. Hence the `:`-separated list below:
+# `uv` lives in ~/.local/bin and `node` under nvm, and the fleet needs both in the same gate.
+# This still does not touch the Runner's own PATH, so R10/N4 is unaffected.
+#
 # Set NIGHTSHIFT_TEST_PATH yourself to override; set it empty to opt out entirely.
 nvm_toolchain_bin() { # -> bin dir of the default (else newest) nvm Node, or nothing at all
   local d="$HOME/.nvm/versions/node" want="" newest
@@ -45,7 +51,17 @@ nvm_toolchain_bin() { # -> bin dir of the default (else newest) nvm Node, or not
   [ -n "$newest" ] && [ -x "$d/$newest/bin/node" ] && printf '%s' "$d/$newest/bin"
   return 0
 }
-export NIGHTSHIFT_TEST_PATH="${NIGHTSHIFT_TEST_PATH-$(nvm_toolchain_bin)}"
+gate_toolchain_path() { # -> `:`-separated dirs the gates need bound and on PATH
+  local out="" d
+  out="$(nvm_toolchain_bin)"
+  # ~/.local/bin is where uv/pipx-style tools land. It is on the Runner's PATH already (last, on
+  # purpose), but the sandbox has no $HOME, so it must be named to exist inside a gate at all.
+  for d in "$HOME/.local/bin"; do
+    [ -d "$d" ] && out="${out:+$out:}$d"
+  done
+  printf '%s' "$out"
+}
+export NIGHTSHIFT_TEST_PATH="${NIGHTSHIFT_TEST_PATH-$(gate_toolchain_path)}"
 
 LOG_DIR="${NIGHTSHIFT_LOG_DIR:-$HOME/.local/state/nightshift/logs}"
 mkdir -p "$LOG_DIR"
@@ -64,7 +80,9 @@ echo "=== nightshift start $(date -Iseconds) (agent=$NIGHTSHIFT_AGENT) ===" | te
 # Which Node the ship gates will see. Logged because the failure it prevents is silent: a gate that
 # exits 9 or 127 on a toolchain problem is reported as "the fix broke the suite".
 if [ -n "${NIGHTSHIFT_TEST_PATH:-}" ]; then
-  echo "[nightshift-cron] test gates prepend $NIGHTSHIFT_TEST_PATH (node $("$NIGHTSHIFT_TEST_PATH/node" -v 2>/dev/null || echo 'not runnable'))" | tee -a "$LOG"
+  # `command -v` against the list itself, not "$NIGHTSHIFT_TEST_PATH/node" — the variable is a
+  # `:`-separated list now, so indexing it as a single directory would report every node as missing.
+  echo "[nightshift-cron] test gates bind + prepend $NIGHTSHIFT_TEST_PATH (node $(PATH="$NIGHTSHIFT_TEST_PATH" command -v node >/dev/null 2>&1 && PATH="$NIGHTSHIFT_TEST_PATH" node -v || echo 'not runnable'), uv $(PATH="$NIGHTSHIFT_TEST_PATH" command -v uv >/dev/null 2>&1 && echo present || echo 'not found'))" | tee -a "$LOG"
 else
   echo "[nightshift-cron] no nvm toolchain found — test gates run on $(command -v node || echo 'no node at all')" | tee -a "$LOG"
 fi

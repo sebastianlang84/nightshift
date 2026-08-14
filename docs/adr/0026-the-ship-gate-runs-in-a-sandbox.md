@@ -117,10 +117,21 @@ a prompt-injected Fix stage now runs somewhere with no SSH key, no token, no `~/
 can carry into the next night.
 
 **The gate needs its dependencies bound in.** `$HOME` is gone, and under nvm the toolchain lives
-there — so the gate binds `NIGHTSHIFT_TEST_PATH` and its parent read-only (node resolves its own
-`lib/` relative to `..`). Anything else a suite needs from outside `/usr` is named by the host in
-`NIGHTSHIFT_TEST_SANDBOX_ROBIND`, and a bind that would re-expose `$HOME` — `/`, `/home`, `$HOME`
-itself — is refused with a log line rather than mounted.
+there — so every entry of `NIGHTSHIFT_TEST_PATH` (read as a `:`-separated PATH fragment, because
+this fleet needs `node` from nvm and `uv` from `~/.local/bin` in the same gate) is bound read-only
+*and* placed on the gate's `PATH`; bound-but-not-on-`PATH` is just as unreachable. A self-contained
+node install additionally gets its prefix bound, gated on the directory holding a `node` binary
+**and** the prefix holding a node-modules tree — both conditions, because either one alone mounts
+`~/.local`, which is npm's global prefix on this host.
+Anything else is named by the host in `NIGHTSHIFT_TEST_SANDBOX_ROBIND`, and a bind that would
+re-expose `$HOME` — `/`, `/home`, `$HOME` itself — is refused with a log line rather than mounted.
+
+**The repository's git dir is bound read-only.** The gate always runs in a linked worktree, whose
+`.git` is a *file* pointing at `<repo>/.git/worktrees/<name>`; without the bind every git command
+inside the sandbox exits 128 and any suite that consults git fails for a reason unrelated to the
+change under test — nightshift's own `lib/check_docs.py` was the first casualty. Read-only is the
+security half: writable, a `pretest` could plant a hook or rewrite refs in the real repository and
+walk straight past the disposable worktree the whole design rests on.
 
 **Cold caches, unless the host says otherwise.** A disposable `HOME` means npm and uv start empty on
 every gate, which for a `test_net: true` repo costs a real download inside the timeout.
@@ -143,6 +154,9 @@ this lands.
   path set against what review signed off on — N3's unimplemented stronger half — and it cannot be
   a naive "the tree must not change", because legitimate suites touch lockfiles. Bounded for now by
   human review of the branch before merge (C5).
+- **The repository's history is readable inside the gate**, because the git dir is bound. It is the
+  same content the worktree already carries, and `.git/config` names remotes — on this host SSH
+  URLs, not credentials. A repo that keeps a token in a remote URL would expose it to its own gate.
 - **`test_net: true` is an egress channel** for worktree content. Narrowed to the repos that need
   it, holding no credentials, but it is real and it is unproxied.
 - **`RLIMIT_AS` is address space, not resident memory.** It stops a runaway allocation; it is not a

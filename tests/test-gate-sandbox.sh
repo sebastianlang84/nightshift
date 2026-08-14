@@ -59,7 +59,8 @@ PROBE
 gate() { # $1 = command run inside the sandbox; extra VAR=VALUE args are exported for the probe
   local cmd="$1"; shift
   rm -f "$TMP/item/tests.log"
-  env "$@" ROOT="$ROOT" WT="$TMP/wt" ID="$TMP/item" GATE_CMD="$cmd" \
+  # WT leads so a case can point the gate at a different worktree via the extra args (§9 does).
+  env WT="$TMP/wt" "$@" ROOT="$ROOT" ID="$TMP/item" GATE_CMD="$cmd" \
       NIGHTSHIFT_WORKTREES="$TMP/worktrees" \
       bash "$TMP/probe.sh" 2>&1
 }
@@ -109,8 +110,16 @@ grep -q 'passed=/tmp/uv-cache' <<<"$out" \
 # `getent ahosts` needs no server to be reachable — with --unshare-net the resolver itself fails.
 out="$(gate 'getent ahosts example.invalid >/dev/null 2>&1; getent ahosts localhost >/dev/null 2>&1 && echo NET-UP || echo NET-DOWN')"
 grep -q 'NET-DOWN' <<<"$out" || { echo "$out" >&2; fail "the gate has network egress without test_net: true"; }
-out="$(gate 'getent ahosts localhost >/dev/null 2>&1 && echo NET-UP || echo NET-DOWN' GATE_NET=true)"
-grep -q 'NET-UP' <<<"$out" || { echo "$out" >&2; fail "test_net: true did not restore the loopback/resolver path"; }
+# The positive half can only assert that test_net RESTORES what the surrounding environment has.
+# nightshift gates ITSELF (ADR 0026), so this suite routinely runs inside a netless gate sandbox
+# where /etc/hosts is unbound and no resolver works at any nesting depth — asserting NET-UP there
+# fails for the environment, not for the code, and would turn nightshift's own nightly gate red.
+if getent ahosts localhost >/dev/null 2>&1; then
+  out="$(gate 'getent ahosts localhost >/dev/null 2>&1 && echo NET-UP || echo NET-DOWN' GATE_NET=true)"
+  grep -q 'NET-UP' <<<"$out" || { echo "$out" >&2; fail "test_net: true did not restore the loopback/resolver path"; }
+else
+  echo "test-gate-sandbox: note — test_net positive case skipped (this environment has no resolver)"
+fi
 
 # --- 5. no sandbox is a REFUSAL to ship, never a licence to ship unconfined --
 # rc=2 ("the gate could not run"), distinct from rc=1 (a red suite) so the caller does not hand a
@@ -171,5 +180,57 @@ grep -q 'cpu=60'     <<<"$out" || { echo "$out" >&2; fail "RLIMIT_CPU was not de
 # --die-with-parent regression would leave the sleep running and this case would hang, not fail.
 out="$(gate 'sleep 30' GATE_TIMEOUT=1)"
 grep -q 'GATE_RC=1' <<<"$out" || { echo "$out" >&2; fail "a hanging sandboxed suite was not bounded by the timeout"; }
+
+# --- 9. git still works in the worktree, and the real repo stays read-only ---
+# The gate ALWAYS runs in a linked worktree (`git worktree --detach`), whose `.git` is a FILE
+# containing `gitdir: <repo>/.git/worktrees/<name>`. Bind only the worktree and every git command
+# resolves out of the sandbox into a repo that is not there: `git ls-files` exits 128 and any suite
+# that consults git fails for a reason unrelated to the change under test. Observed against
+# nightshift's own gate, whose `lib/check_docs.py` does exactly that.
+GREPO="$TMP/gitrepo"
+git init -q -b main "$GREPO"
+echo "content" > "$GREPO/tracked.md"
+git -C "$GREPO" -c user.name=t -c user.email=t@localhost add -A
+git -C "$GREPO" -c user.name=t -c user.email=t@localhost commit -q -m initial
+git -C "$GREPO" worktree add -q --detach "$TMP/linked"
+
+out="$(gate 'git ls-files 2>&1; git rev-parse --is-inside-work-tree 2>&1' WT="$TMP/linked")"
+grep -q 'tracked.md' <<<"$out" \
+  || { echo "$out" >&2; fail "git cannot read the linked worktree inside the sandbox — the repo's git dir is unbound"; }
+
+# …and it is bound READ-ONLY. Writable, a `pretest` could plant a hook or rewrite refs in the REAL
+# repository — an escape straight past the disposable worktree the whole design rests on.
+out="$(gate 'echo "#!/bin/sh" > "$(git rev-parse --git-common-dir)/hooks/post-checkout" 2>&1; echo tried' WT="$TMP/linked")"
+[ -e "$GREPO/.git/hooks/post-checkout" ] \
+  && { echo "$out" >&2; fail "the gate planted a hook in the REAL repository — the git dir is writable"; }
+
+# --- 10. the toolchain is bound AND on PATH, without over-mounting its parent ---
+# NIGHTSHIFT_TEST_PATH is read as a colon-separated PATH fragment: the fleet needs node from nvm and
+# `uv` from ~/.local/bin in the SAME gate, and a directory that is bound but not on PATH (or on PATH
+# but not bound) leaves the tool exactly as unreachable as before.
+mkdir -p "$TMP/tc-a" "$TMP/tc-b"
+printf '#!/bin/sh\necho tool-a-ran\n' > "$TMP/tc-a/tool-a"; chmod +x "$TMP/tc-a/tool-a"
+printf '#!/bin/sh\necho tool-b-ran\n' > "$TMP/tc-b/tool-b"; chmod +x "$TMP/tc-b/tool-b"
+out="$(gate 'tool-a; tool-b' NIGHTSHIFT_TEST_PATH="$TMP/tc-a:$TMP/tc-b")"
+grep -q 'tool-a-ran' <<<"$out" || { echo "$out" >&2; fail "the first NIGHTSHIFT_TEST_PATH entry was not reachable"; }
+grep -q 'tool-b-ran' <<<"$out" || { echo "$out" >&2; fail "a SECOND NIGHTSHIFT_TEST_PATH entry was not reachable (colon list not honoured)"; }
+
+# A node install needs its prefix (node resolves lib/ via `..`) — but only a SELF-CONTAINED one.
+# `lib/node_modules` alone is npm's global prefix, which on a real host sits at ~/.local: binding
+# that parent would mount ~/.local/share into the sandbox. Pinned in both directions.
+mkdir -p "$TMP/prefix/bin" "$TMP/prefix/lib/node_modules" "$TMP/prefix/secret"
+printf 'prefix-secret\n' > "$TMP/prefix/secret/creds"
+printf '#!/bin/sh\necho fake-node\n' > "$TMP/prefix/bin/node"; chmod +x "$TMP/prefix/bin/node"
+out="$(gate "cat '$TMP/prefix/secret/creds' 2>&1" NIGHTSHIFT_TEST_PATH="$TMP/prefix/bin")"
+grep -q 'prefix-secret' <<<"$out" \
+  || { echo "$out" >&2; fail "a self-contained node prefix was not bound — node cannot resolve its own lib/"; }
+
+mkdir -p "$TMP/npmglobal/bin" "$TMP/npmglobal/lib/node_modules" "$TMP/npmglobal/share"
+printf 'must-not-leak\n' > "$TMP/npmglobal/share/private"
+printf '#!/bin/sh\necho uvish\n' > "$TMP/npmglobal/bin/uvish"; chmod +x "$TMP/npmglobal/bin/uvish"
+out="$(gate "uvish; cat '$TMP/npmglobal/share/private' 2>&1" NIGHTSHIFT_TEST_PATH="$TMP/npmglobal/bin")"
+grep -q 'uvish' <<<"$out" || { echo "$out" >&2; fail "the toolchain dir itself was not bound"; }
+grep -q 'must-not-leak' <<<"$out" \
+  && { echo "$out" >&2; fail "a bin dir whose parent merely HAS lib/node_modules mounted that parent — ~/.local would be exposed"; }
 
 echo "test-gate-sandbox: ok"

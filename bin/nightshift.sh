@@ -1438,12 +1438,33 @@ build_test_sandbox() { # worktree sandbox_home net(0|1) -> fills TEST_SANDBOX_AR
   # Resolver config buys nothing without egress, so it is bound only when egress is granted.
   [ "$net" = 1 ] && TEST_SANDBOX_ARGV+=(
     --ro-bind-try /etc/resolv.conf /etc/resolv.conf --ro-bind-try /etc/hosts /etc/hosts )
-  # The developer toolchain lives under nvm, i.e. under $HOME, which is NOT bound. Bind the bin dir
-  # and its parent: node resolves its own lib/ and include/ relative to `..`.
-  if [ -n "${NIGHTSHIFT_TEST_PATH:-}" ]; then
-    _test_robind "$(dirname -- "$NIGHTSHIFT_TEST_PATH")"
-    _test_robind "$NIGHTSHIFT_TEST_PATH"
-  fi
+  # A linked worktree's `.git` is a FILE (`gitdir: <repo>/.git/worktrees/<name>`), so every git
+  # command in the gate resolves out of the worktree and into the repo — which is not bound. Without
+  # this, `git ls-files` exits 128 and any suite that consults git fails for a reason that has
+  # nothing to do with the change under test (nightshift's own `lib/check_docs.py` is one).
+  # READ-ONLY, and that is the whole point: writable, a `pretest` could plant a hook or rewrite
+  # history in the REAL repository — an escape straight past the disposable worktree.
+  local gitdir
+  gitdir="$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+  [ -n "$gitdir" ] && _test_robind "$gitdir"
+  # The developer toolchain lives under nvm, i.e. under $HOME, which is NOT bound — so every entry
+  # of NIGHTSHIFT_TEST_PATH is bound read-only here as well as prepended to PATH below. It is read
+  # as a colon-separated PATH FRAGMENT, which is what it already was on the PATH side: the fleet
+  # needs node from nvm and `uv` from ~/.local/bin in the same gate, and binding a directory without
+  # putting it on PATH (or the reverse) leaves the tool just as unreachable.
+  local -a tcdirs=()
+  IFS=: read -r -a tcdirs <<<"${NIGHTSHIFT_TEST_PATH:-}"
+  for p in ${tcdirs[@]+"${tcdirs[@]}"}; do
+    [ -n "$p" ] || continue
+    # node resolves its own lib/ relative to `..`, so an nvm bin dir needs its prefix bound too.
+    # Scoped to a SELF-CONTAINED node install (`bin/node` + `lib/node_modules` under one prefix),
+    # because the looser tests are both wrong here: a bare `dirname` drags in ~/.local for a
+    # ~/.local/bin entry, and `lib/node_modules` alone still matches it — that is npm's global
+    # prefix on this very host — mounting ~/.local/share into a sandbox whose entire purpose is
+    # that $HOME is not in it.
+    [ -x "$p/node" ] && [ -d "$(dirname -- "$p")/lib/node_modules" ] && _test_robind "$(dirname -- "$p")"
+    _test_robind "$p"
+  done
   # Host-declared extras — a warmed dependency cache, a shared toolchain, a runtime outside /usr.
   IFS=: read -r -a extra <<<"${NIGHTSHIFT_TEST_SANDBOX_ROBIND:-}"
   for p in ${extra[@]+"${extra[@]}"}; do _test_robind "$p"; done
