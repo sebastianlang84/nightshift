@@ -57,4 +57,26 @@ evidence_override "$REPO" craft    && fail "craft has no shipped row — overrid
 pick2="$(select_dimension "$REPO")"
 [ "$pick2" = security ] || fail "evidence should lift low security above low craft (got $pick2)"
 
+# --- the ledger aggregates come from ONE cached pass, and the cache must not go blind -------------
+# last_dim_epoch and evidence_override read the same mtime-invalidated index instead of re-slurping
+# the whole ledger per (repo,dimension) cell. Three things must hold for that to stay honest.
+[ -f "$LEDGER_EPOCH_INDEX" ] || fail "the lookups should have built the ledger epoch index"
+awk -F'\t' -v r="$REPO" '$1==r && $2=="security" && $4>0 {ok=1} END{exit !ok}' "$LEDGER_EPOCH_INDEX" \
+  || fail "index should carry security's shipped epoch in column 4"
+
+# 1. a shipped row appended AFTER the index was built invalidates it (else the override goes blind).
+jq -nc --arg r "$REPO" --arg ts "$(date -Iseconds -d "@$((now-30))")" \
+  '{repo:$r, dimension:"craft", outcome:"shipped", branch:"nightshift/y", ts:$ts}' >> "$LEDGER"
+evidence_override "$REPO" craft || fail "a shipped row appended after the index was built must invalidate it"
+
+# 2. the service column still feeds last_dim_epoch: that row (now-30) postdates craft's scan marker.
+[ "$(last_dim_epoch "$REPO" craft)" = "$((now-30))" ] \
+  || fail "last_dim_epoch should read the service epoch from the index (got $(last_dim_epoch "$REPO" craft))"
+
+# 3. an index in the pre-shipped-column format is rebuilt, not read as "no shipped rows" — it is
+#    made NEWER than the ledger, so only the format marker can invalidate it.
+printf '%s\t%s\t%s\n' "$REPO" security 1 > "$LEDGER_EPOCH_INDEX"
+touch -d "@$((now+60))" "$LEDGER_EPOCH_INDEX"
+evidence_override "$REPO" security || fail "an old-format index must be rebuilt, not trusted"
+
 echo "test-recon-yield-selection: ok"

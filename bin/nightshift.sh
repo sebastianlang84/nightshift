@@ -28,10 +28,16 @@ LEDGER="$STATE_DIR/ledger.jsonl"
 # Freshness snapshot for open findings (lib/probe_findings.py): derived, disposable, rewritten by
 # harvest and by the verify phase. Read by the dashboard's Nightshift tab through the same mount.
 PROBE_SNAPSHOT="$STATE_DIR/findings-probe.json"
-# Derived, disposable index of the last service epoch per (repo,dimension). One aggregating jq
-# pass over the append-only ledger, memoized on the ledger's mtime, so last_dim_epoch's nested
+# Derived, disposable index of the per-(repo,dimension) ledger aggregates the selection loop needs:
+# the last service epoch (last_dim_epoch) and the last SHIPPED epoch (evidence_override). One
+# aggregating jq pass over the append-only ledger, memoized on the ledger's mtime, so their nested
 # repo×dimension callers stop re-slurping the whole ledger on every cell (see last_dim_epoch).
 LEDGER_EPOCH_INDEX="$STATE_DIR/.ledger-epoch.idx"
+# Format marker, written as the index's FIRST line. An index left by an older nightshift has no
+# shipped column, and reading its missing field as 0 would silently suppress every evidence
+# override — so the format, not just the mtime, invalidates the cache. The lookups match a repo
+# path in $1, so this line can never be mistaken for a row.
+LEDGER_EPOCH_INDEX_VERSION="#nightshift-ledger-epoch-idx v2"
 RUNSLOG="$STATE_DIR/runs.jsonl"
 RECON_DIR="$STATE_DIR/recon"   # per-repo recon caches (ADR 0010); derived, disposable, HEAD/TTL-invalidated
 SCAN_DIR="$STATE_DIR/dim-scans"  # per (repo,dim) explore markers so rotation advances even on an empty Explore
@@ -969,30 +975,58 @@ repo_dimensions() { # repo -> candidate dimensions, space-separated, in priority
 dim_scan_marker() { # repo dim -> marker file path (basename + path hash keeps same-named repos distinct)
   printf '%s/%s-%s__%s' "$SCAN_DIR" "$(basename "$1")" "$(printf '%s' "$1" | sha1sum | cut -c1-8)" "$2"
 }
-refresh_ledger_epoch_index() { # rebuild LEDGER_EPOCH_INDEX (repo\tdim\tepoch) iff the ledger changed
-  # last_dim_epoch runs once per (repo,dimension) cell inside nested loops — select_dimension's
-  # dimension loop and write_digest's repo×dimension coverage matrix — so a per-call `jq -rs` slurp
-  # re-parses the whole append-only, never-pruned ledger O(R*D) times a night. Instead derive the
-  # per-key max service ts in ONE jq pass and cache it, invalidated on the ledger's mtime (the file
-  # is command-substitution-safe state, since callers run last_dim_epoch in a subshell). The per-key
-  # max is exactly what the old per-call query returned, so the staleness ranking is unchanged.
+refresh_ledger_epoch_index() { # rebuild LEDGER_EPOCH_INDEX (repo\tdim\tservice_epoch\tshipped_epoch) iff the ledger changed
+  # last_dim_epoch AND evidence_override both run once per (repo,dimension) cell inside nested loops
+  # — select_dimension's dimension loop and write_digest's repo×dimension coverage matrix — so a
+  # per-call `jq -rs` slurp re-parses the whole append-only, never-pruned ledger O(R*D) times a
+  # night, each slurp forking a `date` per matching row. Instead derive BOTH per-key aggregates in
+  # ONE jq pass and cache them, invalidated on the ledger's mtime (the file is command-substitution-
+  # safe state, since callers may run in a subshell). Each column is exactly what its old per-call
+  # query returned, so neither the staleness ranking nor the evidence override changes:
+  #   col 3  max service ts over finding|shipped|abandoned   (last_dim_epoch)
+  #   col 4  max epoch over shipped rows                     (evidence_override: ∃ts>gen ⟺ max>gen)
+  # Col 4 reduces over PARSED epochs, not over raw strings: an unparsable ts scores 0, exactly as the
+  # old per-row `date -d ... || echo 0` scored it, and a lexical max would let one such row mask a
+  # real shipped finding behind it.
   if [ ! -f "$LEDGER" ]; then rm -f "$LEDGER_EPOCH_INDEX" 2>/dev/null || true; return 0; fi
-  # Fresh index (exists and the ledger is not newer) → reuse; nested cells cost a lookup, not a scan.
-  { [ -f "$LEDGER_EPOCH_INDEX" ] && [ ! "$LEDGER" -nt "$LEDGER_EPOCH_INDEX" ]; } && return 0
-  local raw tmp repo dim iso
+  # Fresh index (exists, current format, ledger not newer) → reuse; nested cells cost a lookup, not
+  # a scan. `read` is a builtin, so the version check costs no fork on that hot path.
+  local first=""
+  if [ -f "$LEDGER_EPOCH_INDEX" ] && [ ! "$LEDGER" -nt "$LEDGER_EPOCH_INDEX" ]; then
+    IFS= read -r first < "$LEDGER_EPOCH_INDEX" || true
+    [ "$first" = "$LEDGER_EPOCH_INDEX_VERSION" ] && return 0
+  fi
+  local raw tmp kind repo dim iso e key
+  local -A svc=() ship=()
   # On a jq failure keep any existing index and retry next call — never cache an empty index over a
   # good one (matches the old per-call `|| true`, which fell back to epoch 0 only for that one call).
   raw=$(jq -rs '
-    [.[]|select(.repo!=null and .dimension!=null
-                and (.outcome=="finding" or .outcome=="shipped" or .outcome=="abandoned"))]
-    | group_by([.repo,.dimension]) | map(max_by(.ts) | [.repo,.dimension,.ts])
+    [.[]|select(.repo!=null and .dimension!=null)] as $rows
+    | ( $rows | map(select(.outcome=="finding" or .outcome=="shipped" or .outcome=="abandoned"))
+              | group_by([.repo,.dimension]) | map(max_by(.ts) | ["svc",.repo,.dimension,.ts]) )
+    + ( $rows | map(select(.outcome=="shipped") | ["ship",.repo,.dimension,.ts]) )
     | .[] | @tsv' "$LEDGER" 2>/dev/null) || return 0
+  while IFS=$'\t' read -r kind repo dim iso; do
+    [ -n "$iso" ] || continue      # a null/absent ts parses to nothing, as it scored 0 before
+    e=$(date -d "$iso" +%s 2>/dev/null || echo 0)
+    key="$repo"$'\t'"$dim"
+    if [ "$kind" = svc ]; then
+      svc["$key"]=$e
+    elif [ "$e" -gt "${ship[$key]:-0}" ]; then
+      ship["$key"]=$e
+    fi
+  done <<< "$raw"
   tmp="$(mktemp "$STATE_DIR/.ledger-epoch.idx.XXXXXX")"
   {
-    while IFS=$'\t' read -r repo dim iso; do
-      [ -n "$iso" ] || continue
-      printf '%s\t%s\t%s\n' "$repo" "$dim" "$(date -d "$iso" +%s 2>/dev/null || echo 0)"
-    done <<< "$raw"
+    printf '%s\n' "$LEDGER_EPOCH_INDEX_VERSION"
+    # $key is already "repo<TAB>dim"; a shipped row implies a service row, so svc's keys are the
+    # complete key set and a key with no shipped row scores 0 (no override), as the old scan did.
+    # A ledger with no service rows yet writes the marker alone — still a valid, cacheable index.
+    if [ "${#svc[@]}" -gt 0 ]; then
+      for key in "${!svc[@]}"; do
+        printf '%s\t%s\t%s\n' "$key" "${svc[$key]}" "${ship[$key]:-0}"
+      done
+    fi
   } > "$tmp"
   mv -f "$tmp" "$LEDGER_EPOCH_INDEX"
 }
@@ -1043,16 +1077,17 @@ evidence_override() { # repo dim -> 0 if a SHIPPED finding for (repo,dim) postda
   # weight floors at normal. Anchored to recon's generation time, it self-clears once recon re-runs
   # with that finding in history. Only `shipped` counts — a later-dropped false positive must not pin
   # the weight up. Derived from the durable ledger; NOTHING is written to the disposable recon cache.
-  local repo="$1" dim="$2" gen ts e
+  # "Some shipped ts postdates recon" is a max over that key's shipped epochs (∃ts>gen ⟺ max>gen),
+  # so it comes from the same cached one-pass index last_dim_epoch reads — a lookup per cell, not a
+  # whole-ledger re-parse plus a `date` fork per matching row, once per (repo,dimension) cell.
+  local repo="$1" dim="$2" gen ship=0
   [ -f "$LEDGER" ] || return 1
+  refresh_ledger_epoch_index
+  [ -f "$LEDGER_EPOCH_INDEX" ] || return 1
+  ship=$(awk -F'\t' -v r="$repo" -v d="$dim" '$1==r && $2==d {print $4; exit}' "$LEDGER_EPOCH_INDEX")
+  [ -n "$ship" ] || ship=0
   gen=$(recon_generated_epoch "$repo")
-  while IFS= read -r ts; do
-    [ -n "$ts" ] || continue
-    e=$(date -d "$ts" +%s 2>/dev/null || echo 0)
-    [ "$e" -gt "$gen" ] && return 0
-  done < <(jq -r --arg r "$repo" --arg d "$dim" \
-            'select(.repo==$r and .dimension==$d and .outcome=="shipped") | .ts' "$LEDGER" 2>/dev/null || true)
-  return 1
+  [ "$ship" -gt "$gen" ]
 }
 
 median_gap() { # repo D -> median inter-service interval (secs) across the repo's service rows; 60d bootstrap
