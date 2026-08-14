@@ -25,6 +25,9 @@ LIMIT_KEYS = (
 RECON_KEYS = ("enabled", "ttl_days")
 AGENT_KEYS = ("claude_model", "codex_model")
 REPO_KEYS = ("path", "mode", "base", "findings", "dimensions", "test_cmd")
+# The modes the Runner actually implements. A repo whose mode is not in here is a typo, not a
+# feature request — see the validation below for why that must abort rather than be skipped.
+REPO_MODES = ("findings-only", "branch-fix")
 
 
 def val(raw: str) -> str:
@@ -230,6 +233,17 @@ def main(path: str) -> None:
         if findings and (not findings.isdecimal() or int(findings) < 1):
             raise SystemExit(
                 f"repo {r.get('path', '')}: findings must be a positive integer"
+            )
+        # The Runner's select_order() skips any repo whose mode it does not recognise, WITHOUT a log
+        # line — so `mode: brnach-fix` silently removed the repo from every night and the operator's
+        # only clue was that it never appeared in a digest again. Closed key sets already protect
+        # every other knob from a typo (LIMIT_KEYS/RECON_KEYS/AGENT_KEYS/REPO_KEYS); the mode VALUE
+        # was the one place a typo still degraded the run quietly. Fail closed, same as the keys.
+        mode = r.get("mode", "findings-only")
+        if mode not in REPO_MODES:
+            raise SystemExit(
+                f"repo {r.get('path', '')}: unknown mode {mode!r} — "
+                f"expected one of {', '.join(sorted(REPO_MODES))}"
             )
         # test_cmd is optional: empty means "no ship gate" (ADR 0022). It rides the same TSV as
         # every other repo field and MUST stay last — a command legitimately contains spaces, and
