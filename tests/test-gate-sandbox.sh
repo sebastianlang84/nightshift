@@ -57,7 +57,7 @@ cat > "$TMP/probe.sh" <<'PROBE'
 set +u
 NIGHTSHIFT_SOURCED=1 . "$ROOT/bin/nightshift.sh" >/dev/null 2>&1
 set +e
-TEST_TIMEOUT="${GATE_TIMEOUT:-60}"; TEST_MEMORY_MB=4096; TEST_MAX_PROCS=2048
+TEST_TIMEOUT="${GATE_TIMEOUT:-60}"; TEST_MEMORY_MB=4096; TEST_MAX_PROCS=2048; TEST_FSIZE_MB="${GATE_FSIZE_MB:-2048}"
 REPO_PATHS=("$REPO"); REPO_MODES=(branch-fix)
 REPO_TEST_NETS=("${GATE_NET:-false}"); REPO_TEST_CMDS=("$GATE_CMD; exit 1")
 run_test_gate "$REPO" "$WT" "$ID"; echo "GATE_RC=$?"
@@ -90,6 +90,12 @@ fi
 if grep -qi 'BEGIN OPENSSH PRIVATE KEY\|BEGIN RSA PRIVATE KEY' <<<"$out"; then
   fail "the gate read a real private key out of \$HOME"
 fi
+# The CA bundle is needed; the private-key directory beside it is not. Binding /etc/ssl wholesale
+# would pull in /etc/ssl/private, and a boundary that holds only because that happens to be mode
+# 0700 is not a boundary.
+out="$(gate 'ls -d /etc/ssl/certs >/dev/null 2>&1 && echo CERTS-OK; for d in /etc/ssl/private /etc/pki/tls/private; do [ -e "$d" ] && echo "PRIVKEYDIR $d"; done; echo checked')"
+grep -q 'CERTS-OK' <<<"$out" || { echo "$out" >&2; fail "the CA bundle is missing — TLS in a test_net suite would fail"; }
+grep -q 'PRIVKEYDIR' <<<"$out" && { echo "$out" >&2; fail "a private-key directory is reachable inside the gate"; }
 # The docker socket is host root for this account (risk-analysis R2), so assert the path does not
 # RESOLVE — "present but unreadable" would be one `chmod` away from reopening the whole blast radius.
 out="$(gate 'for s in /var/run/docker.sock /run/docker.sock; do [ -e "$s" ] && echo "SOCKET-PRESENT $s"; done; echo checked')"
@@ -180,10 +186,13 @@ sbhome="$(sed -n 's/^sbhome=//p' <<<"$out" | head -1)"
 [ -e "$sbhome" ] && fail "the gate's HOME ($sbhome) survived the gate — a cross-run write channel"
 
 # --- 8. resource ceilings are applied inside, not just the wall clock --------
-out="$(gate 'echo "nproc=$(ulimit -u) data=$(ulimit -d) cpu=$(ulimit -t)"')"
+out="$(gate 'echo "nproc=$(ulimit -u) data=$(ulimit -d) cpu=$(ulimit -t) fsize=$(ulimit -f)"')"
 grep -q 'nproc=2048' <<<"$out" || { echo "$out" >&2; fail "RLIMIT_NPROC (limits.test_max_procs) was not applied"; }
 grep -q 'data=4194304' <<<"$out" || { echo "$out" >&2; fail "RLIMIT_DATA (limits.test_memory_mb) was not applied"; }
 grep -q 'cpu=60'     <<<"$out" || { echo "$out" >&2; fail "RLIMIT_CPU was not derived from the gate timeout"; }
+# The worktree and scratch HOME are real disk, so the tmpfs caps do not cover filling the filesystem.
+grep -q 'fsize=' <<<"$out" || { echo "$out" >&2; fail "RLIMIT_FSIZE (limits.test_fsize_mb) was not applied"; }
+grep -q 'fsize=unlimited' <<<"$out" && { echo "$out" >&2; fail "RLIMIT_FSIZE is unlimited — a suite can fill the disk"; }
 # The wall clock still bounds a suite that hangs — and the sandbox dies with the timeout, so a
 # --die-with-parent regression would leave the sleep running and this case would hang, not fail.
 out="$(gate 'sleep 30' GATE_TIMEOUT=1)"
@@ -279,5 +288,81 @@ grep -q 'GATE_RC=2' <<<"$out" \
 # And rc=2 is the status that keeps finalize away: it is NOT rc=1, which loops back into Fix and
 # would simply run the hostile command again.
 grep -q 'GATE_RC=1' <<<"$out" && fail "the tamper was classified as a red suite — Fix would re-run it"
+
+# --- 12. a hostile gitdir cannot pass validation by redirecting `commondir` ----
+# Git separates the per-worktree $GIT_DIR from $GIT_COMMON_DIR, and a `commondir` file inside a
+# private gitdir redirects the latter. An earlier version of the guard resolved the worktree with
+# `rev-parse --git-common-dir` and compared that — which this defeats outright: the common dir
+# points back at the real repo while $GIT_DIR stays attacker-owned. Never ask a hostile repository
+# to identify itself; compare the pointer literally against what the repo says it must be.
+git -C "$TREPO" worktree add -q --detach "$TMP/trap-c"
+mkdir -p "$TMP/trap-c/.evil"
+cp -r "$TREPO/.git/worktrees/trap-c/." "$TMP/trap-c/.evil/" 2>/dev/null || true
+printf '%s/.git\n' "$TREPO" > "$TMP/trap-c/.evil/commondir"
+printf 'gitdir: %s/.evil\n' "$TMP/trap-c" > "$TMP/trap-c/.git"
+( set +u; NIGHTSHIFT_SOURCED=1 . "$ROOT/bin/nightshift.sh" >/dev/null 2>&1; set +e
+  git_pointer_ok "$TREPO" "$TMP/trap-c" ) \
+  && fail "a private gitdir whose commondir points at the real repo passed validation"
+# …and an untouched worktree is still accepted, or the guard would refuse every honest night.
+git -C "$TREPO" worktree add -q --detach "$TMP/honest"
+( set +u; NIGHTSHIFT_SOURCED=1 . "$ROOT/bin/nightshift.sh" >/dev/null 2>&1; set +e
+  git_pointer_ok "$TREPO" "$TMP/honest" ) \
+  || fail "the pointer guard rejects an untouched worktree — every night would refuse to ship"
+
+# --- 13. hooks reachable from INSIDE the worktree must not run for the Runner --
+# `core.hooksPath = .githooks` is a relative value, so git resolves it against the worktree — a
+# tracked, candidate-writable directory. nightshift's own repo is configured exactly that way and is
+# a `branch-fix` target, so a green suite could rewrite `.githooks/pre-commit` and have finalize's
+# commit execute it as the operator, outside the sandbox. Hooks in the repo's own git dir are NOT
+# candidate-controlled and must keep working (ADR 0022 relies on them), so only the former is cut.
+HREPO2="$TMP/hookrepo"; FIRED="$TMP/hook-fired"
+git init -q -b main "$HREPO2"
+mkdir -p "$HREPO2/.githooks"
+printf '#!/bin/sh\ntouch %s\n' "$FIRED" > "$HREPO2/.githooks/pre-commit"
+chmod +x "$HREPO2/.githooks/pre-commit"
+echo seed > "$HREPO2/f"
+git -C "$HREPO2" config core.hooksPath .githooks
+git -C "$HREPO2" -c core.hooksPath=/nonexistent -c user.name=t -c user.email=t@localhost add -A
+git -C "$HREPO2" -c core.hooksPath=/nonexistent -c user.name=t -c user.email=t@localhost commit -q -m init
+git -C "$HREPO2" worktree add -q --detach "$TMP/hookwt"
+rm -f "$FIRED"   # clean slate: only a commit made below may create it
+
+( set +u; NIGHTSHIFT_SOURCED=1 . "$ROOT/bin/nightshift.sh" >/dev/null 2>&1; set +e
+  mapfile -t ha < <(worktree_hook_args "$HREPO2" "$TMP/hookwt")
+  [ "${#ha[@]}" -gt 0 ] || { echo "no override produced" >&2; exit 1; }
+  echo guarded >> "$TMP/hookwt/f"
+  git -C "$TMP/hookwt" "${ha[@]}" add -A
+  git -C "$TMP/hookwt" "${ha[@]}" -c user.name=n -c user.email=n@localhost commit -q -m guarded ) \
+  || fail "the guarded commit did not run at all"
+[ -e "$FIRED" ] && fail "a worktree-resident pre-commit hook executed for a Runner commit"
+
+# The control matters as much as the assertion: without the override the same hook DOES fire, so
+# this proves the vector is live and that the override is what closes it.
+echo unguarded >> "$TMP/hookwt/f"
+git -C "$TMP/hookwt" add -A
+git -C "$TMP/hookwt" -c user.name=n -c user.email=n@localhost commit -q -m unguarded
+[ -e "$FIRED" ] || fail "control failed: the worktree hook never fires, so §13 proves nothing"
+
+# An absolute hooksPath outside the worktree is not candidate-writable — leave it alone.
+git -C "$HREPO2" config core.hooksPath /opt/somewhere/hooks
+( set +u; NIGHTSHIFT_SOURCED=1 . "$ROOT/bin/nightshift.sh" >/dev/null 2>&1; set +e
+  out2="$(worktree_hook_args "$HREPO2" "$TMP/hookwt")"; [ -z "$out2" ] ) \
+  || fail "an absolute hooksPath outside the worktree was overridden — repo hooks stop working"
+
+# --- 14. a sandbox that cannot be CONSTRUCTED is rc=2, not a red suite ---------
+# bubblewrap exits 1 for a missing bind source, a bad --chdir and an unknown option alike, and it
+# also propagates the child's status — so no exit code identifies "the sandbox never came up".
+# Inferring it from 125 (as this first shipped) misread every real construction failure as a broken
+# suite, burning a fix iteration per night on a host problem no model can repair.
+out="$(gate 'true' NIGHTSHIFT_TEST_SANDBOX_HOME=/proc/cannot-create-here)"
+grep -q 'GATE_RC=2' <<<"$out" \
+  || { echo "$out" >&2; fail "an unconstructable sandbox was not classified as 'could not run' (rc=2)"; }
+grep -q 'did not bring the sandbox up' <<<"$out" \
+  || { echo "$out" >&2; fail "the refusal does not say the gate never ran"; }
+# …while a genuinely red suite must still be rc=1, or every failing test becomes an unretryable
+# refusal and the fix<->review loop stops repairing its own regressions.
+out="$(gate 'echo a real assertion failed')"
+grep -q 'GATE_RC=1' <<<"$out" \
+  || { echo "$out" >&2; fail "a red suite was misclassified as a sandbox failure"; }
 
 echo "test-gate-sandbox: ok"

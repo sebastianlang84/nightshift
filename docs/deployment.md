@@ -115,6 +115,7 @@ agent:
 | `NIGHTSHIFT_TEST_SANDBOX_HOME` | all | the gate's `$HOME` is disposable; set a path to keep dependency caches warm |
 | `NIGHTSHIFT_TEST_ENV_PASS` | all | the gate's environment is an 8-variable allowlist; names listed here are added |
 | `NIGHTSHIFT_TEST_MEMORY_MB` | all | the rulebook's `limits.test_memory_mb`, else 4096 (`RLIMIT_DATA`) |
+| `NIGHTSHIFT_TEST_FSIZE_MB` | all | the rulebook's `limits.test_fsize_mb`, else 2048 (`RLIMIT_FSIZE`) |
 | `NIGHTSHIFT_TEST_MAX_PROCS` | all | the rulebook's `limits.test_max_procs`, else 2048 (`RLIMIT_NPROC`) |
 
 ### The ship gate runs in a sandbox — and refuses to run without one
@@ -135,6 +136,9 @@ operationally:
   list, so the fleet's `node` (nvm) and `uv` (`~/.local/bin`) travel together. Anything a suite needs
   but does not execute from `PATH` goes in `NIGHTSHIFT_TEST_SANDBOX_ROBIND`. A bind that would
   re-expose `$HOME` is refused with a log line.
+- **`test_net: true` shares this host's network**, not just the internet: loopback and the LAN are
+  reachable, so a suite in such a repo can reach other services running here. Grant it only to repos
+  whose suite genuinely installs dependencies as it runs.
 - **Git works inside the gate.** The worktree is a linked one, so its `.git` is a file pointing into
   the repo; the repo's git dir is bound **read-only** for that reason. A suite may read git history;
   it cannot plant a hook or move a ref in the real repository.

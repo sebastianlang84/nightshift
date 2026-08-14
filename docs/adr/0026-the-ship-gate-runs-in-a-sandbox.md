@@ -78,8 +78,12 @@ Resolver config (`/etc/resolv.conf`, `/etc/hosts`) is bound only when egress is 
 the full ten minutes. Inside the sandbox: `RLIMIT_NPROC` from `limits.test_max_procs` (2048), the
 fork-bomb bound; `RLIMIT_DATA` from `limits.test_memory_mb` (4096); `RLIMIT_CPU` set to
 `test_timeout_seconds`, so no single process burns more CPU-seconds than the run has wall seconds;
-and the `/tmp` tmpfs capped at 1 GiB, because a tmpfs is RAM and an uncapped one is an OOM away from
-taking the host down. The rlimits are applied by the sandbox's own pid 1, never by the Runner —
+`RLIMIT_FSIZE` from `limits.test_fsize_mb` (2048), because the worktree and the scratch HOME are
+real disk and the tmpfs caps do not cover filling the filesystem; and a size cap on **each** tmpfs,
+because a tmpfs is RAM and an uncapped one is an OOM away from taking the host down — `--size`
+applies to the next `--tmpfs` only, so `/run` needs its own and initially did not have one.
+A ceiling that fails to apply is fatal rather than ignored: the sandbox's pid 1 exits 125 instead of
+running the suite under a limit the operator believes is in force. The rlimits are applied by the sandbox's own pid 1, never by the Runner —
 they must bound the suite without bounding the Runner.
 
 The memory ceiling is `RLIMIT_DATA` and **not** `RLIMIT_AS`, which was measured into the ground: a
@@ -91,8 +95,12 @@ instead: the same suite passes at 2 GiB, while a process asking for 12.8 GB is s
 
 **4. No sandbox means no gate, and no gate means no ship.**
 
-If `bwrap` is missing, or bubblewrap fails to construct the sandbox (its own exit code 125), the
-gate returns a distinct status: **the gate could not run**. The item is refused (`tests-failed`, no
+If `bwrap` is missing, or bubblewrap fails to construct the sandbox, the gate returns a distinct
+status: **the gate could not run**. Construction failure is detected with `--json-status-fd`, not
+from the exit code: bubblewrap exits 1 for a missing bind source, a bad `--chdir` and an unknown
+option alike, and it also propagates the child's own status, so no value is unambiguous. It writes
+an `exit-code` record only once the child has actually run, and the absence of that record is the
+signal. (`child-pid` is not — bwrap forks before it binds, so a failed setup still reports one.) The item is refused (`tests-failed`, no
 branch, no PR) and — unlike a red suite — it does **not** loop back into Fix. A host problem is not
 a regression the Fix stage can repair, and treating it as one would spend every remaining fix
 iteration, every night, on a misconfiguration no model can fix.
@@ -143,11 +151,35 @@ everywhere would not help: `fsmonitor`, `alias` and `pager` are config, not hook
 
 Closed in two independent places, because either alone has a gap. The pointer is re-bound read-only
 inside the sandbox — **ordered after** the worktree's read-write bind, since that bind otherwise
-covers it — which also makes it impossible to unlink. And it is validated against the repo's own
-git dir before the gate reports success, which is what covers `NIGHTSHIFT_TEST_SANDBOX=none`, and a
+covers it — which also makes it impossible to unlink. And it is validated before every Runner-owned
+git command that touches the worktree, which is what covers `NIGHTSHIFT_TEST_SANDBOX=none` and a
 pointer the *Fix stage* wrote (N1 confines that stage to the worktree; this file is in the
 worktree). A mismatch takes the "could not run" path: refuse, do not retry — a retry just runs the
 hostile command again.
+
+**Validated before the Review stage, not only before the gate.** An independent review of the first
+version of this fix found it guarded the wrong end: the Review stage stages the worktree
+(`git add -A`, N3) to show the reviewer what finalize will commit, and that runs unsandboxed and
+*before* the gate exists to check anything. A Fix stage that rewrote `.git` detonated there. The
+check now sits at every point the Runner runs git against candidate content.
+
+**Validated literally, not by asking git.** The first version compared `rev-parse --git-common-dir`
+between worktree and repo. Git separates the per-worktree `$GIT_DIR` from `$GIT_COMMON_DIR`, and a
+`commondir` file inside a private gitdir redirects the latter — so a hostile gitdir pointed the
+common dir back at the real repo and passed. Verified as a working bypass. The pointer file is now
+compared byte-for-byte against what the repo says it must be; a hostile repository is never asked to
+identify itself.
+
+**A relative `core.hooksPath` is the same class through a different door.** Git resolves a relative
+value against the working directory, so a repo configured with `core.hooksPath = .githooks` — which
+nightshift's own repo is, and it is a `branch-fix` target — points git at a *tracked,
+candidate-writable* directory. A green suite rewrites `.githooks/pre-commit` and finalize's commit
+executes it as this account. Verified firing, with a control proving the vector is live.
+
+Not fixed by disabling hooks: finalize runs the target repo's hooks deliberately (ADR 0022 —
+nightshift must not manufacture a commit the host repo would reject), and hooks in the repo's own
+git dir are not candidate-controlled. So only hooks resolving *inside the worktree* are redirected,
+to the git dir's own hooks. An absolute path outside the worktree is left alone.
 
 **The repository's git dir is bound read-only.** The gate always runs in a linked worktree, whose
 `.git` is a *file* pointing at `<repo>/.git/worktrees/<name>`; without the bind every git command
@@ -177,11 +209,18 @@ this lands.
   path set against what review signed off on — N3's unimplemented stronger half — and it cannot be
   a naive "the tree must not change", because legitimate suites touch lockfiles. Bounded for now by
   human review of the branch before merge (C5).
-- **The repository's history is readable inside the gate**, because the git dir is bound. It is the
-  same content the worktree already carries, and `.git/config` names remotes — on this host SSH
-  URLs, not credentials. A repo that keeps a token in a remote URL would expose it to its own gate.
-- **`test_net: true` is an egress channel** for worktree content. Narrowed to the repos that need
-  it, holding no credentials, but it is real and it is unproxied.
+- **The repository's whole history is readable inside the gate**, because the common git dir is
+  bound — not just the worktree's tree, but reflogs, unreachable objects, local-only branches, and
+  any secret deleted from a past commit. `.git/config` names remotes (SSH URLs here, not
+  credentials; a repo keeping a token in a remote URL would expose it to its own gate). A netless
+  suite can copy such data into the worktree for finalize to push; a `test_net` one can send it
+  directly. The narrower design is a synthetic repo holding only the reviewed tree.
+- **`test_net: true` shares the HOST network namespace**, which is more than egress: loopback, LAN
+  and link-local are all reachable, so a suite in a `test_net` repo can talk to other services on
+  this shared host (partflow, llmstack, open-webui, the dashboard) and to any unauthenticated
+  localhost API. "No credentials on disk" is not "no credentials reachable through a trusted local
+  service". Narrowed to the repos that need it, but this is the sharpest remaining hole, and the
+  real fix is an egress proxy that refuses loopback, RFC1918, link-local and metadata addresses.
 - **`RLIMIT_DATA` is the heap, not a cgroup memory controller.** It stops a runaway allocation —
   measured: a Node process asking for 12.8 GB is refused at a 2 GiB limit — but it does not account
   for page cache, shared mappings, or the sum across a suite's worker processes. `RLIMIT_NPROC` is

@@ -21,6 +21,7 @@ LIMIT_KEYS = (
     "test_timeout_seconds",
     "test_memory_mb",
     "test_max_procs",
+    "test_fsize_mb",
     "max_findings_per_item",
     "max_verifies_per_run",
 )
@@ -195,6 +196,12 @@ def main(path: str) -> None:
     if not tmp_.isdecimal():
         raise SystemExit("limits.test_max_procs must be a non-negative integer")
     print(f"test_max_procs\t{tmp_}")
+    # RLIMIT_FSIZE. The worktree and the scratch HOME are on real disk, so without this a suite can
+    # fill the filesystem — the one host-DoS route the tmpfs caps do not cover. 0 = no cap.
+    tfs = limits.get("test_fsize_mb", "2048")
+    if not tfs.isdecimal():
+        raise SystemExit("limits.test_fsize_mb must be a non-negative integer")
+    print(f"test_fsize_mb\t{tfs}")
     # Findings emitted per repo per pass. Default 1 keeps a rulebook that omits the key at the
     # pre-v2 single-finding behavior; the live rulebook sets it explicitly (ADR 0011).
     # A hand-set 0 forces n_find=0 in the Runner (MAX_FINDINGS=0 → repo_findings 0 → the

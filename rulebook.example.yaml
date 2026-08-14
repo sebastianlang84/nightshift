@@ -35,6 +35,9 @@ limits:
                                  # heap, not the address space. RLIMIT_AS cannot be used: a WASM
                                  # runtime RESERVES multi-GB of address space it never touches, so
                                  # even 16384 broke a real vitest suite. 0 = no cap.
+  test_fsize_mb: 2048            # Gate sandbox max size of any ONE file it writes (ADR 0026), as
+                                 # RLIMIT_FSIZE. The worktree and scratch HOME are real disk, so
+                                 # this is what stops a suite filling the filesystem. 0 = no cap.
   test_max_procs: 2048           # Gate sandbox process ceiling (ADR 0026), as RLIMIT_NPROC — a
                                  # fork-bomb bound. The kernel charges it to the ACCOUNT, not to the
                                  # sandbox, so keep it well above the host's idle count. 0 = no cap.
