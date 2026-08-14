@@ -182,8 +182,9 @@ def main(path: str) -> None:
         raise SystemExit("limits.test_timeout_seconds must be a positive integer")
     print(f"test_timeout_seconds\t{tts}")
     # Resource ceilings for the sandboxed gate (ADR 0026), applied as rlimits inside the sandbox.
-    # `test_memory_mb` is RLIMIT_AS — ADDRESS SPACE, not RSS, so it must stay generous: a modern
-    # Node or JVM reserves gigabytes of virtual memory it never touches. 0 = no address-space cap.
+    # `test_memory_mb` is RLIMIT_DATA — the heap. NOT RLIMIT_AS: a WASM runtime reserves
+    # multi-GB of address space it never touches, so an address-space cap large enough for a real
+    # JS suite bounds nothing at all (measured: vitest fails at 16 GiB). 0 = no cap.
     tmb = limits.get("test_memory_mb", "4096")
     if not tmb.isdecimal():
         raise SystemExit("limits.test_memory_mb must be a non-negative integer")

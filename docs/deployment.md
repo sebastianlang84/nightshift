@@ -114,7 +114,7 @@ agent:
 | `NIGHTSHIFT_TEST_SANDBOX_ROBIND` | all | nothing extra is bound; `:`-separated paths mounted read-only in the gate |
 | `NIGHTSHIFT_TEST_SANDBOX_HOME` | all | the gate's `$HOME` is disposable; set a path to keep dependency caches warm |
 | `NIGHTSHIFT_TEST_ENV_PASS` | all | the gate's environment is an 8-variable allowlist; names listed here are added |
-| `NIGHTSHIFT_TEST_MEMORY_MB` | all | the rulebook's `limits.test_memory_mb`, else 4096 (`RLIMIT_AS`) |
+| `NIGHTSHIFT_TEST_MEMORY_MB` | all | the rulebook's `limits.test_memory_mb`, else 4096 (`RLIMIT_DATA`) |
 | `NIGHTSHIFT_TEST_MAX_PROCS` | all | the rulebook's `limits.test_max_procs`, else 2048 (`RLIMIT_NPROC`) |
 
 ### The ship gate runs in a sandbox — and refuses to run without one

@@ -76,11 +76,18 @@ Resolver config (`/etc/resolv.conf`, `/etc/hosts`) is bound only when egress is 
 
 `timeout` bounded wall clock and nothing else, so a suite could pin every core or exhaust RAM for
 the full ten minutes. Inside the sandbox: `RLIMIT_NPROC` from `limits.test_max_procs` (2048), the
-fork-bomb bound; `RLIMIT_AS` from `limits.test_memory_mb` (4096); `RLIMIT_CPU` set to
+fork-bomb bound; `RLIMIT_DATA` from `limits.test_memory_mb` (4096); `RLIMIT_CPU` set to
 `test_timeout_seconds`, so no single process burns more CPU-seconds than the run has wall seconds;
 and the `/tmp` tmpfs capped at 1 GiB, because a tmpfs is RAM and an uncapped one is an OOM away from
 taking the host down. The rlimits are applied by the sandbox's own pid 1, never by the Runner —
 they must bound the suite without bounding the Runner.
+
+The memory ceiling is `RLIMIT_DATA` and **not** `RLIMIT_AS`, which was measured into the ground: a
+WASM runtime *reserves* multi-gigabyte address ranges it never touches, so macrolens' vitest suite
+died with `Cannot allocate Wasm memory` at 4 GiB, at 8 GiB and still at 16 GiB. An address-space cap
+loose enough for a real JS suite bounds nothing worth bounding, and one tight enough to bound
+something breaks the suite — that is a knob with no working setting. `RLIMIT_DATA` bounds the heap
+instead: the same suite passes at 2 GiB, while a process asking for 12.8 GB is still refused.
 
 **4. No sandbox means no gate, and no gate means no ship.**
 
@@ -159,10 +166,11 @@ this lands.
   URLs, not credentials. A repo that keeps a token in a remote URL would expose it to its own gate.
 - **`test_net: true` is an egress channel** for worktree content. Narrowed to the repos that need
   it, holding no credentials, but it is real and it is unproxied.
-- **`RLIMIT_AS` is address space, not resident memory.** It stops a runaway allocation; it is not a
-  cgroup memory controller, and a value set too low breaks modern runtimes rather than protecting
-  anything. `RLIMIT_NPROC` is charged to the *account*, not to the sandbox, so it bounds a fork bomb
-  but is not a per-gate process budget.
+- **`RLIMIT_DATA` is the heap, not a cgroup memory controller.** It stops a runaway allocation —
+  measured: a Node process asking for 12.8 GB is refused at a 2 GiB limit — but it does not account
+  for page cache, shared mappings, or the sum across a suite's worker processes. `RLIMIT_NPROC` is
+  charged to the *account*, not to the sandbox, so it bounds a fork bomb but is not a per-gate
+  process budget.
 - **The sandbox protects the host, not the repo.** Inside it, the suite still has full control over
   the worktree and over its own exit status. `test_cmd: true` gates nothing, sandboxed or not
   (ADR 0022) — the rulebook is host-owned and that stays a host decision.
@@ -182,7 +190,7 @@ main problem — credential reach was, and a user scope inherits the caller's fi
 environment wholesale. Layering it *under* bwrap for cgroup limits was considered and rejected for
 now: it needs a live session bus, which an unattended cron path cannot assume, and
 `systemctl --user` cannot be exercised safely from this repo's test suite (see `CLAUDE.md` — a test
-that touches the user manager disarms the operator's real nightly timer). Revisit if `RLIMIT_AS`
+that touches the user manager disarms the operator's real nightly timer). Revisit if `RLIMIT_DATA`
 proves insufficient in practice.
 
 **Docker or Podman.** Docker is the sharpest irony available: membership in the `docker` group is

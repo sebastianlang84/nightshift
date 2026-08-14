@@ -31,9 +31,10 @@ limits:
   test_timeout_seconds: 600      # HARD ceiling for ONE repo's `test_cmd` ship gate (ADR 0022), so a
                                  # hanging suite cannot eat the night. Env override: NIGHTSHIFT_TEST_TIMEOUT.
                                  # Doubles as the gate's per-process CPU-seconds cap (ADR 0026).
-  test_memory_mb: 4096           # Gate sandbox memory ceiling (ADR 0026), as RLIMIT_AS — ADDRESS
-                                 # SPACE, not resident memory, so keep it generous: a modern Node or
-                                 # JVM reserves gigabytes it never touches. 0 = no cap.
+  test_memory_mb: 4096           # Gate sandbox memory ceiling (ADR 0026), as RLIMIT_DATA — the
+                                 # heap, not the address space. RLIMIT_AS cannot be used: a WASM
+                                 # runtime RESERVES multi-GB of address space it never touches, so
+                                 # even 16384 broke a real vitest suite. 0 = no cap.
   test_max_procs: 2048           # Gate sandbox process ceiling (ADR 0026), as RLIMIT_NPROC — a
                                  # fork-bomb bound. The kernel charges it to the ACCOUNT, not to the
                                  # sandbox, so keep it well above the host's idle count. 0 = no cap.

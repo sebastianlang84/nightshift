@@ -172,9 +172,9 @@ sbhome="$(sed -n 's/^sbhome=//p' <<<"$out" | head -1)"
 [ -e "$sbhome" ] && fail "the gate's HOME ($sbhome) survived the gate — a cross-run write channel"
 
 # --- 8. resource ceilings are applied inside, not just the wall clock --------
-out="$(gate 'echo "nproc=$(ulimit -u) as=$(ulimit -v) cpu=$(ulimit -t)"')"
+out="$(gate 'echo "nproc=$(ulimit -u) data=$(ulimit -d) cpu=$(ulimit -t)"')"
 grep -q 'nproc=2048' <<<"$out" || { echo "$out" >&2; fail "RLIMIT_NPROC (limits.test_max_procs) was not applied"; }
-grep -q 'as=4194304' <<<"$out" || { echo "$out" >&2; fail "RLIMIT_AS (limits.test_memory_mb) was not applied"; }
+grep -q 'data=4194304' <<<"$out" || { echo "$out" >&2; fail "RLIMIT_DATA (limits.test_memory_mb) was not applied"; }
 grep -q 'cpu=60'     <<<"$out" || { echo "$out" >&2; fail "RLIMIT_CPU was not derived from the gate timeout"; }
 # The wall clock still bounds a suite that hangs — and the sandbox dies with the timeout, so a
 # --die-with-parent regression would leave the sleep running and this case would hang, not fail.

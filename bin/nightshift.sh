@@ -1500,7 +1500,7 @@ build_test_sandbox() { # worktree sandbox_home net(0|1) -> fills TEST_SANDBOX_AR
 # so nothing the rulebook wrote is ever spliced into this script.
 TEST_GATE_INNER='
 [ "${NIGHTSHIFT_GATE_MAX_PROCS:-0}" -gt 0 ] && ulimit -u "$NIGHTSHIFT_GATE_MAX_PROCS" 2>/dev/null
-[ "${NIGHTSHIFT_GATE_MEM_MB:-0}"    -gt 0 ] && ulimit -v $((NIGHTSHIFT_GATE_MEM_MB * 1024)) 2>/dev/null
+[ "${NIGHTSHIFT_GATE_MEM_MB:-0}"    -gt 0 ] && ulimit -d $((NIGHTSHIFT_GATE_MEM_MB * 1024)) 2>/dev/null
 [ "${NIGHTSHIFT_GATE_CPU_S:-0}"     -gt 0 ] && ulimit -t "$NIGHTSHIFT_GATE_CPU_S" 2>/dev/null
 exec bash -c "$NIGHTSHIFT_GATE_CMD"
 '
