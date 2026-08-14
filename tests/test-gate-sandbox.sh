@@ -42,17 +42,25 @@ bwrap --unshare-all --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib
 # Sources the Runner for its functions (NIGHTSHIFT_SOURCED defines them without running a night),
 # fakes the one rulebook row run_test_gate reads, and runs the gate. The command always exits 1 so
 # tests.log survives — the gate deletes it on success on purpose (ADR 0022).
-mkdir -p "$TMP/wt" "$TMP/item" "$TMP/worktrees"
-echo "worktree content" > "$TMP/wt/tracked.txt"
+mkdir -p "$TMP/item" "$TMP/worktrees"
+# A REAL repo + linked worktree, because that is what the gate always gets in production — and the
+# .git pointer guard (§11) validates the worktree against its repo, so a bare directory here would
+# be testing a shape the Runner never produces.
+HREPO="$TMP/harness-repo"
+git init -q -b main "$HREPO"
+echo "worktree content" > "$HREPO/tracked.txt"
+git -C "$HREPO" -c user.name=t -c user.email=t@localhost add -A
+git -C "$HREPO" -c user.name=t -c user.email=t@localhost commit -q -m init
+git -C "$HREPO" worktree add -q --detach "$TMP/wt"
 
 cat > "$TMP/probe.sh" <<'PROBE'
 set +u
 NIGHTSHIFT_SOURCED=1 . "$ROOT/bin/nightshift.sh" >/dev/null 2>&1
 set +e
 TEST_TIMEOUT="${GATE_TIMEOUT:-60}"; TEST_MEMORY_MB=4096; TEST_MAX_PROCS=2048
-REPO_PATHS=(/fake); REPO_MODES=(branch-fix)
+REPO_PATHS=("$REPO"); REPO_MODES=(branch-fix)
 REPO_TEST_NETS=("${GATE_NET:-false}"); REPO_TEST_CMDS=("$GATE_CMD; exit 1")
-run_test_gate /fake "$WT" "$ID"; echo "GATE_RC=$?"
+run_test_gate "$REPO" "$WT" "$ID"; echo "GATE_RC=$?"
 cat "$ID/tests.log" 2>/dev/null
 PROBE
 
@@ -60,7 +68,7 @@ gate() { # $1 = command run inside the sandbox; extra VAR=VALUE args are exporte
   local cmd="$1"; shift
   rm -f "$TMP/item/tests.log"
   # WT leads so a case can point the gate at a different worktree via the extra args (§9 does).
-  env WT="$TMP/wt" "$@" ROOT="$ROOT" ID="$TMP/item" GATE_CMD="$cmd" \
+  env WT="$TMP/wt" REPO="$HREPO" "$@" ROOT="$ROOT" ID="$TMP/item" GATE_CMD="$cmd" \
       NIGHTSHIFT_WORKTREES="$TMP/worktrees" \
       bash "$TMP/probe.sh" 2>&1
 }
@@ -194,13 +202,13 @@ git -C "$GREPO" -c user.name=t -c user.email=t@localhost add -A
 git -C "$GREPO" -c user.name=t -c user.email=t@localhost commit -q -m initial
 git -C "$GREPO" worktree add -q --detach "$TMP/linked"
 
-out="$(gate 'git ls-files 2>&1; git rev-parse --is-inside-work-tree 2>&1' WT="$TMP/linked")"
+out="$(gate 'git ls-files 2>&1; git rev-parse --is-inside-work-tree 2>&1' WT="$TMP/linked" REPO="$GREPO")"
 grep -q 'tracked.md' <<<"$out" \
   || { echo "$out" >&2; fail "git cannot read the linked worktree inside the sandbox — the repo's git dir is unbound"; }
 
 # …and it is bound READ-ONLY. Writable, a `pretest` could plant a hook or rewrite refs in the REAL
 # repository — an escape straight past the disposable worktree the whole design rests on.
-out="$(gate 'echo "#!/bin/sh" > "$(git rev-parse --git-common-dir)/hooks/post-checkout" 2>&1; echo tried' WT="$TMP/linked")"
+out="$(gate 'echo "#!/bin/sh" > "$(git rev-parse --git-common-dir)/hooks/post-checkout" 2>&1; echo tried' WT="$TMP/linked" REPO="$GREPO")"
 [ -e "$GREPO/.git/hooks/post-checkout" ] \
   && { echo "$out" >&2; fail "the gate planted a hook in the REAL repository — the git dir is writable"; }
 
@@ -232,5 +240,44 @@ out="$(gate "uvish; cat '$TMP/npmglobal/share/private' 2>&1" NIGHTSHIFT_TEST_PAT
 grep -q 'uvish' <<<"$out" || { echo "$out" >&2; fail "the toolchain dir itself was not bound"; }
 grep -q 'must-not-leak' <<<"$out" \
   && { echo "$out" >&2; fail "a bin dir whose parent merely HAS lib/node_modules mounted that parent — ~/.local would be exposed"; }
+
+# --- 11. a suite cannot booby-trap `.git` for the Runner to detonate -----------
+# The sharpest hole this design had, and it made the sandbox look closed while it was not: the
+# sandbox contains the suite WHILE IT RUNS, but `$wt/.git` is a plain pointer file in the writable
+# worktree, and every git command finalize runs NEXT — `checkout -b`, `add -A`, `commit` — happens
+# OUTSIDE the sandbox as the operator and reads whatever gitdir that file names. Pointed at a gitdir
+# the suite built inside the worktree, `core.fsmonitor` is arbitrary command execution and
+# `hooks/pre-commit` is another. Both were verified firing before this was closed.
+# Two independent layers, so §11 tests both: the pointer is re-bound read-only INSIDE the sandbox
+# (prevention), and it is validated against the repo afterwards (detection — which is what covers
+# NIGHTSHIFT_TEST_SANDBOX=none, and a hostile pointer the FIX stage wrote, since the R8 guard
+# confines that stage to the worktree and this file is in the worktree).
+TREPO="$TMP/trap-repo"
+git init -q -b main "$TREPO"
+echo hi > "$TREPO/f.txt"
+git -C "$TREPO" -c user.name=t -c user.email=t@localhost add -A
+git -C "$TREPO" -c user.name=t -c user.email=t@localhost commit -q -m init
+
+trap_attack() { # worktree canary -> the gate command that rewires .git at a gitdir it controls
+  printf '%s' 'git init -q .evil 2>/dev/null; mkdir -p .evil/.git/hooks;
+printf "#!/bin/sh\ntouch '"$2"'\n" > .evil/.git/hooks/pre-commit; chmod +x .evil/.git/hooks/pre-commit;
+printf "gitdir: %s/.evil/.git\n" "$PWD" > .git 2>/dev/null'
+}
+
+# (a) sandboxed: the write itself must not land.
+git -C "$TREPO" worktree add -q --detach "$TMP/trap-a"
+out="$(gate "$(trap_attack "$TMP/trap-a" "$TMP/canary-a")" WT="$TMP/trap-a" REPO="$TREPO")"
+grep -qF 'gitdir: '"$TREPO"'/.git/worktrees/trap-a' "$TMP/trap-a/.git" \
+  || { echo "$out" >&2; cat "$TMP/trap-a/.git" >&2; fail "the gate REWROTE .git inside the sandbox — the read-only re-bind is not in effect (is it ordered after the worktree bind?)"; }
+
+# (b) unsandboxed opt-out: the write lands, so detection must refuse the item.
+git -C "$TREPO" worktree add -q --detach "$TMP/trap-b"
+out="$(gate "$(trap_attack "$TMP/trap-b" "$TMP/canary-b")" WT="$TMP/trap-b" REPO="$TREPO" NIGHTSHIFT_TEST_SANDBOX=none)"
+grep -q 'GATE_RC=2' <<<"$out" \
+  || { echo "$out" >&2; fail "a rewritten .git pointer did not refuse the item (rc=2) — finalize would detonate it"; }
+
+# And rc=2 is the status that keeps finalize away: it is NOT rc=1, which loops back into Fix and
+# would simply run the hostile command again.
+grep -q 'GATE_RC=1' <<<"$out" && fail "the tamper was classified as a red suite — Fix would re-run it"
 
 echo "test-gate-sandbox: ok"

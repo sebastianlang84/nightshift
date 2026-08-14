@@ -133,6 +133,22 @@ node install additionally gets its prefix bound, gated on the directory holding 
 Anything else is named by the host in `NIGHTSHIFT_TEST_SANDBOX_ROBIND`, and a bind that would
 re-expose `$HOME` — `/`, `/home`, `$HOME` itself — is refused with a log line rather than mounted.
 
+**Confining the gate while it runs is not sufficient, and that was nearly the whole story.** The
+sandbox contains the suite for its lifetime; `finalize` then runs `checkout -b`, `add -A` and
+`commit` in the same worktree *outside* it, as this account. `$wt/.git` is a plain pointer file in
+the writable area, so a `pretest` that repoints it at a gitdir it built inside the worktree gets
+`core.fsmonitor` — arbitrary command execution — or a `pre-commit` hook run by the Runner moments
+later. Verified firing against a real repo. Only `push` pins `core.hooksPath`, and pinning it
+everywhere would not help: `fsmonitor`, `alias` and `pager` are config, not hooks.
+
+Closed in two independent places, because either alone has a gap. The pointer is re-bound read-only
+inside the sandbox — **ordered after** the worktree's read-write bind, since that bind otherwise
+covers it — which also makes it impossible to unlink. And it is validated against the repo's own
+git dir before the gate reports success, which is what covers `NIGHTSHIFT_TEST_SANDBOX=none`, and a
+pointer the *Fix stage* wrote (N1 confines that stage to the worktree; this file is in the
+worktree). A mismatch takes the "could not run" path: refuse, do not retry — a retry just runs the
+hostile command again.
+
 **The repository's git dir is bound read-only.** The gate always runs in a linked worktree, whose
 `.git` is a *file* pointing at `<repo>/.git/worktrees/<name>`; without the bind every git command
 inside the sandbox exits 128 and any suite that consults git fails for a reason unrelated to the

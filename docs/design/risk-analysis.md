@@ -295,9 +295,22 @@ independent of any auto-merge plan, and reached before a human ever sees the bra
 the gate runs in a disposable bubblewrap sandbox — `$HOME` unbound, `/etc` reduced to a named
 allowlist, no docker socket, network denied unless the repo opts in with `test_net: true`, the
 environment an allowlist rather than an inheritance, writable only the worktree and a throwaway
-HOME, plus `RLIMIT_NPROC`/`RLIMIT_AS`/`RLIMIT_CPU` and a size-capped `/tmp`. A missing or
+HOME, plus `RLIMIT_NPROC`/`RLIMIT_DATA`/`RLIMIT_CPU` and a size-capped `/tmp`. A missing or
 unconstructable sandbox refuses the ship instead of running unconfined. Covered by
 `tests/test-gate-sandbox.sh`.*
+
+*A second, sharper leg of the same risk was found while verifying the fix against the real fleet,
+and is closed by the same ADR: confining the gate **while it runs** is not enough, because
+`$wt/.git` is a plain pointer file in the writable worktree and `finalize` then runs `checkout -b`,
+`add -A` and `commit` in that worktree **outside** the sandbox as `llmadmin`. A `pretest` that
+repoints it at a gitdir it built inside the worktree gets `core.fsmonitor` (arbitrary command) or
+a `pre-commit` hook executed by the Runner seconds later — a complete bypass that leaves the sandbox
+looking intact. Verified firing, then closed twice over: the pointer is re-bound read-only inside
+the sandbox (after the worktree's read-write bind, or it is simply covered again), and it is
+validated against the repo's own git dir before the gate reports success. A mismatch refuses the
+item with the "could not run" status, which does not loop back into Fix — retrying would only run
+the hostile command again. Note this also covers a pointer the **Fix stage** wrote: N1 confines that
+stage to the worktree, and this file is inside the worktree.*
 
 *Residual: the worktree stays writable and is what `finalize` commits, so a `pretest` can still
 modify the tree after review saw the staged diff — this is [R9](#r9)'s unimplemented stronger half

@@ -1447,6 +1447,8 @@ build_test_sandbox() { # worktree sandbox_home net(0|1) -> fills TEST_SANDBOX_AR
   local gitdir
   gitdir="$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
   [ -n "$gitdir" ] && _test_robind "$gitdir"
+  # (the pointer file itself is re-bound read-only further down — it must come AFTER the worktree's
+  # read-write bind, or that bind simply covers it again)
   # The developer toolchain lives under nvm, i.e. under $HOME, which is NOT bound — so every entry
   # of NIGHTSHIFT_TEST_PATH is bound read-only here as well as prepended to PATH below. It is read
   # as a colon-separated PATH FRAGMENT, which is what it already was on the PATH side: the fleet
@@ -1470,6 +1472,14 @@ build_test_sandbox() { # worktree sandbox_home net(0|1) -> fills TEST_SANDBOX_AR
   for p in ${extra[@]+"${extra[@]}"}; do _test_robind "$p"; done
   # The ONLY writable paths: the worktree (which is what is about to be committed) and a HOME.
   TEST_SANDBOX_ARGV+=( --bind "$wt" "$wt" --bind "$sbhome" "$sbhome" --chdir "$wt" )
+  # Punch the pointer file back out of that writable area — ORDER MATTERS, bwrap applies binds in
+  # sequence and the line above would otherwise cover this one. `$wt/.git` is a plain file naming
+  # the gitdir, and every git command finalize runs next (`checkout -b`, `add -A`, `commit`) happens
+  # OUTSIDE the sandbox as this account and reads whatever it names. Rewriting it to a gitdir built
+  # inside the worktree is a full escape: `core.fsmonitor` is arbitrary command execution and
+  # `hooks/pre-commit` is another. Both were verified to fire before this existed. As a mountpoint
+  # the file also cannot be unlinked or replaced.
+  [ -e "$wt/.git" ] && TEST_SANDBOX_ARGV+=( --ro-bind "$wt/.git" "$wt/.git" )
   # --clearenv dropped everything, SSH_AUTH_SOCK / GH_TOKEN / GITHUB_TOKEN / ANTHROPIC_API_KEY /
   # AWS_* / DOCKER_HOST included. What a suite legitimately needs is short, and it is listed here.
   TEST_SANDBOX_ARGV+=(
@@ -1504,6 +1514,23 @@ TEST_GATE_INNER='
 [ "${NIGHTSHIFT_GATE_CPU_S:-0}"     -gt 0 ] && ulimit -t "$NIGHTSHIFT_GATE_CPU_S" 2>/dev/null
 exec bash -c "$NIGHTSHIFT_GATE_CMD"
 '
+
+# `$wt/.git` is a POINTER FILE in the writable worktree, and every git command finalize runs next —
+# `checkout -b`, `add -A`, `commit` — happens outside the sandbox as this account and reads whatever
+# gitdir it names. Rewriting it is therefore a full escape (`core.fsmonitor` and `hooks/pre-commit`
+# were both verified to fire). The sandbox binds the file read-only, but this records it anyway: the
+# `none` opt-out has no such protection, and a guard that only exists inside the thing it guards is
+# not a guard. Cheap enough to be unconditional.
+# Validated against the REPO, not against a snapshot taken before the gate. A snapshot only answers
+# "did this command change it", which misses a pointer that was already hostile — and the Fix stage
+# can write `$wt/.git` too, since the R8 guard confines it to the worktree and that file is IN the
+# worktree. The repo is ground truth: the worktree's git dir must still be the repo's own.
+git_pointer_ok() { # repo worktree -> 0 if `$wt/.git` still resolves into this repo's git dir
+  local repo="$1" wt="$2" want have
+  want="$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+  have="$(git -C "$wt"   rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+  [ -n "$want" ] && [ "$want" = "$have" ]
+}
 
 run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 the gate could not run at all
   local repo="$1" wt="$2" id="$3" tcmd net trc=0 sbhome persist=0
@@ -1558,6 +1585,16 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 the gate co
       -- /bin/bash -c "$TEST_GATE_INNER" >"$id/tests.log" 2>&1 || trc=$?
   fi
   [ "$persist" = 1 ] || rm -rf "$sbhome"
+
+  # Checked BEFORE the exit status, because the whole point of this attack is to exit 0. A hostile
+  # pointer is not a red suite to hand back to the Fix stage — nothing it can write repairs it, and
+  # retrying just runs the hostile command again. Refuse the item outright and say what happened.
+  if ! git_pointer_ok "$repo" "$wt"; then
+    printf 'nightshift: this worktree'"'"'s .git no longer resolves into %s.\n%s\n' "$repo" \
+      "Refusing the item: the next git command would read a gitdir the suite chose." >"$id/tests.log"
+    log "  $(basename "$repo"): .git POINTER TAMPERED — refusing the item (see $id/tests.log)"
+    return 2
+  fi
 
   if [ "$trc" -ne 0 ]; then
     [ "$trc" -eq 124 ] && log "  $(basename "$repo"): test gate TIMED OUT after ${TEST_TIMEOUT}s"
