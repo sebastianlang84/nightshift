@@ -48,10 +48,17 @@ lockfile" from "the suite rewrote a workflow" — both simply appeared in the co
 - **Missing recording means no commit.** `finalize` refuses rather than falling back to `add -A` —
   that fallback is precisely the behaviour being removed, and a silent revert to it would look
   identical to a healthy night.
-- **Discarding is announced.** When the worktree diverges from the reviewed tree, the run logs that
-  the gate's changes are being dropped. Compared against the reviewed tree, not against `HEAD`:
-  `status --porcelain` reports the staged fix itself, so an honest night would otherwise claim the
-  gate had meddled every time.
+- **A suite that modified the worktree does not ship at all.** Discarding its changes and shipping
+  the reviewed tree anyway would be its own quiet lie: a green suite certifies *the tree the suite
+  ran on*, and once that differs from the tree being committed the verdict does not describe the
+  artifact. The classic shape is a lockfile — the fix edits a manifest, the suite regenerates the
+  lock and passes, the lock is discarded, and the branch goes out with a manifest/lock mismatch that
+  was never tested and would be red on `main`. "No gate, no ship" has to include "no gate *for this
+  tree*, no ship", so the gate refuses with its could-not-run status. Not a retry: another fix
+  iteration runs the same suite to the same effect.
+- Divergence is measured against the reviewed tree, not against `HEAD`: `status --porcelain` reports
+  the staged fix itself, so an honest night would otherwise be accused of meddling every time.
+  Ignored files do not count, so a suite's `node_modules` or `.venv` is not divergence.
 
 Each iteration of the loop re-records, so the tree that ships is the one the *last* review approved.
 
@@ -61,11 +68,20 @@ Each iteration of the loop re-records, so the tree that ships is the one the *la
 previously held only as long as nothing wrote to the worktree between review and commit — and the
 gate, by design, does exactly that.
 
-**A suite that legitimately modifies tracked files no longer has those modifications shipped.** The
-real case is a lockfile refreshed by a test run. That change is now dropped and logged. This is a
-genuine cost, and it is the right trade: a lockfile edit nobody reviewed is still a lockfile edit
-nobody reviewed. Getting it into a branch needs another fix↔review pass, which is the mechanism the
-project already has for "a change a human should look at".
+**A non-hermetic suite now costs the finding, not just its own output.** A suite that writes tracked
+files, or drops un-ignored new ones, blocks the ship outright. Measured against this fleet before
+committing to it: none of the four repos' suites touch a tracked file or leave an un-ignored file
+behind, so the path does not fire today. It fired immediately on the *dry-run sandbox*, though,
+whose demo project had no `.gitignore` and whose gate imports a module — CPython writes
+`__pycache__` beside it. That is the honest shape of this cost: not exotic, just a Python suite in a
+repo that had not needed an ignore rule before. The remedy is one line, the refusal message says so,
+and every real repo in the fleet already has it.
+
+The alternative, shipping the reviewed tree with a green that describes a different tree, is the
+same error this ADR exists to correct: an assurance that does not cover the artifact it is attached
+to. A lockfile edit nobody reviewed is still a lockfile edit nobody reviewed, and getting it into a
+branch belongs in another fix↔review pass — the mechanism the project already has for "a change a
+human should look at".
 
 **The gate keeps its full write access to the worktree**, so nothing about how suites build changes.
 It just no longer has a path from that write access into a commit.
@@ -77,6 +93,9 @@ regression test asserts the pushed workflow is the reviewed one and fails immedi
 
 - **The gate can still make the worktree unusable** — deleting files, exhausting the disk — which
   costs the item, not the review property. Bounded by ADR 0026's rlimits.
+- **A suite that mutates only ignored paths is not detected**, by design, since that is how build
+  output is supposed to behave. It cannot reach the commit either, because the commit is built from
+  the recorded object rather than from the directory.
 - **The reviewed tree is only as good as the review.** This ADR guarantees that what shipped is what
   was shown; it does not guarantee anyone read it adversarially. That is R5, unchanged.
 - **`.gitignore` still decides what `add -A` captured in the first place**, so a fix-created file

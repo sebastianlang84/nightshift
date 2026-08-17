@@ -1689,6 +1689,36 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 the gate co
     log "  $(basename "$repo"): test gate failed (rc=$trc) — see $id/tests.log"
     return 1
   fi
+  # A green suite only certifies the tree the suite RAN ON. ADR 0027 commits the tree review was
+  # shown — so if the suite changed the worktree, those two are not the same tree and this green
+  # says nothing about what would ship. The classic shape is a lockfile: the fix edits a manifest,
+  # the suite regenerates the lock and passes, ADR 0027 discards the lock, and the branch goes out
+  # with a manifest/lock mismatch that was never tested and would be red on main.
+  #
+  # So refuse, rather than ship a verdict that does not apply to the artifact. "No gate, no ship" is
+  # the whole principle here, and a gate whose result is about a different tree is not a gate for
+  # this one. rc=2, not 1: another fix iteration would run the same suite to the same effect.
+  local rtree=""
+  [ -f "$id/reviewed-tree" ] && rtree="$(cat "$id/reviewed-tree")"
+  if [ -n "$rtree" ]; then
+    git -C "$wt" update-index -q --refresh >/dev/null 2>&1 || true
+    if ! git -C "$wt" diff-index --quiet "$rtree" -- 2>/dev/null \
+       || [ -n "$(git -C "$wt" ls-files --others --exclude-standard 2>/dev/null | head -1)" ]; then
+      { echo "nightshift: the suite passed, but it modified the worktree while running."
+        echo "The tree it tested is not the tree that would be committed (ADR 0027), so this"
+        echo "green result does not apply to the branch. Not shipping."
+        echo
+        echo "Changed tracked files:"
+        git -C "$wt" diff-index --name-only "$rtree" -- 2>/dev/null | sed 's/^/  /'
+        echo "New un-ignored files:"
+        git -C "$wt" ls-files --others --exclude-standard 2>/dev/null | sed 's/^/  /'
+        echo
+        echo "Make the suite hermetic, or .gitignore what it writes."
+      } >"$id/tests.log"
+      log "  $(basename "$repo"): the suite MODIFIED the worktree — its green does not describe the reviewed tree; NOT shipping (see $id/tests.log)"
+      return 2
+    fi
+  fi
   # Removed on success on purpose: the file's PRESENCE is what tells stage_prompt that the previous
   # attempt broke the suite. A stale log from an earlier iteration would keep asking the Fix stage
   # to repair damage it has already repaired.

