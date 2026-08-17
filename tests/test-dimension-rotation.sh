@@ -32,6 +32,7 @@ dimensions:
 repos:
   - path: $TMP/repo
     mode: branch-fix
+    test_cmd: true
 EOF
 
 run() {

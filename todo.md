@@ -21,5 +21,8 @@ yield-weighting / never-exclude with the empty-scope feedback loop (ADR 0015).
 - **Adaptive cadence:** only if measured empty-run cost justifies more scheduler state.
 - **Bitbucket/GitLab PR APIs:** only when credentials and operator demand exist; branches remain the
   credential-free baseline.
-- **Full containment:** dedicated user, `bwrap`, or container if path confinement is insufficient.
+- **Full containment:** the *ship gate* is done — `bwrap`, network off by default, no credential
+  reach ([ADR 0026](docs/adr/0026-the-ship-gate-runs-in-a-sandbox.md)). Still open, and now the head
+  of the queue: a dedicated unprivileged account (risk-analysis M1) and the same sandbox around the
+  **agent** process itself (M2), where path confinement is still the only boundary.
 - **Server branch protection:** per-host operator defense-in-depth, not a Nightshift code task.

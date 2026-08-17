@@ -24,7 +24,8 @@ it does not repeat architecture (CONTEXT.md/ADRs) or global rules (git, secrets,
 - Mock findings are triggered by **target-file content** (`teh`, `retrun`, `AMBIGUOUS`, `FROB`) — that is how tests plant deterministic defects. The mock reviewer otherwise always ships; `NIGHTSHIFT_MOCK_ABANDON_IF=<path>` makes it `abandon` once that path exists, which is how a test reaches the give-up verdict mid-loop.
 - Runner functions are unit-testable via `NIGHTSHIFT_SOURCED=1 source bin/nightshift.sh` (defines functions without running the night).
 - `state/findings-probe.json` is **derived** state (ADR 0021), rewritten by harvest and the verify phase — never hand-edit it; the ledger is the record. The dashboard reads it through the same read-only mount, so it must stay world-readable.
-- The rulebook's per-repo `test_cmd` rides **last** on the parser's `repo` TSV row on purpose (ADR 0022): a command contains spaces and the Runner's `read` soaks the remainder into the final variable, so any new repo field must be inserted *before* it.
+- The rulebook's per-repo `test_cmd` rides **last** on the parser's `repo` TSV row on purpose (ADR 0022): a command contains spaces and the Runner's `read` soaks the remainder into the final variable, so any new repo field must be inserted *before* it (`test_net` is).
+- The ship gate runs `test_cmd` in a **bwrap sandbox** (ADR 0026), so it can write nowhere but the worktree and sees no `$HOME` — a fixture that used to park a marker outside the tree must now keep it inside and `.gitignore` it (hence `NIGHTSHIFT_MOCK_ABANDON_IF` resolving a *relative* path against the worktree). No bwrap ⇒ `run_test_gate` returns **2** ("could not run"), which the caller refuses *without* spending another fix iteration — distinct from **1** (a red suite), which loops back. `NIGHTSHIFT_TEST_SANDBOX=none` is the documented opt-out, and why the suite still passes on a host without user namespaces.
 
 ## Before touching confinement / safety
 

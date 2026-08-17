@@ -167,6 +167,15 @@ write primitive — Fix's `Write`/`Edit` reaching absolute paths outside the wor
 Layer 2(b) above. Full OS-level sandboxing (read-only FS / no network) stays the strongest tier if
 ever needed.
 
+**The seam none of this covers: what the *Runner* executes.** Every boundary in this document
+governs the agent's capabilities. The ship gate (ADR 0022) is the Runner taking the file the agent
+wrote and running it — `npm ci` executing a `package.json` lifecycle script — which no tool
+allowlist and no `PreToolUse` hook can see, because the agent never invokes it. That is
+[ADR 0026](../adr/0026-the-ship-gate-runs-in-a-sandbox.md) / [R15](risk-analysis.md#r15), and it is
+where the "strongest tier" above actually got built: `build_test_sandbox` in
+[`bin/nightshift.sh`](../../bin/nightshift.sh). When M2 wraps the *agent* process too, that is the
+mechanism to reuse.
+
 **Verified end-to-end (2026-07-12).** Beyond the deterministic unit tests
 (`tests/test-fix-write-confinement.sh`), a live adversarial run confirmed the integration path: real
 `claude` (2.1.205) launched exactly as the Runner does — Fix tool set, the guard registered with the

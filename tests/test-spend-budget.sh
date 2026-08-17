@@ -28,6 +28,7 @@ dimensions:
 repos:
   - path: $TMP/repo
     mode: branch-fix
+    test_cmd: true
 EOF
 
 run() { # tag  budget_seconds
@@ -58,6 +59,7 @@ limits:
 repos:
   - path: /srv/x
     mode: branch-fix
+    test_cmd: true
 EOF
 if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/bad.yaml" >/dev/null 2>"$TMP/perr"; then
   echo "parser accepted non-numeric max_run_minutes" >&2; exit 1

@@ -64,7 +64,7 @@ if [ "$NIGHTSHIFT_AGENT" = claude ] && [ -n "${HOME:-}" ]; then
 fi
 
 # ---------------------------------------------------------------- rulebook ----
-declare -a REPO_PATHS=() REPO_MODES=() REPO_BASES=() REPO_FINDINGS=() REPO_DIMS=() REPO_TEST_CMDS=() DIMENSIONS=()
+declare -a REPO_PATHS=() REPO_MODES=() REPO_BASES=() REPO_FINDINGS=() REPO_DIMS=() REPO_TEST_NETS=() REPO_TEST_CMDS=() DIMENSIONS=()
 # Rulebook-declared model per adapter (ADR 0020); empty = the rulebook declares none. Kept separate
 # from the NIGHTSHIFT_*_MODEL env vars so the precedence env > rulebook > CLI default stays legible.
 RB_CLAUDE_MODEL="" RB_CODEX_MODEL="" RB_MAX_VERIFY=""
@@ -86,7 +86,7 @@ log_model_selection() { # adapter env_var_name rulebook_value
 }
 
 load_rulebook() {
-  local tag a b c d e f rb_run_branches="" parsed
+  local tag a b c d e f g rb_run_branches="" parsed
   # Capture the parser's output AND its exit status. Reading it directly via
   # `done < <(python3 …)` hides a nonzero exit from `set -euo pipefail`, so a
   # mid-stream parse error (e.g. a bad `findings:` on repo #2) silently truncated
@@ -94,7 +94,7 @@ load_rulebook() {
   # run proceeded on a partial fleet. Fail closed instead: abort the whole run.
   parsed="$(python3 "$NIGHTSHIFT_HOME/lib/parse_rulebook.py" "$RULEBOOK")" \
     || { log "rulebook parse failed ($RULEBOOK) — aborting run"; exit 1; }
-  while IFS=$'\t' read -r tag a b c d e f; do
+  while IFS=$'\t' read -r tag a b c d e f g; do
     case "$tag" in
       prefix)                BRANCH_PREFIX="$a" ;;
       max_open)              MAX_OPEN="$a" ;;
@@ -106,12 +106,15 @@ load_rulebook() {
       max_fix_iterations)    MAX_FIX_ITER="$a" ;;
       max_run_minutes)       RB_MAX_RUN_MINUTES="$a" ;;
       test_timeout_seconds)  TEST_TIMEOUT="$a" ;;
+      test_memory_mb)        TEST_MEMORY_MB="$a" ;;
+      test_max_procs)        TEST_MAX_PROCS="$a" ;;
+      test_fsize_mb)         TEST_FSIZE_MB="$a" ;;
       max_files)             MAX_FILES="$a" ;;
       max_lines)             MAX_LINES="$a" ;;
       claude_model)          RB_CLAUDE_MODEL="$a" ;;
       codex_model)           RB_CODEX_MODEL="$a" ;;
       dimension)             DIMENSIONS+=("$a") ;;
-      repo)                  REPO_PATHS+=("${a#path=}"); REPO_MODES+=("${b#mode=}"); REPO_BASES+=("${c#base=}"); REPO_FINDINGS+=("${d#findings=}"); REPO_DIMS+=("${e#dimensions=}"); REPO_TEST_CMDS+=("${f#test_cmd=}") ;;
+      repo)                  REPO_PATHS+=("${a#path=}"); REPO_MODES+=("${b#mode=}"); REPO_BASES+=("${c#base=}"); REPO_FINDINGS+=("${d#findings=}"); REPO_DIMS+=("${e#dimensions=}"); REPO_TEST_NETS+=("${f#test_net=}"); REPO_TEST_CMDS+=("${g#test_cmd=}") ;;
     esac
   done <<< "$parsed"
   MAX_FINDINGS="${MAX_FINDINGS:-1}"
@@ -119,6 +122,10 @@ load_rulebook() {
   # Ship gate ceiling (ADR 0022). Env override for a one-off, else the rulebook (which the
   # parser already defaulted and validated), else 600s.
   TEST_TIMEOUT="${NIGHTSHIFT_TEST_TIMEOUT:-${TEST_TIMEOUT:-600}}"
+  # Resource ceilings inside the gate's sandbox (ADR 0026). Same precedence as the timeout above.
+  TEST_MEMORY_MB="${NIGHTSHIFT_TEST_MEMORY_MB:-${TEST_MEMORY_MB:-4096}}"
+  TEST_MAX_PROCS="${NIGHTSHIFT_TEST_MAX_PROCS:-${TEST_MAX_PROCS:-2048}}"
+  TEST_FSIZE_MB="${NIGHTSHIFT_TEST_FSIZE_MB:-${TEST_FSIZE_MB:-2048}}"
   # How many open findings the verify phase may re-check per night. Bounds what closure can cost:
   # every candidate is one read-only stage call. 0 disables the phase (the deterministic probe
   # still runs — it is free). Env override for a one-off, else the rulebook, else 5.
@@ -564,9 +571,9 @@ $(cat "$id/signals.json")"
 $(cat "$id/finding.json")" ;;
   esac
   if [ "$stage" = review ]; then
-    # Stage first, then show the STAGED diff so review sees exactly what finalize commits
-    # (`git add -A` in finalize). A plain `git diff` reports tracked modifications only and
-    # omits new untracked files, letting a fix-created file ship unreviewed (R9 / fix N3).
+    # Stage first, then show the STAGED diff so review sees exactly what finalize commits. A plain
+    # `git diff` reports tracked modifications only and omits new untracked files, letting a
+    # fix-created file ship unreviewed (R9 / fix N3).
     git -C "$wd" add -A
     prompt="$prompt
 
@@ -636,12 +643,15 @@ mock_fix() { # workdir item_dir — applies the fix for THIS finding (dispatched
   esac
 }
 mock_review() { # workdir item_dir
-  local _wd="$1" id="$2"
+  local _wd="$1" id="$2" sentinel="${NIGHTSHIFT_MOCK_ABANDON_IF:-}"
   # Deterministic `abandon`, so the reviewer's give-up verdict is reachable in mock mode like every
-  # other path. The trigger is a sentinel PATH, not content in the worktree: a test must be able to
-  # arm it MID-loop (from a failing test_cmd, say) without planting a file in the tree that is about
-  # to be committed.
-  if [ -n "${NIGHTSHIFT_MOCK_ABANDON_IF:-}" ] && [ -e "${NIGHTSHIFT_MOCK_ABANDON_IF:-}" ]; then
+  # other path. The trigger is a sentinel PATH, not content in the worktree, because a test must be
+  # able to arm it MID-loop — from a failing test_cmd, say.
+  # A RELATIVE sentinel resolves against the worktree, which is the only place a test_cmd can write
+  # since ADR 0026 sandboxed the gate. Keeping it out of the commit is then the fixture's job (a
+  # .gitignore entry), not the path's.
+  case "$sentinel" in ""|/*) ;; *) sentinel="$_wd/$sentinel" ;; esac
+  if [ -n "$sentinel" ] && [ -e "$sentinel" ]; then
     jq -nc '{verdict:"abandon",reason:"mock: abandon sentinel present."}' > "$id/review.md"
     return 0
   fi
@@ -951,10 +961,11 @@ repo_findings() { # repo -> per-repo `findings:` override from the rulebook, els
   echo "$MAX_FINDINGS"
 }
 
-repo_test_cmd() { # repo -> the repo's ship-gate command, or "" for an ungated repo (ADR 0022)
+repo_test_cmd() { # repo -> the repo's ship-gate command, or "" for a findings-only repo (ADR 0022)
   # Deliberately has NO global fallback: a test command is repo-specific by nature, and inheriting
-  # some fleet-wide default would run the wrong suite. Absent means ungated, which is a real and
-  # legitimate state (a repo may genuinely have no runner) — finalize logs it so it stays visible.
+  # some fleet-wide default would run the wrong suite. Empty is reachable only for a `findings-only`
+  # repo — the parser refuses a `branch-fix` repo without one (ADR 0026), because a repo nightshift
+  # pushes branches for must have something that can say the repo is still whole.
   local repo="$1" i
   for i in "${!REPO_PATHS[@]}"; do
     if [ "${REPO_PATHS[$i]}" = "$repo" ]; then
@@ -962,6 +973,20 @@ repo_test_cmd() { # repo -> the repo's ship-gate command, or "" for an ungated r
     fi
   done
   echo ""
+}
+
+repo_test_net() { # repo -> 1 if this repo's gate sandbox gets network egress, else 0 (ADR 0026)
+  # Off unless the rulebook says otherwise, and it is per repo on purpose: `npm ci` needs a registry
+  # and `uv run --with-requirements` needs an index, while most suites need nothing at all. Granting
+  # egress fleet-wide to satisfy two repos would hand every other suite an exfil channel for free.
+  local repo="$1" i
+  for i in "${!REPO_PATHS[@]}"; do
+    if [ "${REPO_PATHS[$i]}" = "$repo" ]; then
+      [ "${REPO_TEST_NETS[$i]:-false}" = true ] && { echo 1; return; }
+      break
+    fi
+  done
+  echo 0
 }
 
 repo_dimensions() { # repo -> candidate dimensions, space-separated, in priority order (ADR 0010)
@@ -1358,32 +1383,425 @@ open_pr() { # repo wt branch item_dir base -> echoes PR url ("" if none)
 # it: a failure is a revision request, not a death sentence. The Fix stage caused the breakage and
 # is still in the loop with budget left, so it gets the failing output back and repairs its own
 # damage (see stage_prompt). Only an item that leaves the loop still broken is refused.
-run_test_gate() { # repo worktree item_dir -> 0 pass/ungated, 1 fail; writes item_dir/tests.log on failure
-  local repo="$1" wt="$2" id="$3" tcmd trc=0
+# The gate EXECUTES candidate-controlled repository content — `npm ci` alone runs preinstall /
+# prepare / pretest straight out of a package.json the Fix stage may just have written. Unsandboxed,
+# that is the most direct route there is from a prompt-injected fix to full host execution as this
+# account: SSH keys, the gh token, ~/.claude and ~/.codex credentials, /etc secrets, the docker
+# socket (host-root equivalent), sudo. So it does not run as this account. See ADR 0026.
+#
+# bubblewrap: no daemon, no setuid, no privileged helper, one process per gate, and the filesystem
+# is an ALLOWLIST — nothing is visible unless it was bound in. Nothing else on this host removes
+# credential reach as cheaply; docker would grant the very socket that is the risk.
+TEST_SANDBOX="${NIGHTSHIFT_TEST_SANDBOX:-bwrap}"
+declare -a TEST_SANDBOX_ARGV=()
+
+_test_robind() { # path -> append a read-only bind, refusing anything that would re-expose $HOME
+  local p="$1" rp
+  [ -n "$p" ] || return 0
+  rp="$(realpath -m -- "$p" 2>/dev/null || printf '%s' "$p")"
+  case "$rp" in /usr|/usr/*) return 0 ;; esac   # already bound whole
+  # `/`, `/home`, `$HOME` — a bind of any ancestor of $HOME hands the suite ~/.ssh and the gh token
+  # back, i.e. exactly the reach this sandbox exists to remove. Refuse it out loud; a silently
+  # widened sandbox is worse than none, because the ADR says it is closed.
+  if [ -n "${HOME:-}" ] && { [ "$rp" = "$HOME" ] || [ "${HOME#"$rp"/}" != "$HOME" ]; }; then
+    log "  test sandbox: REFUSING read-only bind $p — it contains \$HOME"
+    return 0
+  fi
+  [ -e "$rp" ] || return 0
+  TEST_SANDBOX_ARGV+=( --ro-bind "$rp" "$rp" )
+}
+
+build_test_sandbox() { # worktree sandbox_home net(0|1) item_dir -> fills TEST_SANDBOX_ARGV
+  local wt="$1" sbhome="$2" net="$3" id="$4" p
+  local -a extra=()
+  TEST_SANDBOX_ARGV=(
+    bwrap
+    --die-with-parent          # the sandbox can never outlive the `timeout` that bounds it
+    --new-session              # its own session: no controlling tty, so no TIOCSTI back into ours
+    --unshare-user --unshare-ipc --unshare-pid --unshare-uts --unshare-cgroup
+    --clearenv                 # the environment is an allowlist, built at the bottom of this function
+    --proc /proc --dev /dev
+    # A tmpfs is RAM. `--size` applies to the NEXT --tmpfs ONLY, so each one needs its own.
+    --size $((1024 * 1024 * 1024)) --tmpfs /tmp
+    --size $((16 * 1024 * 1024))   --tmpfs /run
+    --ro-bind /usr /usr
+  )
+  # ALWAYS its own network namespace, `test_net` or not. `--share-net` used to hand a test_net repo
+  # the HOST's namespace, which is loopback and the LAN — every other service on this machine — and
+  # not merely "the internet" (ADR 0028). Egress now leaves through a vetting proxy on a unix
+  # socket, which crosses the namespace because it is a filesystem object, not a route.
+  TEST_SANDBOX_ARGV+=( --unshare-net )
+  if [ "$net" = 1 ] && [ -n "${TEST_EGRESS_DIR:-}" ]; then
+    TEST_SANDBOX_ARGV+=(
+      --ro-bind "$TEST_EGRESS_DIR" /nightshift-egress
+      --ro-bind "$NIGHTSHIFT_HOME/lib/gate_forwarder.py" /nightshift-egress-forwarder.py
+      --setenv NIGHTSHIFT_GATE_PROXY_PORT "$TEST_EGRESS_PORT"
+    )
+  fi
+  # merged-/usr: reproduce whatever /bin, /lib … are on this host, so an absolute `#!` still resolves.
+  for p in /bin /sbin /lib /lib64 /lib32 /libx32; do
+    if [ -L "$p" ]; then TEST_SANDBOX_ARGV+=( --symlink "$(readlink "$p")" "$p" )
+    elif [ -d "$p" ]; then TEST_SANDBOX_ARGV+=( --ro-bind "$p" "$p" ); fi
+  done
+  # /etc is an ALLOWLIST and never a whole-directory bind: /etc/ai_stack and its neighbours are
+  # precisely the secrets the gate must not reach. `-try` because the set spans distributions.
+  # NOT /etc/ssl or /etc/pki wholesale: `/etc/ssl/private` is the conventional private-key location,
+  # and a boundary that holds only because that directory happens to be mode 0700 is not a boundary.
+  for p in /etc/passwd /etc/group /etc/nsswitch.conf /etc/localtime /etc/alternatives \
+           /etc/ssl/certs /etc/ssl/openssl.cnf /etc/pki/tls/certs \
+           /etc/ca-certificates /etc/ca-certificates.conf; do
+    TEST_SANDBOX_ARGV+=( --ro-bind-try "$p" "$p" )
+  done
+  # No /etc/resolv.conf, ever: the sandbox resolves nothing. It hands the proxy a NAME and the proxy
+  # resolves it on the host, which is the only place the answer can be checked against the address
+  # policy — a resolver inside would just be a second, unchecked opinion.
+  #
+  # A minimal /etc/hosts IS needed, and not for the network: it is how `localhost` resolves to the
+  # sandbox's own loopback. Without it vitest dies at startup with EAI_AGAIN before running a single
+  # test. Synthesised rather than bound from the host, whose /etc/hosts names this machine's LAN.
+  { echo "127.0.0.1 localhost"
+    echo "::1 localhost ip6-localhost ip6-loopback"
+  } > "$id/gate-hosts"
+  TEST_SANDBOX_ARGV+=( --ro-bind "$id/gate-hosts" /etc/hosts )
+  # A linked worktree's `.git` is a FILE (`gitdir: <repo>/.git/worktrees/<name>`), so every git
+  # command in the gate resolves out of the worktree and into the repo — which is not bound. Without
+  # this, `git ls-files` exits 128 and any suite that consults git fails for a reason that has
+  # nothing to do with the change under test (nightshift's own `lib/check_docs.py` is one).
+  # READ-ONLY, and that is the whole point: writable, a `pretest` could plant a hook or rewrite
+  # history in the REAL repository — an escape straight past the disposable worktree.
+  local gitdir
+  gitdir="$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+  [ -n "$gitdir" ] && _test_robind "$gitdir"
+  # (the pointer file itself is re-bound read-only further down — it must come AFTER the worktree's
+  # read-write bind, or that bind simply covers it again)
+  # The developer toolchain lives under nvm, i.e. under $HOME, which is NOT bound — so every entry
+  # of NIGHTSHIFT_TEST_PATH is bound read-only here as well as prepended to PATH below. It is read
+  # as a colon-separated PATH FRAGMENT, which is what it already was on the PATH side: the fleet
+  # needs node from nvm and `uv` from ~/.local/bin in the same gate, and binding a directory without
+  # putting it on PATH (or the reverse) leaves the tool just as unreachable.
+  local -a tcdirs=()
+  IFS=: read -r -a tcdirs <<<"${NIGHTSHIFT_TEST_PATH:-}"
+  for p in ${tcdirs[@]+"${tcdirs[@]}"}; do
+    [ -n "$p" ] || continue
+    # node resolves its own lib/ relative to `..`, so an nvm bin dir needs its prefix bound too.
+    # Scoped to a SELF-CONTAINED node install (`bin/node` + `lib/node_modules` under one prefix),
+    # because the looser tests are both wrong here: a bare `dirname` drags in ~/.local for a
+    # ~/.local/bin entry, and `lib/node_modules` alone still matches it — that is npm's global
+    # prefix on this very host — mounting ~/.local/share into a sandbox whose entire purpose is
+    # that $HOME is not in it.
+    [ -x "$p/node" ] && [ -d "$(dirname -- "$p")/lib/node_modules" ] && _test_robind "$(dirname -- "$p")"
+    _test_robind "$p"
+  done
+  # Host-declared extras — a warmed dependency cache, a shared toolchain, a runtime outside /usr.
+  IFS=: read -r -a extra <<<"${NIGHTSHIFT_TEST_SANDBOX_ROBIND:-}"
+  for p in ${extra[@]+"${extra[@]}"}; do _test_robind "$p"; done
+  # The ONLY writable paths: the worktree (which is what is about to be committed) and a HOME.
+  TEST_SANDBOX_ARGV+=( --bind "$wt" "$wt" --bind "$sbhome" "$sbhome" --chdir "$wt" )
+  # Punch the pointer file back out of that writable area — ORDER MATTERS, bwrap applies binds in
+  # sequence and the line above would otherwise cover this one. `$wt/.git` is a plain file naming
+  # the gitdir, and every git command finalize runs next (`checkout -b`, `add -A`, `commit`) happens
+  # OUTSIDE the sandbox as this account and reads whatever it names. Rewriting it to a gitdir built
+  # inside the worktree is a full escape: `core.fsmonitor` is arbitrary command execution and
+  # `hooks/pre-commit` is another. Both were verified to fire before this existed. As a mountpoint
+  # the file also cannot be unlinked or replaced.
+  [ -e "$wt/.git" ] && TEST_SANDBOX_ARGV+=( --ro-bind "$wt/.git" "$wt/.git" )
+  # --clearenv dropped everything, SSH_AUTH_SOCK / GH_TOKEN / GITHUB_TOKEN / ANTHROPIC_API_KEY /
+  # AWS_* / DOCKER_HOST included. What a suite legitimately needs is short, and it is listed here.
+  TEST_SANDBOX_ARGV+=(
+    --setenv HOME "$sbhome"
+    --setenv PATH "${NIGHTSHIFT_TEST_PATH:+$NIGHTSHIFT_TEST_PATH:}/usr/local/bin:/usr/bin:/bin"
+    --setenv TMPDIR /tmp
+    --setenv TERM dumb
+    --setenv LANG "${LANG:-C.UTF-8}"
+    --setenv LC_ALL "${LC_ALL:-C.UTF-8}"
+    --setenv USER "${USER:-nightshift}"
+    --setenv NIGHTSHIFT_TEST_SANDBOX_ACTIVE 1
+  )
+  # One escape hatch, host-declared by NAME: a suite that needs UV_CACHE_DIR or CARGO_HOME says so
+  # in the environment the operator controls, rather than the gate inheriting the whole session.
+  local -a pass=()
+  IFS=', ' read -r -a pass <<<"${NIGHTSHIFT_TEST_ENV_PASS:-}"
+  for p in ${pass[@]+"${pass[@]}"}; do
+    # `continue`, not `[ -n "$p" ] && …`: a trailing separator yields an empty field, whose failing
+    # test would be the loop's exit status and would abort the whole night under `set -e`.
+    [ -n "$p" ] || continue
+    TEST_SANDBOX_ARGV+=( --setenv "$p" "${!p-}" )
+  done
+}
+
+# Runs as pid 1 of the sandbox. rlimits are set HERE and not by the Runner, because they must bound
+# the suite without bounding the Runner. `timeout` already caps wall clock; these cap what a suite
+# can do inside that window. Kept as a fixed literal: the command itself arrives via the environment
+# so nothing the rulebook wrote is ever spliced into this script.
+# A ceiling that fails to apply must not be shrugged off — the suite would then run with the limit
+# the operator thinks is in force and isn't. Exit 125 marks it as "the gate could not run".
+TEST_GATE_INNER='
+set_limit() { # flag value -> apply it, or refuse to run the suite at all
+  [ "${2:-0}" -gt 0 ] || return 0
+  ulimit "$1" "$2" 2>/dev/null && return 0
+  echo "nightshift: could not apply ulimit $1 $2 inside the sandbox" >&2
+  exit 125
+}
+set_limit -u "${NIGHTSHIFT_GATE_MAX_PROCS:-0}"
+set_limit -d $(( ${NIGHTSHIFT_GATE_MEM_MB:-0} * 1024 ))
+set_limit -t "${NIGHTSHIFT_GATE_CPU_S:-0}"
+set_limit -f $(( ${NIGHTSHIFT_GATE_FSIZE_MB:-0} * 1024 ))
+# Egress, when the repo has test_net (ADR 0028). The sandbox has its own empty network namespace,
+# so this listener is on ITS loopback — unreachable from anywhere else — and every connection it
+# accepts is forwarded to the host-side proxy over the bound unix socket, which vets the
+# destination. A tool that ignores these variables simply has no network, which is the safe way
+# round. Started before the suite and only reported ready once it is listening, so nothing races it.
+if [ -n "${NIGHTSHIFT_GATE_PROXY_PORT:-}" ]; then
+  # Read its readiness line rather than poking the port: a probe connection would arrive at the
+  # proxy as an empty request and be logged as a refusal, which is noise in the one log an operator
+  # reads to find out why a gate could not fetch anything.
+  exec 7< <(python3 /nightshift-egress-forwarder.py "$NIGHTSHIFT_GATE_PROXY_PORT" /nightshift-egress/egress.sock)
+  read -r -t 10 -u 7 _ || true
+  export http_proxy="http://127.0.0.1:$NIGHTSHIFT_GATE_PROXY_PORT"
+  export https_proxy="$http_proxy" HTTP_PROXY="$http_proxy" HTTPS_PROXY="$http_proxy"
+  export ALL_PROXY="$http_proxy" all_proxy="$http_proxy"
+  # Nothing to talk to on this loopback except the forwarder, and no resolver at all.
+  export no_proxy="" NO_PROXY=""
+fi
+exec bash -c "$NIGHTSHIFT_GATE_CMD"
+'
+
+# `$wt/.git` is a POINTER FILE in the writable worktree, and every git command finalize runs next —
+# `checkout -b`, `add -A`, `commit` — happens outside the sandbox as this account and reads whatever
+# gitdir it names. Rewriting it is therefore a full escape (`core.fsmonitor` and `hooks/pre-commit`
+# were both verified to fire). The sandbox binds the file read-only, but this records it anyway: the
+# `none` opt-out has no such protection, and a guard that only exists inside the thing it guards is
+# not a guard. Cheap enough to be unconditional.
+# Everything below defends ONE property: no git command the Runner runs against a candidate worktree
+# may execute code the candidate chose. Two mechanisms are needed because git offers two doors.
+#
+# Door 1 — the `.git` pointer. It is a plain file in the writable worktree, and both the Fix stage
+# (N1 confines it to the worktree; this file is IN the worktree) and the gate can write it. Point it
+# at a private gitdir and its `config` supplies `core.fsmonitor`, `alias`, `pager`, filter drivers —
+# all arbitrary commands, run by whichever git touches the worktree next, outside any sandbox.
+#
+# Compared LITERALLY against what the repo says the pointer must be. An earlier version asked git to
+# resolve the worktree and compared `--git-common-dir`, which a hostile gitdir defeats trivially: a
+# `commondir` file inside it redirects the common dir back at the real repo, so the comparison
+# passes while `$GIT_DIR` stays attacker-owned. Never ask a hostile repository to identify itself.
+git_pointer_ok() { # repo worktree -> 0 if `$wt/.git` is exactly the pointer this repo should have
+  local repo="$1" wt="$2" common want have
+  common="$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+  [ -n "$common" ] || return 1
+  want="gitdir: $common/worktrees/$(basename "$wt")"
+  have="$(cat "$wt/.git" 2>/dev/null || true)"
+  [ "$have" = "$want" ]
+}
+
+# Door 2 — `core.hooksPath`. A RELATIVE value resolves against the working directory, so a repo that
+# sets `core.hooksPath = .githooks` (nightshift's own does, and it is a `branch-fix` target) points
+# git straight at a tracked, candidate-writable directory. A green suite rewrites `.githooks/pre-commit`
+# and `finalize`'s commit executes it as this account, outside the sandbox.
+#
+# NOT simply "disable all hooks": finalize runs the target repo's hooks deliberately (ADR 0022 —
+# nightshift must not manufacture a commit the host repo would reject), and hooks that live in the
+# repo's own git dir are not candidate-controlled. Only the ones reachable INSIDE the worktree are.
+# So this neutralises exactly those, by redirecting to the git dir's own hooks, and leaves the rest.
+worktree_hook_args() { # repo worktree -> `-c core.hooksPath=…` if the repo's hooks live in the worktree
+  local repo="$1" wt="$2" hp common rp
+  hp="$(git -C "$wt" config --get core.hooksPath 2>/dev/null || true)"
+  [ -n "$hp" ] || return 0                      # unset: git uses <gitdir>/hooks, outside the worktree
+  case "$hp" in /*) rp="$hp" ;; *) rp="$wt/$hp" ;; esac
+  rp="$(realpath -m -- "$rp" 2>/dev/null || printf '%s' "$rp")"
+  # Inside the worktree (or the worktree itself) ⇒ the candidate can write it ⇒ redirect.
+  if [ "$rp" = "$wt" ] || [ "${rp#"$wt"/}" != "$rp" ]; then
+    common="$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    [ -n "$common" ] && printf -- '-c\ncore.hooksPath=%s/hooks\n' "$common"
+  fi
+}
+
+# The single choke point. Every Runner-owned git command that touches a candidate worktree goes
+# through this first — including the Review stage's `git add -A`, which runs BEFORE the ship gate and
+# was therefore the earliest detonation point of all.
+assert_worktree_git_sane() { # repo worktree -> 0 sane, 1 tampered (and says so)
+  local repo="$1" wt="$2"
+  git_pointer_ok "$repo" "$wt" && return 0
+  log "  $(basename "$repo"): .git POINTER TAMPERED in $(basename "$wt") — refusing to run git against it"
+  return 1
+}
+
+run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 the gate could not run at all
+  local repo="$1" wt="$2" id="$3" tcmd net trc=0 sbhome persist=0
   tcmd=$(repo_test_cmd "$repo")
   if [ -z "$tcmd" ]; then
+    # Only reachable for a findings-only repo, which never ships — the parser refuses a branch-fix
+    # repo with no test_cmd (ADR 0026). Kept as a guard, not as a shipping path.
     log "  $(basename "$repo"): no test_cmd in the rulebook — shipping UNGATED"
     return 0
   fi
-  # Runs in the WORKTREE, not the repo — the worktree is what carries the fix and what is about to
-  # be committed. `timeout` bounds a hanging suite so it cannot eat the night.
+  net=$(repo_test_net "$repo")
+
+  # A test_net repo gets its egress through the vetting proxy (ADR 0028), never through the host's
+  # network namespace. Started per gate and killed after it, so nothing outlives the run it serves.
+  TEST_EGRESS_DIR=""; TEST_EGRESS_PORT=""
+  local egress_pid=""
+  if [ "$net" = 1 ] && [ "$TEST_SANDBOX" != none ]; then
+    TEST_EGRESS_DIR="$(mktemp -d "$WORKTREES_DIR/gate-egress.XXXXXX")"
+    chmod 700 "$TEST_EGRESS_DIR"
+    TEST_EGRESS_PORT=3128
+    # `read` on the proxy's stdout: it prints one line once the socket is bound and listening. A
+    # sleep here would be a race that only shows up as a flaky "registry unreachable" at 04:00.
+    exec 8< <(python3 "$NIGHTSHIFT_HOME/lib/egress_proxy.py" "$TEST_EGRESS_DIR/egress.sock" 2>>"$id/egress.log")
+    egress_pid=$!
+    if ! read -r -t 10 -u 8 _ready; then
+      log "  $(basename "$repo"): the egress proxy did not come up — NOT shipping (see $id/egress.log)"
+      exec 8<&-
+      [ -n "$egress_pid" ] && kill "$egress_pid" 2>/dev/null
+      rm -rf "$TEST_EGRESS_DIR"
+      return 2
+    fi
+  fi
+  # Every exit from here on has to take the proxy with it, so it is torn down in one place.
+  stop_egress() {
+    # Only touch fd 8 if this call actually opened it. `exec 8<&-` on a descriptor that was never
+    # opened is a redirection failure, and a failed `exec` redirection TERMINATES a non-interactive
+    # shell — `2>/dev/null || true` does not save it. That killed the whole night right after the
+    # first gate of every repo without test_net, which reads downstream as "the loop never retried".
+    if [ -n "${egress_pid:-}" ]; then
+      kill "$egress_pid" 2>/dev/null || true
+      exec 8<&-
+    fi
+    [ -n "${TEST_EGRESS_DIR:-}" ] && rm -rf "$TEST_EGRESS_DIR"
+    TEST_EGRESS_DIR=""; egress_pid=""
+    return 0
+  }
+
+  # A gate that cannot be sandboxed does not run. Not "runs anyway with a warning": the whole point
+  # of ADR 0026 is that executing this content as this account is the exposure, so the absence of
+  # the sandbox is a refusal to ship, not a licence to ship faster.
+  if [ "$TEST_SANDBOX" != none ] && ! command -v bwrap >/dev/null 2>&1; then
+    printf 'nightshift: bwrap is not installed, so the ship gate has no sandbox.\n%s\n' \
+      "Install bubblewrap, or accept the risk explicitly with NIGHTSHIFT_TEST_SANDBOX=none." \
+      >"$id/tests.log"
+    log "  $(basename "$repo"): test gate cannot run — no sandbox (bwrap missing) — NOT shipping"
+    stop_egress
+    return 2
+  fi
+
+  # HOME is disposable by default, so nothing a suite writes survives into the next night — and a
+  # poisoned dependency cache is a cross-run write channel. An operator who cannot afford a cold
+  # cache every gate can pin one with NIGHTSHIFT_TEST_SANDBOX_HOME and owns that trade.
+  if [ -n "${NIGHTSHIFT_TEST_SANDBOX_HOME:-}" ]; then
+    sbhome="$NIGHTSHIFT_TEST_SANDBOX_HOME"; persist=1; mkdir -p "$sbhome"
+  else
+    sbhome="$(mktemp -d "$WORKTREES_DIR/gate-home.XXXXXX")"
+  fi
+
   # `|| trc=$?` and not `if ! …`: inside an `if !` body `$?` is the negation's 0, not the suite's.
-  # NIGHTSHIFT_TEST_PATH is the developer toolchain (node/npm/pnpm) the repo's own suite needs but
-  # that a systemd user service does not get — bin/nightshift-cron.sh explains why it is prepended
-  # HERE and nowhere else: the Runner's own unqualified jq/git/python3 calls must keep resolving to
-  # the system dirs (R10/N4), while this subprocess already runs the repo's package scripts anyway.
-  ( cd "$wt" && export PATH="${NIGHTSHIFT_TEST_PATH:+$NIGHTSHIFT_TEST_PATH:}$PATH" \
-    && timeout "$TEST_TIMEOUT" bash -c "$tcmd" ) >"$id/tests.log" 2>&1 || trc=$?
+  if [ "$TEST_SANDBOX" = none ]; then
+    # NIGHTSHIFT_TEST_PATH is the developer toolchain (node/npm/pnpm) the repo's own suite needs but
+    # that a systemd user service does not get — bin/nightshift-cron.sh explains why it is prepended
+    # HERE and nowhere else: the Runner's own unqualified jq/git/python3 calls must keep resolving to
+    # the system dirs (R10/N4), while this subprocess already runs the repo's package scripts anyway.
+    log "  $(basename "$repo"): test gate sandbox DISABLED (NIGHTSHIFT_TEST_SANDBOX=none) — the suite runs with this account's full reach"
+    ( cd "$wt" && export PATH="${NIGHTSHIFT_TEST_PATH:+$NIGHTSHIFT_TEST_PATH:}$PATH" \
+      && timeout "$TEST_TIMEOUT" bash -c "$tcmd" ) >"$id/tests.log" 2>&1 || trc=$?
+  else
+    build_test_sandbox "$wt" "$sbhome" "$net" "$id"
+    # Whether the sandbox was actually BUILT cannot be read off the exit status: bubblewrap exits 1
+    # for a missing bind source, a bad --chdir and an unknown option alike, and it also propagates
+    # the child's own status, so no value is unambiguous. `--json-status-fd` is: bwrap writes an
+    # `exit-code` record only once the child has actually run, so its ABSENCE means the sandbox
+    # never came up. (`child-pid` is NOT the signal — bwrap forks before it binds, so a failed setup
+    # still reports one. Measured against bwrap 0.11.0.)
+    : >"$id/.sandbox-status"
+    # `--chdir "$wt"` above is what puts the suite in the WORKTREE rather than the repo: the worktree
+    # is what carries the fix and what is about to be committed.
+    timeout "$TEST_TIMEOUT" \
+      "${TEST_SANDBOX_ARGV[@]}" \
+      --json-status-fd 9 \
+      --setenv NIGHTSHIFT_GATE_CMD "$tcmd" \
+      --setenv NIGHTSHIFT_GATE_MAX_PROCS "$TEST_MAX_PROCS" \
+      --setenv NIGHTSHIFT_GATE_MEM_MB "$TEST_MEMORY_MB" \
+      --setenv NIGHTSHIFT_GATE_CPU_S "$TEST_TIMEOUT" \
+      --setenv NIGHTSHIFT_GATE_FSIZE_MB "$TEST_FSIZE_MB" \
+      -- /bin/bash -c "$TEST_GATE_INNER" >"$id/tests.log" 2>&1 9>"$id/.sandbox-status" || trc=$?
+    # A timeout killed a sandbox that DID come up, so it is a red suite, not a construction failure.
+    if [ "$trc" -ne 124 ] && ! grep -q '"exit-code"' "$id/.sandbox-status" 2>/dev/null; then
+      { echo "nightshift: bubblewrap did not bring the sandbox up (rc=$trc)."
+        echo "The gate never ran, so nothing about this change has been tested."
+        echo "--- bwrap output ---"; cat "$id/tests.log" 2>/dev/null; } >"$id/.gate-refusal"
+      mv "$id/.gate-refusal" "$id/tests.log"
+      rm -f "$id/.sandbox-status"
+      [ "$persist" = 1 ] || rm -rf "$sbhome"
+      log "  $(basename "$repo"): test gate could not START its sandbox — NOT shipping (see $id/tests.log)"
+      stop_egress
+      return 2
+    fi
+    rm -f "$id/.sandbox-status"
+  fi
+  [ "$persist" = 1 ] || rm -rf "$sbhome"
+
+  # Checked BEFORE the exit status, because the whole point of this attack is to exit 0. A hostile
+  # pointer is not a red suite to hand back to the Fix stage — nothing it can write repairs it, and
+  # retrying just runs the hostile command again. Refuse the item outright and say what happened.
+  if ! git_pointer_ok "$repo" "$wt"; then
+    printf 'nightshift: this worktree'"'"'s .git no longer resolves into %s.\n%s\n' "$repo" \
+      "Refusing the item: the next git command would read a gitdir the suite chose." >"$id/tests.log"
+    log "  $(basename "$repo"): .git POINTER TAMPERED — refusing the item (see $id/tests.log)"
+    stop_egress
+    return 2
+  fi
+
   if [ "$trc" -ne 0 ]; then
     [ "$trc" -eq 124 ] && log "  $(basename "$repo"): test gate TIMED OUT after ${TEST_TIMEOUT}s"
+    # 125 is how the sandbox's own pid 1 reports that a resource ceiling would not apply, and how
+    # `timeout` reports its own failure. Same class either way: a host problem, never a regression
+    # the Fix stage can repair, so it must not burn a fix iteration. (A suite that exits 125 itself
+    # lands here too — the cost is a refusal without a retry, never a ship, so it errs safe.)
+    # A sandbox that never CAME UP is caught earlier, by --json-status-fd: bwrap exits 1 for a bad
+    # bind, a bad --chdir and an unknown option alike, so no exit code identifies that case.
+    if [ "$trc" -eq 125 ] && [ "$TEST_SANDBOX" != none ]; then
+      log "  $(basename "$repo"): test gate could not run under its resource ceilings — NOT shipping"
+      stop_egress
+      return 2
+    fi
     log "  $(basename "$repo"): test gate failed (rc=$trc) — see $id/tests.log"
+    stop_egress
     return 1
+  fi
+  # A green suite only certifies the tree the suite RAN ON. ADR 0027 commits the tree review was
+  # shown — so if the suite changed the worktree, those two are not the same tree and this green
+  # says nothing about what would ship. The classic shape is a lockfile: the fix edits a manifest,
+  # the suite regenerates the lock and passes, ADR 0027 discards the lock, and the branch goes out
+  # with a manifest/lock mismatch that was never tested and would be red on main.
+  #
+  # So refuse, rather than ship a verdict that does not apply to the artifact. "No gate, no ship" is
+  # the whole principle here, and a gate whose result is about a different tree is not a gate for
+  # this one. rc=2, not 1: another fix iteration would run the same suite to the same effect.
+  local rtree=""
+  [ -f "$id/reviewed-tree" ] && rtree="$(cat "$id/reviewed-tree")"
+  if [ -n "$rtree" ]; then
+    git -C "$wt" update-index -q --refresh >/dev/null 2>&1 || true
+    if ! git -C "$wt" diff-index --quiet "$rtree" -- 2>/dev/null \
+       || [ -n "$(git -C "$wt" ls-files --others --exclude-standard 2>/dev/null | head -1)" ]; then
+      { echo "nightshift: the suite passed, but it modified the worktree while running."
+        echo "The tree it tested is not the tree that would be committed (ADR 0027), so this"
+        echo "green result does not apply to the branch. Not shipping."
+        echo
+        echo "Changed tracked files:"
+        git -C "$wt" diff-index --name-only "$rtree" -- 2>/dev/null | sed 's/^/  /'
+        echo "New un-ignored files:"
+        git -C "$wt" ls-files --others --exclude-standard 2>/dev/null | sed 's/^/  /'
+        echo
+        echo "Make the suite hermetic, or .gitignore what it writes."
+      } >"$id/tests.log"
+      log "  $(basename "$repo"): the suite MODIFIED the worktree — its green does not describe the reviewed tree; NOT shipping (see $id/tests.log)"
+      stop_egress
+      return 2
+    fi
   fi
   # Removed on success on purpose: the file's PRESENCE is what tells stage_prompt that the previous
   # attempt broke the suite. A stale log from an earlier iteration would keep asking the Fix stage
   # to repair damage it has already repaired.
   rm -f "$id/tests.log"
   log "  $(basename "$repo"): test gate passed"
+  stop_egress
   return 0
 }
 
@@ -1404,8 +1822,44 @@ finalize() { # repo worktree item_dir [seq] [base] -> echoes branch name
   # `seq` (a per-run monotonic counter) disambiguates several findings that finalize within the
   # same clock second in one repo/pass — without it their timestamped branch names would collide.
   branch="${BRANCH_PREFIX}${slug}-$(date +%Y%m%d-%H%M%S)-${seq}"
-  git -C "$wt" checkout -q -b "$branch"
-  git -C "$wt" add -A
+  # Last line of defence before the Runner runs git against candidate content: a `.git` pointing at
+  # a gitdir the candidate wrote turns any of the commands below into arbitrary execution.
+  if ! assert_worktree_git_sane "$repo" "$wt"; then
+    log "  $(basename "$repo"): refusing to finalize a worktree with a rewritten .git"
+    return 1
+  fi
+  # What gets committed is the tree the REVIEWER approved, not whatever the worktree holds now
+  # (ADR 0027). The ship gate runs between review and here and executes the repo's own suite over
+  # this worktree, so an `add -A` at this point ships whatever that suite left behind, unreviewed —
+  # a suite that rewrites `.github/workflows/ci.yml` and exits 0 gets that workflow pushed, and
+  # GitHub runs it with the repository's secrets before any human opens the PR.
+  # Checked BEFORE the branch exists, so a refusal has nothing to clean up.
+  local rtree=""
+  [ -f "$id/reviewed-tree" ] && rtree="$(cat "$id/reviewed-tree")"
+  if [ -z "$rtree" ] || ! git -C "$wt" rev-parse -q --verify "$rtree^{tree}" >/dev/null 2>&1; then
+    log "  $(basename "$repo"): no reviewed tree recorded — refusing to commit an unreviewed worktree"
+    return 1
+  fi
+  # `checkout` and `commit` fire hooks. The repo's own hooks are meant to run (ADR 0022), but a
+  # RELATIVE core.hooksPath resolves inside the worktree, where the candidate can rewrite them.
+  local -a hookargs=()
+  mapfile -t hookargs < <(worktree_hook_args "$repo" "$wt")
+  git -C "$wt" ${hookargs[@]+"${hookargs[@]}"} checkout -q -b "$branch"
+  # Say so when the suite changed something: a lockfile a test run legitimately refreshed is being
+  # dropped right here, and dropping it silently would be its own kind of lie.
+  # Compared against the REVIEWED TREE, not against HEAD: `status --porcelain` reports the staged
+  # fix itself, so every honest night would claim the gate had meddled. `diff-index` covers tracked
+  # divergence; `ls-files --others` covers files the suite created (ignored ones stay ignored, so a
+  # suite's node_modules does not trip it).
+  git -C "$wt" update-index -q --refresh >/dev/null 2>&1 || true
+  if ! git -C "$wt" diff-index --quiet "$rtree" -- 2>/dev/null \
+     || [ -n "$(git -C "$wt" ls-files --others --exclude-standard 2>/dev/null | head -1)" ]; then
+    log "  $(basename "$repo"): the test gate modified the worktree — discarding that, committing the reviewed tree"
+  fi
+  # `--reset -u` puts index AND working tree back to the reviewed object, so the repo's own hooks
+  # below still see exactly what the reviewer approved. The commit then takes the index as it
+  # stands: no `add -A`, so nothing the suite created can enter it.
+  git -C "$wt" read-tree --reset -u "$rtree"
   # The TARGET repo's own hooks run for this commit — deliberately: nightshift must not manufacture
   # commits the host repo would reject. So the commit can fail (a blocking pre-commit hook, or an
   # empty index because the Fix stage changed nothing), and NOTHING below may treat that as shipped.
@@ -1413,7 +1867,8 @@ finalize() { # repo worktree item_dir [seq] [base] -> echoes branch name
   # and the ledger recorded `shipped` — a fix that does not exist, holding an open-branch slot.
   # (Observed 2026-08-02: partflow's CHANGELOG pre-commit hook rejected a deps cleanup; the empty
   # branch shipped anyway. `set -e` cannot catch it — finalize runs inside an `if` condition.)
-  if ! git -C "$wt" -c user.name=nightshift -c user.email=nightshift@localhost \
+  if ! git -C "$wt" ${hookargs[@]+"${hookargs[@]}"} \
+       -c user.name=nightshift -c user.email=nightshift@localhost \
        commit -q -m "$(commit_subject "$type" "$(jq -r '.summary' "$id/finding.json")")
 
 $(cat "$id/worknote.md")"; then
@@ -2076,6 +2531,17 @@ main() {
         # finding, so the reviewer's refusal would come back for a fresh attempt every night.
         gate=""
         run_agent fix "$wt" "$fd" || true
+        # The Review stage stages the worktree (`git add -A`, N3) to show the reviewer exactly what
+        # finalize will commit — unsandboxed, and BEFORE the ship gate exists to check anything. So
+        # a `.git` the Fix stage rewrote detonates here, earlier than any gate could catch it.
+        if ! assert_worktree_git_sane "$repo" "$wt"; then gate=fail; verdict=revise; break; fi
+        # Record the exact tree object the reviewer is about to judge. THIS object, and nothing
+        # assembled later, is what finalize commits (ADR 0027): "the reviewer saw what shipped"
+        # stops being a property that holds as long as nothing touches the worktree in between and
+        # becomes one that holds by construction — the ship gate runs after this and writes here.
+        # Done in the loop rather than in stage_prompt because the mock adapter builds no prompt.
+        git -C "$wt" add -A
+        git -C "$wt" write-tree > "$fd/reviewed-tree" 2>/dev/null || rm -f "$fd/reviewed-tree"
         run_agent review "$wt" "$fd" || true
         verdict=$(jq -r '.verdict' "$fd/review.md" 2>/dev/null || echo abandon)
         [ "$verdict" = abandon ] && break
@@ -2084,8 +2550,12 @@ main() {
           # is the repo still whole? — and it OVERRULES a ship (ADR 0022). A failure is not the end
           # of the item: the Fix stage broke it, is still in the loop, and gets the failing output
           # back on the next turn. Only running out of iterations refuses the item.
-          if run_test_gate "$repo" "$wt" "$fd"; then gate=pass; break; fi
+          grc=0; run_test_gate "$repo" "$wt" "$fd" || grc=$?
+          if [ "$grc" -eq 0 ]; then gate=pass; break; fi
           gate=fail; verdict=revise
+          # rc=2 is "the gate could not run" (no sandbox, ADR 0026) — a host problem, not a
+          # regression, so there is nothing for another fix iteration to repair. Refuse now.
+          [ "$grc" -eq 2 ] && break
           log "  $(basename "$repo"): gate overrules ship — fix attempt $iter/$MAX_FIX_ITER broke the suite"
         fi
       done

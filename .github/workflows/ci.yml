@@ -21,8 +21,33 @@ jobs:
 
       # The suite needs jq (ledger assertions) and git; python3 is preinstalled. No pip install:
       # lib/*.py is stdlib-only on purpose, and CI must not be the first place that stops being true.
+      # bubblewrap is a real runtime dependency since ADR 0026 — without it every branch-fix repo
+      # refuses to ship, so every night-level test would fail for that one reason.
       - name: Install dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq jq
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq jq bubblewrap
+
+      # GitHub's Ubuntu runners ship AppArmor's unprivileged-userns restriction, which is exactly
+      # what stops bwrap. Without lifting it the probe below falls back and tests/test-gate-sandbox.sh
+      # SKIPS — so the one control that stands between candidate-authored test code and this
+      # account's credentials would have no CI coverage at all. It is a runner-local sysctl on a
+      # throwaway VM. `|| true`: on a runner where the knob does not exist the probe handles it.
+      - name: Allow unprivileged user namespaces (runner-local)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      # Unprivileged user namespaces are kernel policy, not a package: a hardened or nested runner
+      # can refuse them, and then the sandbox cannot be built at all. Rather than a red suite that
+      # says nothing about the code, fall back to the documented opt-out and say so loudly — the
+      # sandbox's own test skips itself in that case, and everything else still runs.
+      - name: Probe the ship-gate sandbox
+        run: |
+          if bwrap --unshare-all --ro-bind /usr /usr --symlink usr/bin /bin \
+                   --symlink usr/lib /lib --symlink usr/lib64 /lib64 \
+                   --proc /proc --dev /dev /bin/true 2>/dev/null; then
+            echo "bwrap works — the suite exercises the real ship-gate sandbox"
+          else
+            echo "::warning::unprivileged user namespaces unavailable on this runner — running the suite with NIGHTSHIFT_TEST_SANDBOX=none; tests/test-gate-sandbox.sh will SKIP"
+            echo "NIGHTSHIFT_TEST_SANDBOX=none" >> "$GITHUB_ENV"
+          fi
 
       # A run creates commits in throwaway sandboxes; git refuses without an identity.
       - name: Configure git identity

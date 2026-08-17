@@ -91,6 +91,7 @@ repos:
   - path: $TMP/repo
     mode: branch-fix
     base: main
+    test_cmd: true
 EOF
 
 cat > "$TMP/bin/claude" <<'EOF'

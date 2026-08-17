@@ -32,13 +32,17 @@ ledgers diverge silently: duplicate branches, broken caps and rotation). See
    | `git` | worktrees, commits, branch pushes | run aborts |
    | `jq` | every ledger and telemetry read/write | run aborts |
    | `python3` (stdlib only — nothing to install) | rulebook parsing, JSON extraction, finding probes | run aborts |
+   | `bwrap` (`apt install bubblewrap`) | sandboxing the ship gate (ADR 0026) | every `branch-fix` repo refuses to ship |
    | `gh` | opening PRs when `NIGHTSHIFT_OPEN_PR=1` | branch still pushed, no PR |
    | `codemap` | structural index handed to explore | falls back to Read/Grep/Glob |
 
    Only the last two degrade — they are probed with `command -v`. `git`, `jq` and `python3` are hard
    dependencies called unqualified and unguarded: parsing the rulebook is a `python3` call on the
-   first code path of every entry point, so a host missing one loses the entire night. Step 5's
-   `dry-run` is the cheap way to find out before a real run does.
+   first code path of every entry point, so a host missing one loses the entire night. `bwrap` fails
+   in the other direction, on purpose: the gate executes repository content, so a missing sandbox
+   refuses the ship rather than running it unconfined (override, loudly, with
+   `NIGHTSHIFT_TEST_SANDBOX=none`). It also needs unprivileged user namespaces enabled in the kernel.
+   Step 5's `dry-run` is the cheap way to find out before a real run does.
 3. **Write the rulebook.** Copy `rulebook.example.yaml` to `rulebook.yaml` and list the repos this
    installation may touch, their `mode` (`branch-fix` / `findings-only`), optional `base:`,
    `dimensions:`, and the `limits:` block. The parser rejects a malformed rulebook and the run aborts
@@ -46,19 +50,23 @@ ledgers diverge silently: duplicate branches, broken caps and rotation). See
    every section takes a closed set of keys, so a typo (`max_open_branchs:`, `test-cmd:`) fails the
    parse by name instead of dropping that knob and running the night on the default you never wrote.
 
-   **Give every `branch-fix` repo a `test_cmd`** ([ADR 0022](adr/0022-a-repos-own-tests-gate-the-ship.md)).
-   It is the repo's own suite, run in the worktree just before the commit and *inside* the fix↔review
-   loop: a red suite hands the failing output back to the Fix stage to repair its own regression, and
-   only an item still red after `max_fix_iterations` is refused (`tests-failed`, no branch). Without
-   the key the repo ships **ungated** — the Review stage proves the finding is fixed, never that
-   nothing else broke, so a regression only surfaces if that repo happens to have CI. Keep the command
-   fast: it runs once per shipped finding and up to `max_fix_iterations` times for one that keeps
-   breaking, inside the night's wall-clock budget, bounded by `limits.test_timeout_seconds` (600).
+   **Every `branch-fix` repo needs a `test_cmd`, and the parse aborts without one**
+   ([ADR 0022](adr/0022-a-repos-own-tests-gate-the-ship.md),
+   [ADR 0026](adr/0026-the-ship-gate-runs-in-a-sandbox.md)). It is the repo's own suite, run in the
+   worktree just before the commit and *inside* the fix↔review loop: a red suite hands the failing
+   output back to the Fix stage to repair its own regression, and only an item still red after
+   `max_fix_iterations` is refused (`tests-failed`, no branch). The Review stage proves the finding is
+   fixed, never that nothing else broke — so a repo with no suite to declare is a repo nightshift must
+   not push branches for. Say so with `mode: findings-only`, which reports without ever pushing. Keep
+   the command fast: it runs once per shipped finding and up to `max_fix_iterations` times for one
+   that keeps breaking, inside the night's wall-clock budget, bounded by `limits.test_timeout_seconds`
+   (600).
    ```yaml
    repos:
      - path: /home/you/dev/yourrepo
        mode: branch-fix
        test_cmd: uv run pytest -q
+       test_net: false           # true only if the suite installs dependencies as it runs
    ```
 4. **Install and enable the timer:**
    ```
@@ -101,7 +109,49 @@ agent:
 | `NIGHTSHIFT_CODEX_REASONING_EFFORT` | codex | the CLI default effort applies |
 | `NIGHTSHIFT_CODEX_STAGE_HOME` | codex | `state/codex-home` (stage isolation); empty = your own `CODEX_HOME` |
 | `NIGHTSHIFT_TEST_TIMEOUT` | all | the rulebook's `limits.test_timeout_seconds`, else 600s per `test_cmd` |
-| `NIGHTSHIFT_TEST_PATH` | all | nothing is prepended, so a `test_cmd` sees the Runner's own PATH |
+| `NIGHTSHIFT_TEST_PATH` | all | nothing is prepended, so a `test_cmd` sees only `/usr/local/bin:/usr/bin:/bin` |
+| `NIGHTSHIFT_TEST_SANDBOX` | all | `bwrap` — the gate is sandboxed (ADR 0026); `none` disables it, loudly, per gate |
+| `NIGHTSHIFT_TEST_SANDBOX_ROBIND` | all | nothing extra is bound; `:`-separated paths mounted read-only in the gate |
+| `NIGHTSHIFT_TEST_SANDBOX_HOME` | all | the gate's `$HOME` is disposable; set a path to keep dependency caches warm |
+| `NIGHTSHIFT_TEST_ENV_PASS` | all | the gate's environment is an 8-variable allowlist; names listed here are added |
+| `NIGHTSHIFT_TEST_MEMORY_MB` | all | the rulebook's `limits.test_memory_mb`, else 4096 (`RLIMIT_DATA`) |
+| `NIGHTSHIFT_TEST_FSIZE_MB` | all | the rulebook's `limits.test_fsize_mb`, else 2048 (`RLIMIT_FSIZE`) |
+| `NIGHTSHIFT_TEST_MAX_PROCS` | all | the rulebook's `limits.test_max_procs`, else 2048 (`RLIMIT_NPROC`) |
+
+### The ship gate runs in a sandbox — and refuses to run without one
+
+The gate **executes candidate-controlled repository content**: `npm ci` alone runs `preinstall`,
+`prepare` and `pretest` out of a `package.json` the Fix stage may just have written. So it does not
+run as this account. [ADR 0026](adr/0026-the-ship-gate-runs-in-a-sandbox.md) has the full reasoning;
+operationally:
+
+- **Install bubblewrap** (`apt install bubblewrap`). Without it every `branch-fix` repo refuses to
+  ship — no gate, no branch — which is the intended direction of failure, not a bug to work around.
+- Inside the sandbox there is **no `$HOME`**, so no `~/.ssh`, no `gh` token, no `~/.claude`; no
+  `/etc` beyond a named allowlist; no docker socket; and **no network** unless the repo sets
+  `test_net: true`. The environment is an allowlist, so `SSH_AUTH_SOCK`/`GH_TOKEN`/`ANTHROPIC_API_KEY`
+  are absent by construction. Writable: the worktree and a disposable `HOME`.
+- **A suite that needs something from outside `/usr` must have it bound in.** Every entry of
+  `NIGHTSHIFT_TEST_PATH` is bound read-only *and* put on the gate's `PATH` — it is a `:`-separated
+  list, so the fleet's `node` (nvm) and `uv` (`~/.local/bin`) travel together. Anything a suite needs
+  but does not execute from `PATH` goes in `NIGHTSHIFT_TEST_SANDBOX_ROBIND`. A bind that would
+  re-expose `$HOME` is refused with a log line.
+- **`test_net: true` does not open this host's network** (ADR 0028). The sandbox always has its own
+  network namespace; a `test_net` repo reaches the outside through a proxy that refuses anything
+  resolving to a loopback, private, link-local or metadata address, on ports 80/443, HTTPS CONNECT
+  only. Every decision is logged to `<runs>/<night>/<item>/egress.log`. A suite that ignores
+  `HTTPS_PROXY` simply has no network. Grant it only to repos whose suite installs dependencies as
+  it runs.
+- **Git works inside the gate.** The worktree is a linked one, so its `.git` is a file pointing into
+  the repo; the repo's git dir is bound **read-only** for that reason. A suite may read git history;
+  it cannot plant a hook or move a ref in the real repository.
+- **A suite that needs one more variable** names it in `NIGHTSHIFT_TEST_ENV_PASS` (e.g.
+  `UV_CACHE_DIR,CARGO_HOME`) rather than the gate inheriting the session.
+- A gate that fails only under the sandbox is almost always one of three things: a dependency
+  outside `/usr` that is not bound, a suite that reaches the network without `test_net: true`, or a
+  cold cache running into `limits.test_timeout_seconds`. The suite's own output is in
+  `<runs>/<night>/<item>/tests.log`; bubblewrap's own startup failures land there too, and the run
+  log distinguishes them (`could not START its sandbox`) from a red suite.
 
 ### The ship gate needs a toolchain the service does not have
 
@@ -115,18 +165,33 @@ versions behind, and `pnpm`/`corepack` are not in a system directory at all.
 So the launcher resolves the nvm bin directory of the default (else newest) installed Node into
 `NIGHTSHIFT_TEST_PATH`, and the Runner prepends **only that variable, only for the `test_cmd`
 subprocess** — which already executes the repo's own package scripts, so its `PATH` is not a
-boundary. Set the variable yourself to pick a specific toolchain; set it empty to opt out.
+boundary. Set the variable yourself to pick a specific toolchain; set it empty to opt out. Since
+ADR 0026 those directories are also what gets **bound into the sandbox**, where `$HOME` does not
+exist at all — so the variable is now how the toolchain is *reachable*, not merely how it is found
+first.
+
+It is read as a **`:`-separated PATH fragment**, because one directory is not enough: this fleet
+needs `node` from nvm and `uv` from `~/.local/bin` in the same gate, and a directory that is bound
+but not on `PATH` (or on `PATH` but not bound) leaves the tool exactly as unreachable as before.
+
+```bash
+NIGHTSHIFT_TEST_PATH="$HOME/.nvm/versions/node/v24.13.0/bin:$HOME/.local/bin"
+```
+
+A **self-contained node install** also gets its prefix bound (node resolves its own libraries via
+`..`). That is deliberately narrow: it requires both a `node` binary in the listed directory *and* a
+node-modules tree under the prefix. Binding the parent of any bin directory — or of any directory
+that merely has a node-modules tree beside it — would mount `~/.local`, npm's global prefix on this
+host, and with it `~/.local/share`, into a sandbox whose entire purpose is that `$HOME` is not in it.
 
 Get this wrong and the failure is silent rather than loud: a gate that exits `9`
 (`node: bad option`) or `127` (`pnpm: command not found`) is indistinguishable from a fix that broke
 the suite, so the night discards finished work and reports it as `tests-failed`. Because
 `tests-failed` is deliberately not latched (ADR 0022), the same items are re-attempted and
-re-discarded every night. Verify a new repo's gate under the *service* environment, not an
-interactive shell:
-
-```bash
-systemd-run --user --wait --pipe --same-dir bash -lc 'cd /path/to/repo && <the test_cmd>'
-```
+re-discarded every night. Verify a new repo's gate the way the night runs it — `bin/schedule.sh
+dry-run`, then read the gate lines in its log. That exercises the service environment, the sandbox
+construction, the binds and the timeout together, which is what actually breaks; a command that
+passes in a login shell says nothing about any of them.
 
 **A machine-wide model pin in `~/.claude/settings.json` does not reach a stage.** Stage isolation
 excludes the whole `user` settings scope (see

@@ -41,6 +41,14 @@ def greet(name):
     return "hello " + name
 EOF
 
+# The gate below imports this module, and CPython writes __pycache__ next to it. Un-ignored, that
+# counts as the suite modifying the worktree, and ADR 0027 refuses to ship a tree the suite altered
+# after review saw it — so the dry-run would exercise everything except the push. Every real repo in
+# the fleet already ignores this; the demo project has to as well, or it teaches the wrong shape.
+cat > .gitignore <<'EOF'
+__pycache__/
+EOF
+
 git -c user.name=demo -c user.email=demo@localhost add -A
 git -c user.name=demo -c user.email=demo@localhost commit -q -m "initial demo project"
 git push -q -u origin main
@@ -61,6 +69,11 @@ dimensions:
 repos:
   - path: $SB/target
     mode: branch-fix
+    # A branch-fix repo must declare a ship gate (ADR 0026) — the parse aborts without one. The demo
+    # project has no suite, so this is the smallest command that runs: it exercises the sandboxed
+    # gate path end to end while gating nothing, which is honest for a throwaway sandbox and would
+    # not be for a real repo.
+    test_cmd: python3 -c "import app; assert app.greet('x') == 'hello x'"
 EOF
 
 echo "sandbox ready: $SB"

@@ -61,6 +61,9 @@ The decisions behind this live in the ADRs, not here — this section points, it
 - [ADR 0022](docs/adr/0022-a-repos-own-tests-gate-the-ship.md) — a repo's own tests gate the ship.
 - [ADR 0023](docs/adr/0023-an-unusable-agent-aborts-the-night.md) — an agent that cannot
   authenticate aborts the night; an outage must never forge the record of a clean fleet.
+- [ADR 0026](docs/adr/0026-the-ship-gate-runs-in-a-sandbox.md) — that gate *executes* what the Fix
+  stage wrote, so it runs in a bwrap sandbox with no credential reach — and a `branch-fix` repo
+  without a gate no longer ships ungated, it fails the parse.
 
 ## Relationship to `nightly-review-pipeline`
 

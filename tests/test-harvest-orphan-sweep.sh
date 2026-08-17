@@ -45,6 +45,7 @@ dimensions:
 repos:
   - path: $TMP/repo
     mode: branch-fix
+    test_cmd: true
 EOF
 
 STATE_DIR="$TMP/state" LEDGER="$LEDGER" RULEBOOK="$TMP/rulebook.yaml" \

@@ -29,6 +29,7 @@ dimensions:
 repos:
   - path: $TMP/repo
     mode: branch-fix
+    test_cmd: true
     base: main
     findings: 1
     dimensions: correctness
