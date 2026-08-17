@@ -316,7 +316,11 @@ stage to the worktree, and this file is inside the worktree.*
 writable, but it is no longer what `finalize` commits: the Runner records the tree object review was
 shown and commits that, so a `pretest`'s edits are discarded rather than staged. The C5 backstop
 named here did NOT cover it — a rewritten `.github/workflows/ci.yml` is executed by GitHub with the
-repository's secrets before a human opens the PR. `test_net: true` is a real egress channel for worktree content, though
+repository's secrets before a human opens the PR. `test_net: true` was a real hole and is closed by ADR
+[0028](../adr/0028-gate-egress-goes-through-a-vetting-proxy.md) — it shared the HOST's network
+namespace, i.e. loopback and the LAN, not merely the internet; egress now leaves through a proxy
+that refuses every non-public destination. What remains of it is that worktree content can still
+leave through an ALLOWED destination, though
 credential-free. `RLIMIT_AS` bounds address space, not RSS. Kernel unprivileged user namespaces and
 bubblewrap are now in the trust base.*
 

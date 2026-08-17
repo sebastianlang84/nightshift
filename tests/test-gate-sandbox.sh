@@ -62,6 +62,9 @@ REPO_PATHS=("$REPO"); REPO_MODES=(branch-fix)
 REPO_TEST_NETS=("${GATE_NET:-false}"); REPO_TEST_CMDS=("$GATE_CMD; exit 1")
 run_test_gate "$REPO" "$WT" "$ID"; echo "GATE_RC=$?"
 cat "$ID/tests.log" 2>/dev/null
+# The probe's LAST command decides its exit status, and the caller assigns that under `set -e`:
+# a passing gate deletes tests.log, so `cat` would fail and take the whole suite with it.
+:
 PROBE
 
 gate() { # $1 = command run inside the sandbox; extra VAR=VALUE args are exported for the probe
@@ -121,19 +124,18 @@ grep -q 'passed=/tmp/uv-cache' <<<"$out" \
   || { echo "$out" >&2; fail "NIGHTSHIFT_TEST_ENV_PASS did not forward the named variable"; }
 
 # --- 4. network: denied by default, granted only by the repo's own opt-in ----
-# `getent ahosts` needs no server to be reachable — with --unshare-net the resolver itself fails.
-out="$(gate 'getent ahosts example.invalid >/dev/null 2>&1; getent ahosts localhost >/dev/null 2>&1 && echo NET-UP || echo NET-DOWN')"
+# Probed with a REAL destination, not by resolving `localhost`: the sandbox is given a synthetic
+# /etc/hosts (ADR 0028) so its own loopback has a name, which makes `getent ahosts localhost` succeed
+# with no network at all. A probe that passes for the wrong reason is worse than no probe.
+out="$(gate 'getent ahosts example.com >/dev/null 2>&1 && echo NET-UP || echo NET-DOWN')"
 grep -q 'NET-DOWN' <<<"$out" || { echo "$out" >&2; fail "the gate has network egress without test_net: true"; }
 # The positive half can only assert that test_net RESTORES what the surrounding environment has.
 # nightshift gates ITSELF (ADR 0026), so this suite routinely runs inside a netless gate sandbox
 # where /etc/hosts is unbound and no resolver works at any nesting depth — asserting NET-UP there
 # fails for the environment, not for the code, and would turn nightshift's own nightly gate red.
-if getent ahosts localhost >/dev/null 2>&1; then
-  out="$(gate 'getent ahosts localhost >/dev/null 2>&1 && echo NET-UP || echo NET-DOWN' GATE_NET=true)"
-  grep -q 'NET-UP' <<<"$out" || { echo "$out" >&2; fail "test_net: true did not restore the loopback/resolver path"; }
-else
-  echo "test-gate-sandbox: note — test_net positive case skipped (this environment has no resolver)"
-fi
+# The positive half moved to tests/test-gate-egress.sh: since ADR 0028 `test_net: true` does not
+# hand the sandbox a resolver at all — it hands it a proxy — so "can it resolve a name" is no longer
+# the right question here, and asking it would fail for the design rather than for a defect.
 
 # --- 5. no sandbox is a REFUSAL to ship, never a licence to ship unconfined --
 # rc=2 ("the gate could not run"), distinct from rc=1 (a red suite) so the caller does not hand a

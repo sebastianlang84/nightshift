@@ -216,12 +216,12 @@ this lands.
   credentials; a repo keeping a token in a remote URL would expose it to its own gate). A netless
   suite can copy such data into the worktree for finalize to push; a `test_net` one can send it
   directly. The narrower design is a synthetic repo holding only the reviewed tree.
-- **`test_net: true` shares the HOST network namespace**, which is more than egress: loopback, LAN
-  and link-local are all reachable, so a suite in a `test_net` repo can talk to other services on
-  this shared host (partflow, llmstack, open-webui, the dashboard) and to any unauthenticated
-  localhost API. "No credentials on disk" is not "no credentials reachable through a trusted local
-  service". Narrowed to the repos that need it, but this is the sharpest remaining hole, and the
-  real fix is an egress proxy that refuses loopback, RFC1918, link-local and metadata addresses.
+- ~~**`test_net: true` shares the HOST network namespace.**~~ **Closed by
+  [ADR 0028](0028-gate-egress-goes-through-a-vetting-proxy.md).** `--share-net` did not grant "the
+  internet", it declined to create a namespace at all — so loopback and the LAN came with it, and
+  with them every unauthenticated local service on this shared host. The sandbox now always has its
+  own network namespace and a `test_net` repo reaches the outside only through a vetting proxy that
+  refuses any destination resolving to a non-public address.
 - **`RLIMIT_DATA` is the heap, not a cgroup memory controller.** It stops a runaway allocation —
   measured: a Node process asking for 12.8 GB is refused at a 2 GiB limit — but it does not account
   for page cache, shared mappings, or the sum across a suite's worker processes. `RLIMIT_NPROC` is

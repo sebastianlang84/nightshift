@@ -1411,8 +1411,8 @@ _test_robind() { # path -> append a read-only bind, refusing anything that would
   TEST_SANDBOX_ARGV+=( --ro-bind "$rp" "$rp" )
 }
 
-build_test_sandbox() { # worktree sandbox_home net(0|1) -> fills TEST_SANDBOX_ARGV
-  local wt="$1" sbhome="$2" net="$3" p
+build_test_sandbox() { # worktree sandbox_home net(0|1) item_dir -> fills TEST_SANDBOX_ARGV
+  local wt="$1" sbhome="$2" net="$3" id="$4" p
   local -a extra=()
   TEST_SANDBOX_ARGV=(
     bwrap
@@ -1426,7 +1426,18 @@ build_test_sandbox() { # worktree sandbox_home net(0|1) -> fills TEST_SANDBOX_AR
     --size $((16 * 1024 * 1024))   --tmpfs /run
     --ro-bind /usr /usr
   )
-  [ "$net" = 1 ] || TEST_SANDBOX_ARGV+=( --unshare-net )
+  # ALWAYS its own network namespace, `test_net` or not. `--share-net` used to hand a test_net repo
+  # the HOST's namespace, which is loopback and the LAN — every other service on this machine — and
+  # not merely "the internet" (ADR 0028). Egress now leaves through a vetting proxy on a unix
+  # socket, which crosses the namespace because it is a filesystem object, not a route.
+  TEST_SANDBOX_ARGV+=( --unshare-net )
+  if [ "$net" = 1 ] && [ -n "${TEST_EGRESS_DIR:-}" ]; then
+    TEST_SANDBOX_ARGV+=(
+      --ro-bind "$TEST_EGRESS_DIR" /nightshift-egress
+      --ro-bind "$NIGHTSHIFT_HOME/lib/gate_forwarder.py" /nightshift-egress-forwarder.py
+      --setenv NIGHTSHIFT_GATE_PROXY_PORT "$TEST_EGRESS_PORT"
+    )
+  fi
   # merged-/usr: reproduce whatever /bin, /lib … are on this host, so an absolute `#!` still resolves.
   for p in /bin /sbin /lib /lib64 /lib32 /libx32; do
     if [ -L "$p" ]; then TEST_SANDBOX_ARGV+=( --symlink "$(readlink "$p")" "$p" )
@@ -1441,9 +1452,17 @@ build_test_sandbox() { # worktree sandbox_home net(0|1) -> fills TEST_SANDBOX_AR
            /etc/ca-certificates /etc/ca-certificates.conf; do
     TEST_SANDBOX_ARGV+=( --ro-bind-try "$p" "$p" )
   done
-  # Resolver config buys nothing without egress, so it is bound only when egress is granted.
-  [ "$net" = 1 ] && TEST_SANDBOX_ARGV+=(
-    --ro-bind-try /etc/resolv.conf /etc/resolv.conf --ro-bind-try /etc/hosts /etc/hosts )
+  # No /etc/resolv.conf, ever: the sandbox resolves nothing. It hands the proxy a NAME and the proxy
+  # resolves it on the host, which is the only place the answer can be checked against the address
+  # policy — a resolver inside would just be a second, unchecked opinion.
+  #
+  # A minimal /etc/hosts IS needed, and not for the network: it is how `localhost` resolves to the
+  # sandbox's own loopback. Without it vitest dies at startup with EAI_AGAIN before running a single
+  # test. Synthesised rather than bound from the host, whose /etc/hosts names this machine's LAN.
+  { echo "127.0.0.1 localhost"
+    echo "::1 localhost ip6-localhost ip6-loopback"
+  } > "$id/gate-hosts"
+  TEST_SANDBOX_ARGV+=( --ro-bind "$id/gate-hosts" /etc/hosts )
   # A linked worktree's `.git` is a FILE (`gitdir: <repo>/.git/worktrees/<name>`), so every git
   # command in the gate resolves out of the worktree and into the repo — which is not bound. Without
   # this, `git ls-files` exits 128 and any suite that consults git fails for a reason that has
@@ -1527,6 +1546,23 @@ set_limit -u "${NIGHTSHIFT_GATE_MAX_PROCS:-0}"
 set_limit -d $(( ${NIGHTSHIFT_GATE_MEM_MB:-0} * 1024 ))
 set_limit -t "${NIGHTSHIFT_GATE_CPU_S:-0}"
 set_limit -f $(( ${NIGHTSHIFT_GATE_FSIZE_MB:-0} * 1024 ))
+# Egress, when the repo has test_net (ADR 0028). The sandbox has its own empty network namespace,
+# so this listener is on ITS loopback — unreachable from anywhere else — and every connection it
+# accepts is forwarded to the host-side proxy over the bound unix socket, which vets the
+# destination. A tool that ignores these variables simply has no network, which is the safe way
+# round. Started before the suite and only reported ready once it is listening, so nothing races it.
+if [ -n "${NIGHTSHIFT_GATE_PROXY_PORT:-}" ]; then
+  # Read its readiness line rather than poking the port: a probe connection would arrive at the
+  # proxy as an empty request and be logged as a refusal, which is noise in the one log an operator
+  # reads to find out why a gate could not fetch anything.
+  exec 7< <(python3 /nightshift-egress-forwarder.py "$NIGHTSHIFT_GATE_PROXY_PORT" /nightshift-egress/egress.sock)
+  read -r -t 10 -u 7 _ || true
+  export http_proxy="http://127.0.0.1:$NIGHTSHIFT_GATE_PROXY_PORT"
+  export https_proxy="$http_proxy" HTTP_PROXY="$http_proxy" HTTPS_PROXY="$http_proxy"
+  export ALL_PROXY="$http_proxy" all_proxy="$http_proxy"
+  # Nothing to talk to on this loopback except the forwarder, and no resolver at all.
+  export no_proxy="" NO_PROXY=""
+fi
 exec bash -c "$NIGHTSHIFT_GATE_CMD"
 '
 
@@ -1600,6 +1636,41 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 the gate co
   fi
   net=$(repo_test_net "$repo")
 
+  # A test_net repo gets its egress through the vetting proxy (ADR 0028), never through the host's
+  # network namespace. Started per gate and killed after it, so nothing outlives the run it serves.
+  TEST_EGRESS_DIR=""; TEST_EGRESS_PORT=""
+  local egress_pid=""
+  if [ "$net" = 1 ] && [ "$TEST_SANDBOX" != none ]; then
+    TEST_EGRESS_DIR="$(mktemp -d "$WORKTREES_DIR/gate-egress.XXXXXX")"
+    chmod 700 "$TEST_EGRESS_DIR"
+    TEST_EGRESS_PORT=3128
+    # `read` on the proxy's stdout: it prints one line once the socket is bound and listening. A
+    # sleep here would be a race that only shows up as a flaky "registry unreachable" at 04:00.
+    exec 8< <(python3 "$NIGHTSHIFT_HOME/lib/egress_proxy.py" "$TEST_EGRESS_DIR/egress.sock" 2>>"$id/egress.log")
+    egress_pid=$!
+    if ! read -r -t 10 -u 8 _ready; then
+      log "  $(basename "$repo"): the egress proxy did not come up — NOT shipping (see $id/egress.log)"
+      exec 8<&-
+      [ -n "$egress_pid" ] && kill "$egress_pid" 2>/dev/null
+      rm -rf "$TEST_EGRESS_DIR"
+      return 2
+    fi
+  fi
+  # Every exit from here on has to take the proxy with it, so it is torn down in one place.
+  stop_egress() {
+    # Only touch fd 8 if this call actually opened it. `exec 8<&-` on a descriptor that was never
+    # opened is a redirection failure, and a failed `exec` redirection TERMINATES a non-interactive
+    # shell — `2>/dev/null || true` does not save it. That killed the whole night right after the
+    # first gate of every repo without test_net, which reads downstream as "the loop never retried".
+    if [ -n "${egress_pid:-}" ]; then
+      kill "$egress_pid" 2>/dev/null || true
+      exec 8<&-
+    fi
+    [ -n "${TEST_EGRESS_DIR:-}" ] && rm -rf "$TEST_EGRESS_DIR"
+    TEST_EGRESS_DIR=""; egress_pid=""
+    return 0
+  }
+
   # A gate that cannot be sandboxed does not run. Not "runs anyway with a warning": the whole point
   # of ADR 0026 is that executing this content as this account is the exposure, so the absence of
   # the sandbox is a refusal to ship, not a licence to ship faster.
@@ -1608,6 +1679,7 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 the gate co
       "Install bubblewrap, or accept the risk explicitly with NIGHTSHIFT_TEST_SANDBOX=none." \
       >"$id/tests.log"
     log "  $(basename "$repo"): test gate cannot run — no sandbox (bwrap missing) — NOT shipping"
+    stop_egress
     return 2
   fi
 
@@ -1630,7 +1702,7 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 the gate co
     ( cd "$wt" && export PATH="${NIGHTSHIFT_TEST_PATH:+$NIGHTSHIFT_TEST_PATH:}$PATH" \
       && timeout "$TEST_TIMEOUT" bash -c "$tcmd" ) >"$id/tests.log" 2>&1 || trc=$?
   else
-    build_test_sandbox "$wt" "$sbhome" "$net"
+    build_test_sandbox "$wt" "$sbhome" "$net" "$id"
     # Whether the sandbox was actually BUILT cannot be read off the exit status: bubblewrap exits 1
     # for a missing bind source, a bad --chdir and an unknown option alike, and it also propagates
     # the child's own status, so no value is unambiguous. `--json-status-fd` is: bwrap writes an
@@ -1658,6 +1730,7 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 the gate co
       rm -f "$id/.sandbox-status"
       [ "$persist" = 1 ] || rm -rf "$sbhome"
       log "  $(basename "$repo"): test gate could not START its sandbox — NOT shipping (see $id/tests.log)"
+      stop_egress
       return 2
     fi
     rm -f "$id/.sandbox-status"
@@ -1671,6 +1744,7 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 the gate co
     printf 'nightshift: this worktree'"'"'s .git no longer resolves into %s.\n%s\n' "$repo" \
       "Refusing the item: the next git command would read a gitdir the suite chose." >"$id/tests.log"
     log "  $(basename "$repo"): .git POINTER TAMPERED — refusing the item (see $id/tests.log)"
+    stop_egress
     return 2
   fi
 
@@ -1684,9 +1758,11 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 the gate co
     # bind, a bad --chdir and an unknown option alike, so no exit code identifies that case.
     if [ "$trc" -eq 125 ] && [ "$TEST_SANDBOX" != none ]; then
       log "  $(basename "$repo"): test gate could not run under its resource ceilings — NOT shipping"
+      stop_egress
       return 2
     fi
     log "  $(basename "$repo"): test gate failed (rc=$trc) — see $id/tests.log"
+    stop_egress
     return 1
   fi
   # A green suite only certifies the tree the suite RAN ON. ADR 0027 commits the tree review was
@@ -1716,6 +1792,7 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 the gate co
         echo "Make the suite hermetic, or .gitignore what it writes."
       } >"$id/tests.log"
       log "  $(basename "$repo"): the suite MODIFIED the worktree — its green does not describe the reviewed tree; NOT shipping (see $id/tests.log)"
+      stop_egress
       return 2
     fi
   fi
@@ -1724,6 +1801,7 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 the gate co
   # to repair damage it has already repaired.
   rm -f "$id/tests.log"
   log "  $(basename "$repo"): test gate passed"
+  stop_egress
   return 0
 }
 

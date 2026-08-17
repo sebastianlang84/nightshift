@@ -136,9 +136,12 @@ operationally:
   list, so the fleet's `node` (nvm) and `uv` (`~/.local/bin`) travel together. Anything a suite needs
   but does not execute from `PATH` goes in `NIGHTSHIFT_TEST_SANDBOX_ROBIND`. A bind that would
   re-expose `$HOME` is refused with a log line.
-- **`test_net: true` shares this host's network**, not just the internet: loopback and the LAN are
-  reachable, so a suite in such a repo can reach other services running here. Grant it only to repos
-  whose suite genuinely installs dependencies as it runs.
+- **`test_net: true` does not open this host's network** (ADR 0028). The sandbox always has its own
+  network namespace; a `test_net` repo reaches the outside through a proxy that refuses anything
+  resolving to a loopback, private, link-local or metadata address, on ports 80/443, HTTPS CONNECT
+  only. Every decision is logged to `<runs>/<night>/<item>/egress.log`. A suite that ignores
+  `HTTPS_PROXY` simply has no network. Grant it only to repos whose suite installs dependencies as
+  it runs.
 - **Git works inside the gate.** The worktree is a linked one, so its `.git` is a file pointing into
   the repo; the repo's git dir is bound **read-only** for that reason. A suite may read git history;
   it cannot plant a hook or move a ref in the real repository.
