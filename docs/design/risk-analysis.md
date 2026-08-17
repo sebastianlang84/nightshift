@@ -312,9 +312,11 @@ item with the "could not run" status, which does not loop back into Fix — retr
 the hostile command again. Note this also covers a pointer the **Fix stage** wrote: N1 confines that
 stage to the worktree, and this file is inside the worktree.*
 
-*Residual: the worktree stays writable and is what `finalize` commits, so a `pretest` can still
-modify the tree after review saw the staged diff — this is [R9](#r9)'s unimplemented stronger half
-(N3), backstopped by C5. `test_net: true` is a real egress channel for worktree content, though
+*Residual: closed by ADR [0027](../adr/0027-the-reviewed-tree-is-what-ships.md). The worktree stays
+writable, but it is no longer what `finalize` commits: the Runner records the tree object review was
+shown and commits that, so a `pretest`'s edits are discarded rather than staged. The C5 backstop
+named here did NOT cover it — a rewritten `.github/workflows/ci.yml` is executed by GitHub with the
+repository's secrets before a human opens the PR. `test_net: true` is a real egress channel for worktree content, though
 credential-free. `RLIMIT_AS` bounds address space, not RSS. Kernel unprivileged user namespaces and
 bubblewrap are now in the trust base.*
 

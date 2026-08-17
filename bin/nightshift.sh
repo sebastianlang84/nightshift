@@ -571,9 +571,9 @@ $(cat "$id/signals.json")"
 $(cat "$id/finding.json")" ;;
   esac
   if [ "$stage" = review ]; then
-    # Stage first, then show the STAGED diff so review sees exactly what finalize commits
-    # (`git add -A` in finalize). A plain `git diff` reports tracked modifications only and
-    # omits new untracked files, letting a fix-created file ship unreviewed (R9 / fix N3).
+    # Stage first, then show the STAGED diff so review sees exactly what finalize commits. A plain
+    # `git diff` reports tracked modifications only and omits new untracked files, letting a
+    # fix-created file ship unreviewed (R9 / fix N3).
     git -C "$wd" add -A
     prompt="$prompt
 
@@ -1720,12 +1720,38 @@ finalize() { # repo worktree item_dir [seq] [base] -> echoes branch name
     log "  $(basename "$repo"): refusing to finalize a worktree with a rewritten .git"
     return 1
   fi
+  # What gets committed is the tree the REVIEWER approved, not whatever the worktree holds now
+  # (ADR 0027). The ship gate runs between review and here and executes the repo's own suite over
+  # this worktree, so an `add -A` at this point ships whatever that suite left behind, unreviewed —
+  # a suite that rewrites `.github/workflows/ci.yml` and exits 0 gets that workflow pushed, and
+  # GitHub runs it with the repository's secrets before any human opens the PR.
+  # Checked BEFORE the branch exists, so a refusal has nothing to clean up.
+  local rtree=""
+  [ -f "$id/reviewed-tree" ] && rtree="$(cat "$id/reviewed-tree")"
+  if [ -z "$rtree" ] || ! git -C "$wt" rev-parse -q --verify "$rtree^{tree}" >/dev/null 2>&1; then
+    log "  $(basename "$repo"): no reviewed tree recorded — refusing to commit an unreviewed worktree"
+    return 1
+  fi
   # `checkout` and `commit` fire hooks. The repo's own hooks are meant to run (ADR 0022), but a
   # RELATIVE core.hooksPath resolves inside the worktree, where the candidate can rewrite them.
   local -a hookargs=()
   mapfile -t hookargs < <(worktree_hook_args "$repo" "$wt")
   git -C "$wt" ${hookargs[@]+"${hookargs[@]}"} checkout -q -b "$branch"
-  git -C "$wt" add -A
+  # Say so when the suite changed something: a lockfile a test run legitimately refreshed is being
+  # dropped right here, and dropping it silently would be its own kind of lie.
+  # Compared against the REVIEWED TREE, not against HEAD: `status --porcelain` reports the staged
+  # fix itself, so every honest night would claim the gate had meddled. `diff-index` covers tracked
+  # divergence; `ls-files --others` covers files the suite created (ignored ones stay ignored, so a
+  # suite's node_modules does not trip it).
+  git -C "$wt" update-index -q --refresh >/dev/null 2>&1 || true
+  if ! git -C "$wt" diff-index --quiet "$rtree" -- 2>/dev/null \
+     || [ -n "$(git -C "$wt" ls-files --others --exclude-standard 2>/dev/null | head -1)" ]; then
+    log "  $(basename "$repo"): the test gate modified the worktree — discarding that, committing the reviewed tree"
+  fi
+  # `--reset -u` puts index AND working tree back to the reviewed object, so the repo's own hooks
+  # below still see exactly what the reviewer approved. The commit then takes the index as it
+  # stands: no `add -A`, so nothing the suite created can enter it.
+  git -C "$wt" read-tree --reset -u "$rtree"
   # The TARGET repo's own hooks run for this commit — deliberately: nightshift must not manufacture
   # commits the host repo would reject. So the commit can fail (a blocking pre-commit hook, or an
   # empty index because the Fix stage changed nothing), and NOTHING below may treat that as shipped.
@@ -2401,6 +2427,13 @@ main() {
         # finalize will commit — unsandboxed, and BEFORE the ship gate exists to check anything. So
         # a `.git` the Fix stage rewrote detonates here, earlier than any gate could catch it.
         if ! assert_worktree_git_sane "$repo" "$wt"; then gate=fail; verdict=revise; break; fi
+        # Record the exact tree object the reviewer is about to judge. THIS object, and nothing
+        # assembled later, is what finalize commits (ADR 0027): "the reviewer saw what shipped"
+        # stops being a property that holds as long as nothing touches the worktree in between and
+        # becomes one that holds by construction — the ship gate runs after this and writes here.
+        # Done in the loop rather than in stage_prompt because the mock adapter builds no prompt.
+        git -C "$wt" add -A
+        git -C "$wt" write-tree > "$fd/reviewed-tree" 2>/dev/null || rm -f "$fd/reviewed-tree"
         run_agent review "$wt" "$fd" || true
         verdict=$(jq -r '.verdict' "$fd/review.md" 2>/dev/null || echo abandon)
         [ "$verdict" = abandon ] && break

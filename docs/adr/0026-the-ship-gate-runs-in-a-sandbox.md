@@ -203,12 +203,13 @@ this lands.
 
 ## Residual risk
 
-- **The worktree is writable and it is what gets committed.** The gate runs *after* the reviewer
-  saw the staged diff (R9/N3), so a `pretest` can still modify the tree between review and commit,
-  and `finalize`'s `git add -A` would pick it up. Closing this needs a comparison of the committed
-  path set against what review signed off on — N3's unimplemented stronger half — and it cannot be
-  a naive "the tree must not change", because legitimate suites touch lockfiles. Bounded for now by
-  human review of the branch before merge (C5).
+- ~~**The worktree is writable and it is what gets committed.**~~ **Closed by
+  [ADR 0027](0027-the-reviewed-tree-is-what-ships.md).** The gate runs after the reviewer saw the
+  staged diff, so a `pretest` could modify the tree between review and commit and `finalize`'s
+  `git add -A` picked it up. The claim made here — that human review before merge bounds it — was
+  **wrong**: the sharp case is a rewritten `.github/workflows/ci.yml`, which GitHub executes with
+  the repository's secrets before any human opens the PR. `finalize` now commits the recorded
+  reviewed tree object and never re-stages the worktree.
 - **The repository's whole history is readable inside the gate**, because the common git dir is
   bound — not just the worktree's tree, but reflogs, unreachable objects, local-only branches, and
   any secret deleted from a past commit. `.git/config` names remotes (SSH URLs here, not

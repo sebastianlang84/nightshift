@@ -104,6 +104,11 @@ confident nonsense. A repo without the key ships exactly as it did before, and t
 night. A timeout is a failure: `timeout` exits 124, the run logs `test gate TIMED OUT`, and the item
 takes the `tests-failed` path like any other failure.
 
+**Amended by [ADR 0027](0027-the-reviewed-tree-is-what-ships.md).** The gate still runs here, in
+the loop, and a red suite is still a revision request. What changed is that the gate no longer
+contributes *content*: `finalize` commits the tree object review was shown, so anything the suite
+writes to the worktree is discarded rather than staged.
+
 ## Consequences
 
 **A green nightshift branch now means two things instead of one:** the finding is fixed *and* the
