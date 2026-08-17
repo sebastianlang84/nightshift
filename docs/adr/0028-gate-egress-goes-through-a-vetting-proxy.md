@@ -49,6 +49,12 @@ proxy, and that path is the only one there is.
 - **The sandbox resolves nothing.** No `/etc/resolv.conf`: it hands the proxy a name and the proxy
   resolves it on the host, which is the only place the answer can be checked. A resolver inside
   would be a second, unchecked opinion.
+- **Loopback is exempt from the proxy** (`no_proxy=localhost,127.0.0.1,::1`). The proxy variables are
+  exported to the whole suite, so without this a test that talks to a server the suite itself started
+  hands that request to the forwarder, and the proxy refuses it as an external destination. Observed
+  on market-digest: twelve refused POSTs to its own `127.0.0.1:9002`, with the suite quietly taking
+  an error path and still going green. The exemption grants nothing — that loopback is the
+  sandbox's own, created by `--unshare-net`, and the host's is on the other side of it.
 - **A minimal synthetic `/etc/hosts` is bound in**, for every gate, network or not. Not for the
   network — it is how `localhost` resolves to the sandbox's *own* loopback. Without it vitest dies
   at startup with `EAI_AGAIN` before running a test. Synthesised rather than bound from the host,
