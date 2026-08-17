@@ -1560,8 +1560,17 @@ if [ -n "${NIGHTSHIFT_GATE_PROXY_PORT:-}" ]; then
   export http_proxy="http://127.0.0.1:$NIGHTSHIFT_GATE_PROXY_PORT"
   export https_proxy="$http_proxy" HTTP_PROXY="$http_proxy" HTTPS_PROXY="$http_proxy"
   export ALL_PROXY="$http_proxy" all_proxy="$http_proxy"
-  # Nothing to talk to on this loopback except the forwarder, and no resolver at all.
-  export no_proxy="" NO_PROXY=""
+  # Loopback is exempt, and must be. A suite that starts a server and talks to it is a normal
+  # pattern, and every client honouring the variables above would otherwise hand that request to the
+  # forwarder, where the proxy refuses it as an external destination. Seen on market-digest: twelve
+  # refused POSTs to 127.0.0.1:9002, its own API, with the suite quietly taking an error path.
+  #
+  # This grants nothing. The loopback here belongs to the SANDBOX, created by --unshare-net; host
+  # services sit on a different one and stay unreachable either way. There is no resolver and
+  # localhost comes from the synthetic /etc/hosts, so these three names are exhaustive.
+  # NOTE: no apostrophes anywhere in this block — it lives inside a single-quoted string.
+  export no_proxy="localhost,127.0.0.1,::1"
+  export NO_PROXY="$no_proxy"
 fi
 exec bash -c "$NIGHTSHIFT_GATE_CMD"
 '
@@ -1584,13 +1593,27 @@ exec bash -c "$NIGHTSHIFT_GATE_CMD"
 # resolve the worktree and compared `--git-common-dir`, which a hostile gitdir defeats trivially: a
 # `commondir` file inside it redirects the common dir back at the real repo, so the comparison
 # passes while `$GIT_DIR` stays attacker-owned. Never ask a hostile repository to identify itself.
-git_pointer_ok() { # repo worktree -> 0 if `$wt/.git` is exactly the pointer this repo should have
-  local repo="$1" wt="$2" common want have
+#
+# The admin directory's NAME is git's to choose, not ours to predict: `worktree add` appends a digit
+# when the basename is already registered, and one stale entry from a crashed night is enough — the
+# path is gone, the entry is merely prunable, and the next worktree of that name becomes `<name>1`.
+# Deriving the expected pointer from `basename "$wt"` therefore accused a perfectly sound worktree of
+# tampering (seen live on macrolens) and refused the item, every night, until someone pruned. So the
+# expected value is read from the REPO side instead: `<admin>/gitdir` is maintained by git outside
+# the worktree, where the Fix stage cannot write (N1) and the sandbox binds read-only. That is the
+# same trust boundary as before — a fact about the repo, not a claim by the candidate.
+git_pointer_ok() { # repo worktree -> 0 if `$wt/.git` is exactly the pointer this repo recorded
+  local repo="$1" wt="$2" common have admin
   common="$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
   [ -n "$common" ] || return 1
-  want="gitdir: $common/worktrees/$(basename "$wt")"
   have="$(cat "$wt/.git" 2>/dev/null || true)"
-  [ "$have" = "$want" ]
+  for admin in "$common"/worktrees/*/; do
+    admin="${admin%/}"
+    [ -d "$admin" ] || continue
+    [ "$(cat "$admin/gitdir" 2>/dev/null || true)" = "$wt/.git" ] || continue
+    [ "$have" = "gitdir: $admin" ] && return 0
+  done
+  return 1
 }
 
 # Door 2 — `core.hooksPath`. A RELATIVE value resolves against the working directory, so a repo that

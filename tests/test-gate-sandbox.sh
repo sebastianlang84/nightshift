@@ -311,6 +311,27 @@ git -C "$TREPO" worktree add -q --detach "$TMP/honest"
   git_pointer_ok "$TREPO" "$TMP/honest" ) \
   || fail "the pointer guard rejects an untouched worktree — every night would refuse to ship"
 
+# …including one whose admin directory git DID NOT name after it. The admin dir takes the worktree's
+# basename, so a second worktree with the same basename under a different parent gets `<name>1` —
+# and a crashed night leaves exactly the stale first entry behind (the path is gone, the entry only
+# prunable). Deriving the expected pointer from basename("$wt") then reads as tampering and refuses a
+# sound item every night until someone prunes. Observed live on macrolens.
+mkdir -p "$TMP/first" "$TMP/second"
+git -C "$TREPO" worktree add -q --detach "$TMP/first/wt"
+rm -rf "$TMP/first"                                       # the crash: path gone, entry still registered
+git -C "$TREPO" worktree add -q --detach "$TMP/second/wt" # git therefore names this admin dir `wt1`
+[ -d "$TREPO/.git/worktrees/wt1" ] \
+  || fail "git did not suffix the admin dir — this test no longer exercises the case it describes"
+( set +u; NIGHTSHIFT_SOURCED=1 . "$ROOT/bin/nightshift.sh" >/dev/null 2>&1; set +e
+  git_pointer_ok "$TREPO" "$TMP/second/wt" ) \
+  || fail "a worktree whose admin dir git suffixed was called tampered — a false accusation that refuses the item"
+# The relaxation must not accept just any entry under the repo: only the one that claims THIS
+# worktree. The stale `wt` entry still names a path that no longer exists.
+printf 'gitdir: %s/.git/worktrees/wt\n' "$TREPO" > "$TMP/second/wt/.git"
+( set +u; NIGHTSHIFT_SOURCED=1 . "$ROOT/bin/nightshift.sh" >/dev/null 2>&1; set +e
+  git_pointer_ok "$TREPO" "$TMP/second/wt" ) \
+  && fail "the pointer may name any admin dir under the repo, not the one that claims this worktree"
+
 # --- 13. hooks reachable from INSIDE the worktree must not run for the Runner --
 # `core.hooksPath = .githooks` is a relative value, so git resolves it against the worktree — a
 # tracked, candidate-writable directory. nightshift's own repo is configured exactly that way and is

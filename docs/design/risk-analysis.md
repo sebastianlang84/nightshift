@@ -309,7 +309,10 @@ looking intact. Verified firing, then closed twice over: the pointer is re-bound
 the sandbox (after the worktree's read-write bind, or it is simply covered again), and it is
 validated against the repo's own git dir before the gate reports success. A mismatch refuses the
 item with the "could not run" status, which does not loop back into Fix — retrying would only run
-the hostile command again. Note this also covers a pointer the **Fix stage** wrote: N1 confines that
+the hostile command again. The expected pointer is **read** from the repo side (`<admin>/gitdir`,
+which git maintains outside the worktree) rather than derived from the worktree's basename: git
+suffixes the admin directory when that name is already registered, so the derived form accused a
+sound worktree of tampering and refused the item until someone pruned the stale entry. Note this also covers a pointer the **Fix stage** wrote: N1 confines that
 stage to the worktree, and this file is inside the worktree.*
 
 *Residual: closed by ADR [0027](../adr/0027-the-reviewed-tree-is-what-ships.md). The worktree stays

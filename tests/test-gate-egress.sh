@@ -120,6 +120,23 @@ grep -q 'own-loopback= 200' <<<"$out" \
 curl -s -m 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:18231/" | grep -q 200 \
   || fail "the host's own service on that port disappeared — the namespaces are not separate"
 
+# The same, WITH test_net — which is where it used to break. The proxy variables are exported to the
+# whole suite, so a client that honours them sends its localhost request to the forwarder and the
+# proxy refuses it as an external destination. market-digest showed this live: twelve refused POSTs
+# to its own 127.0.0.1:9002, and a preflight test exercising an error path instead of its subject.
+# no_proxy must exempt loopback — the sandbox's own, which grants nothing that --unshare-net took.
+out="$(gate 'python3 -c "
+import http.server,threading,urllib.request
+s=http.server.HTTPServer((\"127.0.0.1\",18231),http.server.SimpleHTTPRequestHandler)
+threading.Thread(target=s.serve_forever,daemon=True).start()
+print(\"own-loopback=\", urllib.request.urlopen(\"http://127.0.0.1:18231/\").status)
+print(\"by-name=\", urllib.request.urlopen(\"http://localhost:18231/\").status)
+"' GATE_NET=true)"
+grep -q 'own-loopback= 200' <<<"$out" \
+  || { echo "$out" >&2; fail "with test_net the suite cannot reach its OWN server — the proxy hijacked loopback"; }
+grep -q 'by-name= 200' <<<"$out" \
+  || { echo "$out" >&2; fail "with test_net 'localhost' does not reach the suite's own server"; }
+
 # --- 3. the proxy is refused for internal destinations, allowed for public ----
 # Needs real DNS on the host, so it is skipped rather than failed on an offline machine.
 if getent ahosts example.com >/dev/null 2>&1; then
