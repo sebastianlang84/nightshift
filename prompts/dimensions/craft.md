@@ -1,27 +1,24 @@
 ## Lens: CRAFT
 
-Aim this scan at readability and internal consistency — naming, dead code, needless
-complexity, and drift from a standard THIS repo already follows. This is the FLOOR
-dimension: it wins a slot only when nothing higher-value (a correctness bug, a security
-hole, a misleading doc) clears the bar. Never let a naming nit displace a real defect.
+Aim this scan at local readability and internal consistency — naming, control-flow clarity,
+and drift from a standard THIS repo already follows. Repository-wide dead code, redundant
+abstractions, duplicated implementations, and speculative scaffolding belong to the `bloat`
+lens. This is the FLOOR dimension: it wins a slot only when nothing higher-value (a
+correctness bug, a security hole, a misleading doc) clears the bar. Never let a naming nit
+displace a real defect.
 
 Hunt for:
 - code smells: a function doing three unrelated things, deeply nested conditionals a
-  guard clause would flatten, copy-pasted blocks that have started to drift;
-- dead code: an unused symbol, an unreachable branch, a parameter no caller sets, a
-  commented-out block left behind, a feature flag no path reads;
+  guard clause would flatten, or mutable state whose lifetime is hard to follow;
 - poor naming: a name that says the opposite of what it does, a misleading type, a
   variable reused for two meanings;
-- needless complexity: hand-rolled logic duplicating a stdlib/framework primitive, an
-  abstraction with one caller, indirection that adds no seam;
+- local needless complexity: hand-rolled control flow duplicating a stdlib/framework
+  primitive, or indirection that obscures a single function without changing the wider
+  repository structure;
 - inconsistency with the repo's OWN settled standard: one file doing X the way the other
   files (or the linter) forbid.
 
 Proof standard for this lens:
-- A dead-code or unused-symbol claim is `static` but demands the full reference hunt from
-  the review contract: every literal reference across code, config, CI, and docs, and a
-  check that the name is not CONSTRUCTED or referenced from outside the repo. A clean grep
-  proves "no literal reference," not "unused" — do not overclaim.
 - A consistency claim is `convention` and MUST cite THIS repo's own standard: name the
   linter rule that forbids it, OR 3+ sibling files doing it the settled way. No citable
   in-repo standard = unfalsifiable taste = do not raise it. This is the rule that keeps

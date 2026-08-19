@@ -115,7 +115,26 @@ digest="$(find "$d/digests" -name '*.md' | head -1)"
 grep -q 'did not complete' "$digest" \
   || { cat "$digest" >&2; fail "the digest does not report the stages that never finished"; }
 
-# --- 2. same failure, but the stage had already written findings ---------------------------------
+# --- 2. real adapter failure after returning a usable result -------------------------------------
+# The CLI may hit its turn ceiling after composing a valid result. The adapter owns the conversion
+# from its envelope into finding.json, so it must do that even though the CLI exit stays nonzero.
+d="$TMP/partial-real"; make_fleet "$d" "This is teh demo."
+cat > "$d/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+r='{"found":true,"coverage":{"files":["README.md"],"entrypoints":["README -> rendered docs"],"checks":["checked typo"],"invariants":{"config_domain":"not-applicable: no config","semantic_sets":"not-applicable: no set","artifact_identity":"checked: README bytes","failure_translation":"checked: partial result","lifecycle":"not-applicable: no lifecycle"},"unresolved":[]},"findings":[{"file":"README.md","type":"typo","line_window":"L1-L3","claim":"README contains teh","verify":"search README for teh","verifiability":"static","disposition":"fix","summary":"fix typo","rank":1,"confidence":1.0}]}';
+jq -nc --arg r "$r" '{type:"result",subtype:"error_max_turns",is_error:true,result:$r}'
+exit 1
+EOF
+chmod +x "$d/bin/claude"
+run_night "$d" claude
+[ "$(cat "$d/rc")" = 0 ] || { cat "$d/err" >&2; fail "the night exited $(cat "$d/rc") on the real partial path"; }
+grep -q 'left 1 finding(s) — continuing with those' "$d/err" \
+  || { cat "$d/err" >&2; fail "real adapter discarded a valid result on nonzero exit"; }
+jq -e 'select(.outcome=="abandoned" and .summary=="fix typo")' "$d/state/ledger.jsonl" >/dev/null 2>&1 \
+  || { cat "$d/err" >&2; fail "real partial finding never entered the finding lifecycle"; }
+
+# --- 3. mock failure after the stage had already written findings --------------------------------
 # Those must be used, not thrown away — dropping them would be a second, self-inflicted loss.
 d="$TMP/partial"; make_fleet "$d" "This is teh demo."
 run_night "$d" mock NIGHTSHIFT_MOCK_EXPLORE_RC=1
@@ -125,7 +144,7 @@ grep -q 'left 1 finding(s) — continuing with those' "$d/err" \
 jq -e 'select(.outcome=="shipped")' "$d/state/ledger.jsonl" >/dev/null 2>&1 \
   || { cat "$d/err" >&2; fail "the surviving finding never reached a branch"; }
 
-# --- 3. an explore that completes and finds nothing still records its clean verdict --------------
+# --- 4. an explore that completes and finds nothing still records its clean verdict --------------
 # The guard must not swallow the honest empty pass ADR 0015/0023 depend on.
 d="$TMP/clean"; make_fleet "$d" "This demo is clean."
 run_night "$d" mock

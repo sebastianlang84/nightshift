@@ -1,0 +1,45 @@
+[
+  {
+    "name": "unknown_mode",
+    "commit": "4ec41351d0f3327f7e880cc41edf14dc27f49562",
+    "lens": "correctness",
+    "ground_truth": "An unknown repo mode is silently skipped instead of rejecting the rulebook.",
+    "match_groups": [
+      ["unknown.{0,40}mode", "mode.{0,40}unknown", "typo.{0,40}mode", "misspell.{0,40}mode"],
+      ["skip", "silent", "drop", "ignore", "reject", "abort"]
+    ]
+  },
+  {
+    "name": "malformed_json",
+    "commit": "728208b8285aa31aec607bfa3b403333a3154632",
+    "lens": "correctness",
+    "ground_truth": "Unparseable stage output is converted into a clean verdict and durable coverage evidence.",
+    "match_groups": [
+      ["unparseable", "no.parseable", "malformed"],
+      ["found.false", "empty", "clean", "recon.cache"],
+      ["extract.json", "extractor"]
+    ]
+  },
+  {
+    "name": "suite_mutation",
+    "commit": "92c35c9f005147d7f30ab9ce2e9d9df0253fdeb3",
+    "lens": "tests",
+    "ground_truth": "A green suite may rewrite the worktree, so Review and Finalize judge different trees.",
+    "match_groups": [
+      ["test", "suite", "gate"],
+      ["mutat", "rewrit", "modif", "different"],
+      ["worktree", "reviewed.tree", "tree.*ship"]
+    ]
+  },
+  {
+    "name": "dry_run",
+    "commit": "fa33411fbc316aff8bccf44ec9ead411afc25863",
+    "lens": "infra",
+    "ground_truth": "schedule.sh dry-run exercises live state and can alter the operator's timer/state.",
+    "match_groups": [
+      ["dry.run"],
+      ["live", "actual", "operator"],
+      ["state", "timer", "systemd", "unit", "install", "uninstall"]
+    ]
+  }
+]

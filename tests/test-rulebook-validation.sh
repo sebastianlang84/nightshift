@@ -101,8 +101,18 @@ reject "a duplicated limits key"    'limits:
   max_open_branches: 9'             "limits: duplicate key 'max_open_branches'"
 reject "a limits key with no colon" 'limits:
   max_open_branches 2'              'limits: expected `key: value`'
+reject "a non-numeric open cap"     'limits:
+  max_open_branches: many'          'limits.max_open_branches must be a positive integer'
+reject "a zero open cap"            'limits:
+  max_open_branches: 0'             'limits.max_open_branches must be a positive integer'
+reject "a non-numeric run cap"      'limits:
+  max_branches_per_run: many'       'limits.max_branches_per_run must be a positive integer'
+reject "a zero run cap"             'limits:
+  max_branches_per_run: 0'          'limits.max_branches_per_run must be a positive integer'
 reject "an unknown recon key"       'recon:
   ttl-days: 3'                      "recon: unknown key 'ttl-days'"
+reject "a non-boolean recon switch" 'recon:
+  enabled: no'                      'recon.enabled must be true or false'
 
 # A repo entry's keys are closed too, and this is the misconfig with the widest blast radius:
 # `test-cmd:` parsed clean and left `test_cmd` empty, so the repo shipped UNGATED past its

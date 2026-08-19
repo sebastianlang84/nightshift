@@ -131,7 +131,7 @@ load_rulebook() {
   # still runs — it is free). Env override for a one-off, else the rulebook, else 5.
   MAX_VERIFY="${NIGHTSHIFT_MAX_VERIFIES:-${RB_MAX_VERIFY:-5}}"
   # Fallback dimension set if the rulebook declares none, so rotation still works out of the box.
-  [ "${#DIMENSIONS[@]}" -gt 0 ] || DIMENSIONS=(correctness security infra docs tests perf ui-ux deps craft)
+  [ "${#DIMENSIONS[@]}" -gt 0 ] || DIMENSIONS=(correctness security infra docs tests perf ui-ux deps bloat craft)
   # Per-run safety ceiling: the rulebook wins; NIGHTSHIFT_MAX_RUN_BRANCHES stays as an
   # ops override for when it is not set there; 50 is the last-resort default.
   MAX_RUN_BRANCHES="${rb_run_branches:-${NIGHTSHIFT_MAX_RUN_BRANCHES:-50}}"
@@ -371,8 +371,22 @@ agent_credentials_failed() { # file… -> 0 if any readable file carries a crede
   return 1
 }
 
+clear_stage_artifacts() { # stage item_dir — an iteration may never read the previous one's result
+  local stage="$1" id="$2" artifact=""
+  case "$stage" in
+    explore) artifact="$id/finding.json" ;;
+    fix)     artifact="$id/worknote.md" ;;
+    review)  artifact="$id/review.md" ;;
+    recon)   artifact="$id/recon.json" ;;
+    advise)  artifact="$id/advice.json" ;;
+    verify)  artifact="$id/verify.json" ;;
+  esac
+  rm -f "$id/$stage.out" "$id/.raw_$stage" "$id/$stage.err" "$id/.usage_$stage" ${artifact:+"$artifact"}
+}
+
 run_agent() { # stage workdir item_dir
   local stage="$1" workdir="$2" item_dir="$3" start end status=0 usage='{}'
+  clear_stage_artifacts "$stage" "$item_dir"
   start=$(date +%s)
   case "$NIGHTSHIFT_AGENT" in
     mock)   "mock_$stage" "$workdir" "$item_dir" || status=$? ;;
@@ -542,6 +556,17 @@ blind you to a live bug.
 
 $(cat "$NIGHTSHIFT_HOME/prompts/dimensions/$NIGHTSHIFT_DIMENSION.md")"
   fi
+  if [ "$stage" = explore ] && [ "${NIGHTSHIFT_DIMENSION:-}" = knowledge ] && \
+     [ -s "$id/knowledge-probe.json" ]; then
+    prompt="$prompt
+
+## knowledge_probe (deterministic, read-only OKF/Markdown structure check)
+This report was produced by Nightshift itself without executing target-repo code. Use its diagnostics
+as evidence to investigate, not as automatic findings and not as proof that the corpus is semantically
+consistent.
+
+$(cat "$id/knowledge-probe.json")"
+  fi
   if [ "$stage" = explore ] && [ -n "${NIGHTSHIFT_RECON_NOTES:-}" ]; then
     prompt="$prompt
 
@@ -594,7 +619,7 @@ $(git -C "$wd" diff "${NIGHTSHIFT_ADVISE_BASE:-HEAD}...HEAD" 2>/dev/null || true
 
 # ---- mock adapter (deterministic; the tested path) ----
 mock_explore() { # workdir item_dir — emits the v2 container {found, findings:[…]} with up to N planted defects
-  local wd="$1" id="$2" arr='[]'
+  local wd="$1" id="$2" arr='[]' files
   if [ -f "$wd/README.md" ] && grep -q 'teh ' "$wd/README.md"; then
     arr=$(printf '%s' "$arr" | jq -c '. + [{file:"README.md",type:"typo",line_window:"L1-L40",
       disposition:"fix",verifiability:"static",summary:"typo \"teh\" -> \"the\" in README",
@@ -622,8 +647,28 @@ mock_explore() { # workdir item_dir — emits the v2 container {found, findings:
   # trigger — a `NOSCOPE` sentinel file makes the mock return out_of_scope (the "no surface" verdict).
   local scope=in_scope_no_findings
   [ -f "$wd/NOSCOPE" ] && scope=out_of_scope
-  jq -nc --argjson f "$arr" --arg scope "$scope" \
-    '{found:($f|length>0),findings:$f} + (if ($f|length>0) then {} else {scope:$scope} end)' > "$id/finding.json"
+  files="$(git -C "$wd" ls-files | sed -n '1,5p' | jq -R . | jq -sc .)"
+  jq -nc --argjson f "$arr" --arg scope "$scope" --argjson files "$files" \
+    --arg dimension "${NIGHTSHIFT_DIMENSION:-}" \
+    '{found:($f|length>0),findings:$f,
+      coverage:{files:$files,
+        entrypoints:(if ($files|length)>0 then [($files[0] + " -> repository behavior")] else [] end),
+        checks:["searched planted correctness markers","checked selected lens surface","ranked all candidate findings"],
+        invariants:(if $dimension == "knowledge" then
+          {canonicality:"checked: mock canonical concept",
+           consistency:"checked: mock claim agreement",
+           routing:"checked: mock index path",
+           provenance_trust:"checked: mock source identity",
+           lifecycle_freshness:"checked: mock concept lifecycle"}
+        else
+          {config_domain:"checked: mock rulebook path",
+           semantic_sets:"checked: mock finding set",
+           artifact_identity:"checked: one mock worktree",
+           failure_translation:"checked: explicit mock exit code",
+           lifecycle:"checked: mock finding lifecycle"}
+        end),
+        unresolved:[]}}
+      + (if ($f|length>0) then {} else {scope:$scope} end)' > "$id/finding.json"
   # A stage that FAILS is not the same as a stage that found nothing, and a stage can fail after
   # having written a usable verdict — the claude CLI's `--max-turns` ceiling is the live case for both.
   # The sentinel is the exit code itself (env, not a file in the worktree) so a test can reach either
@@ -697,8 +742,25 @@ mock_recon() { # workdir item_dir — deterministic yield straight from recon_si
       perf:       {yield:"low", hint:"hot path only if data volume"},
       "ui-ux":    {yield:(if ($s.has_frontend//false) then "high" else "low" end), hint:"frontend present"},
       deps:       {yield:(if ((($s.lockfiles//[])|length)>0) then "normal" else "low" end), hint:"lockfiles present"},
+      bloat:      {yield:(if ((($s.languages//[])|length)>0) then "normal" else "low" end), hint:"code surface and structural redundancy"},
+      knowledge:  {yield:(if ($s.has_knowledge//false) then "high" elif ($s.has_docs//false) then "normal" else "low" end), hint:"OKF/Markdown knowledge structure"},
       craft:      {yield:"normal", hint:"floor lens"}
     }, notes:"mock recon (deterministic yield mapping from filesystem signals)"}' > "$id/recon.json"
+}
+
+# Convert a stage's textual answer into its machine artifact. Invalid output must propagate a
+# non-zero status to run_agent: inventing `found:false` here would make the Runner advance coverage
+# for a review the model never completed.
+materialize_stage_output() { # stage item_dir
+  local stage="$1" id="$2"
+  case "$stage" in
+    explore) python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/finding.json" 2>>"$id/$stage.err" ;;
+    fix)     cp "$id/$stage.out" "$id/worknote.md" ;;
+    review)  python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/review.md" 2>>"$id/$stage.err" ;;
+    recon)   python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/recon.json" 2>>"$id/$stage.err" ;;
+    advise)  python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/advice.json" 2>>"$id/$stage.err" ;;
+    verify)  python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/verify.json" 2>>"$id/$stage.err" ;;
+  esac
 }
 
 # ---- claude adapter (first-party CLI headless, ADR 0003) ----
@@ -773,12 +835,11 @@ repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
   # stderr went to /dev/null, and a non-zero exit dropped the captured stdout on the floor with it —
   # so a stage that never started left an empty item dir and no trace of why (see AGENT_FATAL above).
   # Keeping both lets run_agent report the reason and recognise a credential failure.
-  local rawf="$id/.raw_$stage" errf="$id/$stage.err" rc=0
+  local rawf="$id/.raw_$stage" errf="$id/$stage.err" rc=0 parse_rc=0
   (cd "$wd" && \
     GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="$HOOKS_DIR" \
     NIGHTSHIFT_WORKTREE="$wd" CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 \
     claude -p "$prompt" --output-format json --settings "$STATE_DIR/claude-settings.json" --tools "$tools" "${model_arg[@]}" "${sources_arg[@]}" $cm_flags $flags </dev/null) >"$rawf" 2>"$errf" || rc=$?
-  [ "$rc" -eq 0 ] || return 1
   out="$(cat "$rawf")"
   # `claude -p --output-format json` is NOT a stable shape. Sometimes it is a single
   # result object ({result,usage,total_cost_usd}); sometimes a JSON ARRAY of events with
@@ -787,7 +848,8 @@ repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
   # result on the other — every explore then reports found:false and claude mode does
   # nothing. So normalise both: pick the result object whether top-level is it or an array.
   local pick='if type=="array" then (map(select(.type=="result"))|last) else . end'
-  printf '%s' "$out" | jq -r "$pick"' | (.result // "")'                > "$id/$stage.out"
+  printf '%s' "$out" | jq -r "$pick"' | (.result // "")' > "$id/$stage.out" 2>/dev/null \
+    || : > "$id/$stage.out"
   # Telemetry sidecar for run_agent. `modelUsage` is keyed by the REAL model ID
   # ("claude-opus-5", "claude-opus-4-8[1m]", …) and is the only place the served model appears — the
   # adapter name alone cannot answer "which model ran, and did it need the [1m] context variant". A
@@ -814,15 +876,11 @@ repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
       cost_usd:              (.total_cost_usd // null),
       model_cost_usd:        ($top.value.costUSD // null)
     }' > "$id/.usage_$stage" 2>/dev/null || true
-  case "$stage" in
-    explore) python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/finding.json" ;;
-    fix)     cp "$id/$stage.out" "$id/worknote.md" ;;
-    review)  python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/review.md" ;;
-    recon)   python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/recon.json" ;;
-    advise)  python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/advice.json" ;;
-    verify)  python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/verify.json" ;;
-  esac
-  return 0
+  materialize_stage_output "$stage" "$id" || parse_rc=$?
+  # Preserve the CLI's own nonzero status, but only AFTER materializing any valid partial result it
+  # returned. main() can then keep a grounded finding while still logging that Explore hit a limit.
+  [ "$rc" -eq 0 ] || return "$rc"
+  return "$parse_rc"
 }
 
 # ---- codex adapter (first-party CLI headless, ADR 0003) ----
@@ -839,7 +897,7 @@ repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
 # neither is exploitable to reach main — but their fix-stage boundaries are enforced by different
 # mechanisms (tool capability vs OS sandbox) with different residual gaps. See risk-analysis.md.
 codex_run() { # stage workdir item_dir
-  local stage="$1" wd="$2" id="$3" prompt sandbox events model effort
+  local stage="$1" wd="$2" id="$3" prompt sandbox events model effort rc=0 parse_rc=0
   local -a args=(--ask-for-approval never exec --ephemeral --ignore-user-config --ignore-rules
     --strict-config --json -o "$id/$stage.out")
   prompt="$(stage_prompt "$stage" "$wd" "$id")"
@@ -884,12 +942,10 @@ repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
   # can name the reason a stage died and spot a credential failure. Codex's stderr previously landed
   # unlabelled in the night log; per stage and per item dir it is attributable.
   events="$id/.raw_$stage"
-  if ! (cd "$wd" && printf '%s' "$prompt" | \
+  (cd "$wd" && printf '%s' "$prompt" | \
     GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="$HOOKS_DIR" \
     CODEX_HOME="$cx_home" \
-    codex "${args[@]}" - > "$events" 2>"$id/$stage.err"); then
-    return 1
-  fi
+    codex "${args[@]}" - > "$events" 2>"$id/$stage.err") || rc=$?
   # Telemetry sidecar for run_agent — same object contract as the claude adapter. Codex's event
   # stream is no more stable than claude's JSON: a payload sits either at the top level of an event
   # or wrapped in `.msg`, so consider both for every event. Usage rides on `turn.completed` (with
@@ -916,14 +972,9 @@ repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
       cost_usd:              null,
       model_cost_usd:        null }' \
     "$events" > "$id/.usage_$stage" 2>/dev/null || true
-  case "$stage" in
-    explore) python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/finding.json" ;;
-    fix)     cp "$id/$stage.out" "$id/worknote.md" ;;
-    review)  python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/review.md" ;;
-    recon)   python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/recon.json" ;;
-    advise)  python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/advice.json" ;;
-    verify)  python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/verify.json" ;;
-  esac
+  materialize_stage_output "$stage" "$id" || parse_rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
+  return "$parse_rc"
 }
 
 # --------------------------------------------------------------- selection ----
@@ -1173,11 +1224,12 @@ select_dimension() { # repo -> highest weighted-staleness dimension (ADR 0015)
   echo "$best_dim"
 }
 
-ensure_recon() { # repo -> refresh the recon cache if missing / HEAD changed / older than ttl_days (ADR 0010)
+ensure_recon() { # repo -> refresh cache if missing / configured base changed / older than ttl_days
   [ "${RECON_ENABLED:-true}" != false ] || return 0
   local repo="$1" cache head chead cts cepoch now ttl win cfailed id wt base tmp
   cache="$(recon_cache_path "$repo")"; mkdir -p "$RECON_DIR"
-  head=$(git -C "$repo" rev-parse HEAD 2>/dev/null || echo "")
+  base="$(resolve_base "$repo" "$(repo_cfg_base "$repo")")"
+  head=$(git -C "$repo" rev-parse "$base" 2>/dev/null || echo "")
   if [ -f "$cache" ]; then
     chead=$(jq -r '.head // ""' "$cache" 2>/dev/null || echo "")
     cts=$(jq -r '.ts // ""' "$cache" 2>/dev/null || echo "")
@@ -1191,13 +1243,13 @@ ensure_recon() { # repo -> refresh the recon cache if missing / HEAD changed / o
     fi
   fi
   id="$RUNS_DIR/recon-$(date +%s%N)"; mkdir -p "$id"
-  "$NIGHTSHIFT_HOME/lib/recon_signals.sh" "$repo" > "$id/signals.json" 2>/dev/null || echo '{}' > "$id/signals.json"
   # Recon is read-only, but the "never the live checkout" invariant is absolute: if the
   # isolated worktree can't be created, SKIP recon rather than pointing a stage at the
   # operator's working tree. Recon degrades gracefully — no cache written this run means
   # dim_weight() returns the normal weight for every dimension, so nothing is starved.
-  base="$(base_ref "$repo")"; wt="$WORKTREES_DIR/$(basename "$id")"
+  wt="$WORKTREES_DIR/$(basename "$id")"
   if setup_worktree "$repo" "$wt" "$base"; then
+    "$NIGHTSHIFT_HOME/lib/recon_signals.sh" "$wt" > "$id/signals.json" 2>/dev/null || echo '{}' > "$id/signals.json"
     run_agent recon "$wt" "$id" || true; remove_worktree "$repo" "$wt"
   else
     log "  $(basename "$repo"): recon worktree failed — skipping recon (never the live checkout)"
@@ -1728,7 +1780,7 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 the gate co
     # the system dirs (R10/N4), while this subprocess already runs the repo's package scripts anyway.
     log "  $(basename "$repo"): test gate sandbox DISABLED (NIGHTSHIFT_TEST_SANDBOX=none) — the suite runs with this account's full reach"
     ( cd "$wt" && export PATH="${NIGHTSHIFT_TEST_PATH:+$NIGHTSHIFT_TEST_PATH:}$PATH" \
-      && timeout "$TEST_TIMEOUT" bash -c "$tcmd" ) >"$id/tests.log" 2>&1 || trc=$?
+      && timeout "$TEST_TIMEOUT" bash -c "$tcmd" </dev/null ) >"$id/tests.log" 2>&1 || trc=$?
   else
     build_test_sandbox "$wt" "$sbhome" "$net" "$id"
     # Whether the sandbox was actually BUILT cannot be read off the exit status: bubblewrap exits 1
@@ -1748,7 +1800,7 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 the gate co
       --setenv NIGHTSHIFT_GATE_MEM_MB "$TEST_MEMORY_MB" \
       --setenv NIGHTSHIFT_GATE_CPU_S "$TEST_TIMEOUT" \
       --setenv NIGHTSHIFT_GATE_FSIZE_MB "$TEST_FSIZE_MB" \
-      -- /bin/bash -c "$TEST_GATE_INNER" >"$id/tests.log" 2>&1 9>"$id/.sandbox-status" || trc=$?
+      -- /bin/bash -c "$TEST_GATE_INNER" </dev/null >"$id/tests.log" 2>&1 9>"$id/.sandbox-status" || trc=$?
     # A timeout killed a sandbox that DID come up, so it is a red suite, not a construction failure.
     if [ "$trc" -ne 124 ] && ! grep -q '"exit-code"' "$id/.sandbox-status" 2>/dev/null; then
       { echo "nightshift: bubblewrap did not bring the sandbox up (rc=$trc)."
@@ -2430,6 +2482,17 @@ main() {
     # spend its findings budget re-reporting an item the Runner would only suppress.
     NIGHTSHIFT_KNOWN_WORK="$(known_work "$repo")"; export NIGHTSHIFT_KNOWN_WORK
     log "  $(basename "$repo") [$mode]: lens=${dim:-none} · budget=$rfind"
+    # Knowledge reviews get a deterministic receipt before the model reads anything. The Runner
+    # owns this probe and executes no target-repo code; if it cannot enumerate the bundle, the lens
+    # is not serviced and no clean ledger evidence is written.
+    if [ "$dim" = knowledge ]; then
+      if ! python3 "$NIGHTSHIFT_HOME/lib/knowledge_probe.py" "$wt" >"$id/knowledge-probe.json" \
+          2>"$id/knowledge-probe.err"; then
+        log "  $(basename "$repo") [$mode]: knowledge probe failed — $(head -1 "$id/knowledge-probe.err")"
+        remove_worktree "$repo" "$wt"
+        continue
+      fi
+    fi
     explore_rc=0
     run_agent explore "$wt" "$id" || explore_rc=$?
     # Bail out BEFORE anything derived from this stage is recorded. A dead agent must not advance the
@@ -2459,6 +2522,15 @@ main() {
         continue
       fi
       log "  $(basename "$repo"): explore exited $explore_rc but left $n_partial finding(s) — continuing with those"
+    fi
+    # A syntactically complete verdict is still not evidence of a deep pass. Require a bounded,
+    # repo-grounded coverage receipt before the scan marker, considered count, or empty ledger row
+    # can claim this lens was serviced. The rejected artifact stays in the item dir for diagnosis.
+    if ! python3 "$NIGHTSHIFT_HOME/lib/validate_explore.py" "$wt" "$id/finding.json" "$dim" \
+        >"$id/explore-validation.out" 2>"$id/explore-validation.err"; then
+      log "  $(basename "$repo") [$mode]: explore verdict rejected — $(head -1 "$id/explore-validation.err")"
+      remove_worktree "$repo" "$wt"
+      continue
     fi
     considered=$((considered + 1))
     # Mark this (repo,dim) as serviced NOW — regardless of what Explore found — so the rotation

@@ -71,7 +71,7 @@ case "$prompt" in
     printf '%s' '{"dimensions":{"correctness":{"applicable":true,"hint":"code"}},"notes":"test recon"}' > "$out" ;;
   *"EXPLORE stage"*)
     [ "$sandbox" = read-only ]
-    printf '%s' '{"found":true,"findings":[{"file":"README.md","type":"typo","line_window":"L1-L3","claim":"README contains teh","verify":"search README for teh","verifiability":"static","disposition":"fix","summary":"fix typo","fingerprint":"README.md:typo:L1-L3","rank":1,"confidence":1.0}]}' > "$out" ;;
+    printf '%s' '{"found":true,"coverage":{"files":["README.md"],"entrypoints":["README -> rendered documentation"],"checks":["checked typo marker"],"invariants":{"config_domain":"not-applicable: no config","semantic_sets":"not-applicable: no sets","artifact_identity":"checked: one README artifact","failure_translation":"checked: explicit result JSON","lifecycle":"not-applicable: no lifecycle"},"unresolved":[]},"findings":[{"file":"README.md","type":"typo","line_window":"L1-L3","claim":"README contains teh","verify":"search README for teh","verifiability":"static","disposition":"fix","summary":"fix typo","fingerprint":"README.md:typo:L1-L3","rank":1,"confidence":1.0}]}' > "$out" ;;
   *"FIX stage"*)
     [ "$sandbox" = workspace-write ] && [ "$network" = off ]
     sed -i 's/teh/the/' README.md

@@ -74,7 +74,8 @@ dimensions:
   - perf                         # N+1, sync-in-async, quadratic hot paths, missing indexes
   - ui-ux                        # broken flows, a11y, inconsistent components, missing states, copy
   - deps                         # EOL/vulnerable pins, lockfile drift, unused deps
-  - craft                        # smells, dead code, naming — the FLOOR lens
+  - bloat                        # dead code, redundant paths, speculative abstractions, LLM-style slop
+  - craft                        # naming, local readability, repo conventions — the FLOOR lens
 
 repos:
   - path: /absolute/path/to/your/repo
@@ -104,3 +105,6 @@ repos:
   #                              # Keep it FAST: it runs once per shipped finding and up to
   #                              # max_fix_iterations times for one that keeps breaking.
   #                              # Must be one line; no tabs. Runs under `bash -c` in the worktree.
+  # - path: /absolute/path/to/markdown-knowledge-base
+  #   mode: findings-only        # semantic consolidation starts read-only; a wrong merge loses knowledge
+  #   dimensions: knowledge      # opt-in built-in: canonicality, consistency, routing, provenance, freshness

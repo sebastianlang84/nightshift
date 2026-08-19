@@ -155,11 +155,19 @@ def main(path: str) -> None:
         )
 
     print(f"prefix\t{prefix}")
-    print(f"max_open\t{limits.get('max_open_branches', '2')}")
+    max_open = limits.get("max_open_branches", "2")
+    if not max_open.isdecimal() or int(max_open) < 1:
+        raise SystemExit("limits.max_open_branches must be a positive integer")
+    print(f"max_open\t{max_open}")
     # Emitted empty when absent so bash can apply the env override before its default
     # (precedence: rulebook -> NIGHTSHIFT_MAX_RUN_BRANCHES -> default). The others have
     # no env counterpart, so the parser owns their defaults directly.
-    print(f"max_branches_per_run\t{limits.get('max_branches_per_run', '')}")
+    max_run_branches = limits.get("max_branches_per_run", "")
+    if max_run_branches and (
+        not max_run_branches.isdecimal() or int(max_run_branches) < 1
+    ):
+        raise SystemExit("limits.max_branches_per_run must be a positive integer")
+    print(f"max_branches_per_run\t{max_run_branches}")
     # A hand-set 0 would make the fix<->review loop never run — every finding then
     # abandons silently. Require >= 1 so the misconfig fails loudly (with the runner's
     # fail-closed parse handling) instead of doing nothing.
@@ -220,8 +228,12 @@ def main(path: str) -> None:
     if not mvr.isdecimal():
         raise SystemExit("limits.max_verifies_per_run must be a non-negative integer")
     print(f"max_verifies_per_run\t{mvr}")
-    # Recon stage: on by default; cache invalidated on HEAD change or after ttl_days.
-    print(f"recon_enabled\t{recon.get('enabled', 'true')}")
+    # Recon stage: on by default. This is a closed boolean domain: accepting YAML-ish synonyms
+    # such as `no` while bash only recognises the literal `false` silently leaves Recon enabled.
+    renabled = recon.get("enabled", "true")
+    if renabled not in ("true", "false"):
+        raise SystemExit("recon.enabled must be true or false")
+    print(f"recon_enabled\t{renabled}")
     # A malformed ttl_days silently became 0 in bash arithmetic → the cache was never fresh →
     # recon re-ran every pass. Require a positive integer so the misconfig fails loudly instead.
     ttl = recon.get("ttl_days", "7")
