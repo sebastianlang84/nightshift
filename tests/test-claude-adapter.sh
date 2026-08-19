@@ -58,7 +58,9 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 # Runner-owned flags every stage must carry (headless JSON, Layer-2 settings, sandbox default).
-[ "$outfmt" = json ] && [ "$skip" = 1 ] && [ "$maxturns" = 25 ] && [ -f "$settings" ]
+# Keep this one assertion: separate commands or an && chain under set -e can let a non-final false
+# clause pass as an exempt condition.
+[[ "$outfmt" = json && "$skip" = 1 && "$maxturns" = 60 && -f "$settings" ]]
 
 # The usage block mirrors the real headless result object: `modelUsage` keyed by the REAL model ID —
 # the only source for runs.jsonl's `model_id` — plus the cumulative input/cache counters. A second,
@@ -83,7 +85,7 @@ case "$prompt" in
     emit_object '{"dimensions":{"correctness":{"applicable":true,"hint":"code"}},"notes":"test recon"}' ;;
   *"EXPLORE stage"*)
     [ "$tools" = "Read,Grep,Glob" ]
-    r='{"found":true,"findings":[{"file":"README.md","type":"typo","line_window":"L1-L3","claim":"README contains teh","verify":"search README for teh","verifiability":"static","disposition":"fix","summary":"fix typo","fingerprint":"README.md:typo:L1-L3","rank":1,"confidence":1.0}]}'
+    r='{"found":true,"coverage":{"files":["README.md"],"entrypoints":["README -> rendered documentation"],"checks":["checked typo marker"],"invariants":{"config_domain":"not-applicable: no config","semantic_sets":"not-applicable: no sets","artifact_identity":"checked: one README artifact","failure_translation":"checked: explicit result JSON","lifecycle":"not-applicable: no lifecycle"},"unresolved":[]},"findings":[{"file":"README.md","type":"typo","line_window":"L1-L3","claim":"README contains teh","verify":"search README for teh","verifiability":"static","disposition":"fix","summary":"fix typo","fingerprint":"README.md:typo:L1-L3","rank":1,"confidence":1.0}]}'
     # ARRAY-of-events shape: rate_limit_event ahead of the SAME result object.
     jq -nc --argjson o "$(emit_object "$r")" '[{type:"rate_limit_event"},$o]' ;;
   *"FIX stage"*)

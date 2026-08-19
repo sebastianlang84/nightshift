@@ -28,17 +28,20 @@ Introduce **review dimensions** (lenses), a **recon** stage, and **coverage rota
 the ledger as the single source of memory (ADR 0004/0007) and all policy in the Runner (ADR 0001).
 
 **Dimensions.** A closed-but-extensible set (`correctness, security, infra, docs, tests, perf,
-ui-ux, deps, craft`), declared in `rulebook.yaml` under `dimensions:` (ORDER = cold-start/tie
-priority). Adding a dimension = drop a `prompts/dimensions/<id>.md` lens file + add one rulebook
-line; no code change. A lens is appended to the shared `explore.md` (which still owns the output
-schema, the falsifiable-claim contract, and the surface/fix guard) — it only aims attention and
-states dimension-specific proof standards. The selected dimension is stamped onto every finding
-(ledger `dimension` field, nullable/additive) and leads the branch slug.
+ui-ux, deps, bloat, craft`), declared in `rulebook.yaml` under `dimensions:` (ORDER = cold-start/tie
+priority). A custom dimension needs a `prompts/dimensions/<id>.md` lens file plus one rulebook line;
+if Recon does not know that id, its yield safely defaults to neutral. Promoting one into the built-in,
+Recon-specialized catalog also adds it to `prompts/recon.md` and the Runner/mock fallback; the catalog
+contract in `tests/test-dimension-catalog.sh` keeps those representations equal. A lens is appended to
+the shared `explore.md` (which still owns the output schema, the falsifiable-claim contract, and the
+surface/fix guard) — it only aims attention and states dimension-specific proof standards. The
+selected dimension is stamped onto every finding (ledger `dimension` field, nullable/additive) and
+leads the branch slug.
 
 **Recon.** A read-only stage, run per repo and **cached** in `state/recon/<repo>.json`
-(derived, disposable state — NOT the ledger), invalidated when the repo HEAD changes or after
+(derived, disposable state — NOT the ledger), invalidated when the configured base commit changes or after
 `recon.ttl_days`. Two layers: `lib/recon_signals.sh` emits deterministic filesystem signals
-(docs/compose/frontend/tests/CI/lockfiles/…) — harness-independent and what mock mode runs on —
+(docs/compose/frontend/tests/CI/lockfiles/…) from the same detached base worktree the model reads —
 and the model (`prompts/recon.md`) refines them into per-dimension `{applicable, hint}` plus a
 one-paragraph `notes` map that orients explore. Recon **narrows** the candidate dimensions and
 never starves: a missing cache or an unknown dimension is treated as applicable, and
@@ -72,3 +75,5 @@ merge-rate (ADR 0009's tuning signal), so rotation and lens-yield are observable
   isolated run no longer reconciles the live ledger.
 - See `docs/design/nightshift-v2.md` for the full design and the phased plan; multi-finding and
   one-branch-per-finding are ADR 0011.
+- ADR 0029 tightens “serviced”: no scan marker or `empty` ledger evidence is written until Explore's
+  tracked-file/flow/check/invariant receipt passes deterministic validation.

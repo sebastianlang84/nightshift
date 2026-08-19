@@ -72,6 +72,11 @@ caching, yield-weighted dimension selection, the empty-scope ledger row and its 
 — ADR 0010/0015) is covered end-to-end in **mock** mode, which drives the real
 branch/worktree/git/ledger path but fakes the model boundary.
 
+ADR 0029 closes the repeatability gap for Explore depth: `evals/deep-review/` replays four frozen
+historical pre-fix snapshots with the real Claude adapter. The 2026-08-19 invariant-matrix experiment
+reached 3/4 `hit@3` from a 1/4 baseline and records model cost. It does not make model behavior
+deterministic; the remaining suite-mutation miss is explicit.
+
 A supervised real-model night on **2026-08-01** against a throwaway sandbox repo closed part of the
 prompt-level gap. A live Recon calibrated `yield` across all nine dimensions with file- and
 line-grounded hints — it rated `correctness` high and pointed at the exact zero-argument division
@@ -99,6 +104,7 @@ finding, needs a night against a clean repo.
 | `hooks/pretooluse-guard.sh` | Layer 2 anti-bypass (Claude PreToolUse; for the claude path) |
 | `lib/parse_rulebook.py` | minimal rulebook YAML-subset parser |
 | `lib/extract_json.py` | pulls the JSON artifact out of a stage model's output |
+| `lib/validate_explore.py` | validates Explore's tracked-file/flow/invariant coverage receipt |
 | `lib/recon_signals.sh` | collects the per-repo signals recon ranks dimensions on |
 | `lib/probe_findings.py` | finding freshness probe (ADR 0021), writes `state/findings-probe.json` |
 | `prompts/{recon,explore,fix,review,verify,advise}.md` | provider-neutral stage prompts |

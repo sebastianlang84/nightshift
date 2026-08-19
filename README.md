@@ -16,9 +16,14 @@ Recon/Explore/Fix/Review stages plus the read-only Verify stage that closes out 
 (ADR 0021); adapter and model selection are environment configuration.
 
 **v2 (dimension-rotating, multi-finding):** explore now emits several ranked findings per repo — each on
-its own branch — aimed by a rotating review *dimension* (correctness, security, infra, ui-ux, …) chosen
-per repo from a reconnaissance survey and least-recently-serviced coverage. See
+its own branch — aimed by a rotating review *dimension* (correctness, security, infra, ui-ux,
+dead-code/code-bloat, …) chosen per repo from a reconnaissance survey and least-recently-serviced coverage. See
 [`docs/design/nightshift-v2.md`](docs/design/nightshift-v2.md) and ADRs 0008–0011.
+
+**Deep-review contract:** a lens counts as serviced only after Explore proves breadth with tracked
+files, a traced flow, concrete checks, and five cross-cutting invariant classes. Invalid or shallow
+answers do not advance rotation or become clean ledger evidence. The real-model historical replay in
+[`evals/deep-review/`](evals/deep-review/) measures `hit@1`, `hit@3`, and cost (ADR 0029).
 
 Start here:
 - [`CONTEXT.md`](CONTEXT.md) — what nightshift is, its architecture, and the canonical vocabulary.

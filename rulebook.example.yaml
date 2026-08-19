@@ -74,7 +74,8 @@ dimensions:
   - perf                         # N+1, sync-in-async, quadratic hot paths, missing indexes
   - ui-ux                        # broken flows, a11y, inconsistent components, missing states, copy
   - deps                         # EOL/vulnerable pins, lockfile drift, unused deps
-  - craft                        # smells, dead code, naming — the FLOOR lens
+  - bloat                        # dead code, redundant paths, speculative abstractions, LLM-style slop
+  - craft                        # naming, local readability, repo conventions — the FLOOR lens
 
 repos:
   - path: /absolute/path/to/your/repo

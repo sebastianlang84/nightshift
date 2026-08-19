@@ -14,27 +14,52 @@ can trust, no privileged knowledge of intent. Judge only what you can read now.
 
 ## How to choose (enumerate, then rank — do NOT stop at the first thing you find)
 
-1. Scan broadly across the repo — code paths first, then config/build/CI, then docs.
-2. Form a SHORTLIST of candidate findings across both axes below. Do not emit the first
+1. Map the repo before judging it: identify entrypoints, policy/configuration boundaries, critical
+   flows, and the tests that claim to protect them. Inspect at least FIVE distinct tracked files, or
+   every tracked file when the repo has fewer than five.
+2. Trace at least one entrypoint or policy flow to its effect across files. Record at least THREE
+   concrete invariants or candidate claims you checked, including the ones that did not become a
+   finding. A directory listing is not a trace and a list of filenames is not a review.
+   Before ranking, complete this invariant matrix. For EACH class, either trace it with concrete
+   file/symbol evidence or state why it is genuinely not applicable:
+   - `config_domain`: compare every accepted key AND value domain with the downstream dispatcher,
+     defaults, and unknown-value behavior. Parser success is not proof the value is implemented.
+   - `semantic_sets`: for every consequential count/cap/filter, define the policy noun precisely
+     (which members belong, including terminal/duplicate states), then compare it with the exact set
+     the code counts. Mechanically consistent arithmetic can still count the wrong population.
+   - `artifact_identity`: across stage boundaries, prove producers, reviewers, tests, mutators, and
+     final consumers operate on the same bytes/tree. The same path or worktree is NOT identity: any
+     command may modify it. Trace the artifact/tree before and after every potentially mutating
+     step, including the check itself. A green test on a mutated tree is not evidence about an
+     earlier/restored tree, just as a green check made before a later mutation is not evidence about
+     what ships.
+   - `failure_translation`: follow nonzero, malformed, empty, timeout, and partial results to durable
+     state. None may become a clean/success verdict by fallback or ignored status.
+   - `lifecycle`: trace creation through every terminal state; terminal decisions must release caps,
+     caches, locks, branches, and pending work exactly once.
+3. Form a SHORTLIST of candidate findings across the review surfaces below. Do not emit the first
    acceptable one you trip over; a scan that stops at the first contradicted comment is
    the failure mode this stage exists to avoid.
-3. Rank candidates by EXPECTED VALUE = impact × how completely you can prove it, and emit
+4. Rank candidates by EXPECTED VALUE = impact × how completely you can prove it, and emit
    the top ones up to your findings budget — each a DISTINCT root cause, best first. When
-   value is close, PREFER CORRECTNESS over craft (a real bug must never lose a slot to a
-   naming nit). Fewer than the budget is fine; never pad the list to hit a number.
+   value is close, PREFER CORRECTNESS over bloat, and meaningful deletion/consolidation over
+   craft (a real bug must never lose a slot to cleanup; cleanup must never lose to a naming
+   nit). Fewer than the budget is fine; never pad the list to hit a number.
 
 Impact, high to low:
 - a correctness bug on a live code path (wrong result, silent failure, unhandled edge);
 - a latent bug / misuse that will bite under a plausible input or dependency behavior;
-- dead or unreachable code, or a doc/comment whose error would MISLEAD someone changing
-  the code;
+- a meaningful dead/redundant code surface, or a doc/comment whose error would MISLEAD
+  someone changing the code;
 - pure prose/naming/style drift. This is the FLOOR — raise it only when nothing above it
   clears the bar, never merely because it is the easiest thing to prove.
 
-The two axes to scan:
+The three broad surfaces to scan (tonight's lens narrows one of them further):
 - Correctness: a bug, a wrong or misleading doc/comment, a typo.
-- Craft: a code smell, dead/unused code, poor naming, needless complexity, or an
-  inconsistency with a standard THIS repo already follows.
+- Bloat: dead/unused code, redundant paths, speculative abstractions, duplicated policy,
+  or needless repository-wide indirection.
+- Craft: poor naming, local readability/control-flow trouble, or an inconsistency with a
+  standard THIS repo already follows.
 
 ## Every finding is a falsifiable claim + a verify recipe
 
@@ -103,8 +128,22 @@ a reason to drop a high-impact finding — a low-confidence, high-impact finding
 flagged.
 
 Output ONLY a JSON object, nothing else. `findings` is an array (0 to your budget),
-ranked best-first:
+ranked best-first. `coverage` is mandatory even when findings is non-empty: it is the bounded receipt
+that lets the Runner distinguish a deep pass from a plausible first hit. `files` names five distinct
+tracked paths (or every path in a smaller repo); `entrypoints` names at least one traced entrypoint or
+policy flow; `checks` names at least three concrete claims/invariants checked (or one per tracked file
+in a smaller repo); `invariants` records all five matrix classes with a `checked:` or
+`not-applicable:` evidence string; `unresolved` states important surfaces you could not settle:
 {"found": true,
+ "coverage":{"files":["<tracked path>","..."],
+             "entrypoints":["<entrypoint/policy -> effect trace>"],
+             "checks":["<specific invariant or candidate checked>","..."],
+             "invariants":{"config_domain":"checked: <evidence>",
+                           "semantic_sets":"checked: <evidence>",
+                           "artifact_identity":"checked: <evidence>",
+                           "failure_translation":"checked: <evidence>",
+                           "lifecycle":"checked: <evidence>"},
+             "unresolved":["<important unknown, if any>"]},
  "findings": [
    {"file": "<path>",
     "files": ["<path>", "..."],
@@ -117,7 +156,16 @@ ranked best-first:
     "rank": 1, "confidence": 0.0}
  ]}
 If nothing clears the bar, say so honestly and declare whether tonight's lens even applies here:
-{"found": false, "findings": [], "scope": "in_scope_no_findings"}
+{"found": false, "findings": [], "scope": "in_scope_no_findings",
+ "coverage":{"files":["<tracked path>","..."],
+             "entrypoints":["<entrypoint/policy -> effect trace>"],
+             "checks":["<specific invariant or candidate checked>","..."],
+             "invariants":{"config_domain":"checked: <evidence>",
+                           "semantic_sets":"checked: <evidence>",
+                           "artifact_identity":"checked: <evidence>",
+                           "failure_translation":"checked: <evidence>",
+                           "lifecycle":"checked: <evidence>"},
+             "unresolved":[]}}
   — `in_scope_no_findings`: tonight's lens IS relevant to this repo, you looked, nothing cleared the
     bar this pass. This is the default and by far the common case.
   — `out_of_scope`: this repo has no surface for tonight's lens at all (e.g. a `ui-ux` pass on a repo

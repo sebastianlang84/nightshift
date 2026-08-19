@@ -21,7 +21,7 @@ this repo (docs, compose, dockerfile, frontend, tests, CI, lockfiles, languages,
 FILES exist; use them to anchor `yield`, then read just enough to place the
 `hint`. Do not contradict a signal without reading the evidence that overturns it.
 
-## Dimensions (emit exactly these nine ids, every one, once)
+## Dimensions (emit exactly these ten ids, every one, once)
 
 - correctness — bugs, wrong results, unhandled edges, contradicted comments/docs.
 - security — secrets, injection, authz gaps, unsafe defaults, exposure.
@@ -31,7 +31,8 @@ FILES exist; use them to anchor `yield`, then read just enough to place the
 - perf — hot paths, N+1, needless work, obvious algorithmic waste.
 - ui-ux — frontend/UI behavior, accessibility, user-facing copy and flows.
 - deps — outdated/unpinned/vulnerable dependencies, lockfile drift.
-- craft — code smells, dead code, poor naming, needless complexity, in-repo inconsistency.
+- bloat — dead code, redundant paths, speculative abstractions, needless indirection.
+- craft — poor naming, local readability, control-flow clarity, in-repo inconsistency.
 
 ## How to judge `yield` (high | normal | low)
 
@@ -45,8 +46,11 @@ signal, but STILL rotated in occasionally (never dropped):
 - `lockfiles` / `languages` ⇒ deps `normal` (name the ecosystem: npm, pip, cargo, go);
   none ⇒ deps `low`.
 - `has_docs` ⇒ docs `normal`; even a lone README keeps docs `normal`.
-- correctness, docs, and craft apply to essentially ANY code repo — keep them `normal`
+- correctness, docs, bloat, and craft apply to essentially ANY code repo — keep them `normal`
   or `high`; drop them to `low` only for a repo with almost no code to reason about.
+- bloat is `high` only with a concrete structural signal: parallel implementations,
+  pass-through layers, stale compatibility paths, unused surfaces, or abstractions with no
+  distinct policy. Do not infer bloat from repository size or presumed LLM authorship.
 - security is `high`/`normal` wherever code handles input, secrets, auth, or network/IO;
   `low` only when there is plausibly no such surface.
 - perf is `high` only with a plausible hot path or data-volume concern; otherwise `low`.
@@ -83,5 +87,6 @@ shape, where attention pays off) to orient explore.
    "perf":{"yield":"low","hint":"<one line>"},
    "ui-ux":{"yield":"low","hint":"<one line>"},
    "deps":{"yield":"normal","hint":"<one line>"},
+   "bloat":{"yield":"normal","hint":"<one line>"},
    "craft":{"yield":"normal","hint":"<one line>"}
  },"notes":"<one short paragraph orienting explore>"}
