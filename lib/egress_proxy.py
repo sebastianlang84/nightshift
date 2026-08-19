@@ -175,7 +175,12 @@ def main(sock_path: str) -> None:
     srv.listen(64)
     log(f"listening on {sock_path} (CONNECT to public {ALLOWED_PORTS} only)")
     # Announce readiness on stdout so the Runner can wait for it instead of sleeping and hoping.
-    print("ready", flush=True)
+    # The pid rides along because the Runner cannot derive it: `$!` after `exec 8< <(python3 ...)`
+    # names the subshell bash forks for the substitution, and that subshell only *becomes* this
+    # process on a bash that exec-replaces it (5.2 does, the 5.1 on Debian 11 does not). Killing
+    # `$!` there leaves this proxy alive with its socket directory already deleted -- a listener
+    # outliving the gate it was built for, which tests/test-gate-egress.sh is there to catch.
+    print(f"ready {os.getpid()}", flush=True)
     while True:
         try:
             conn, _ = srv.accept()
