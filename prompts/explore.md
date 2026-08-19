@@ -20,8 +20,9 @@ can trust, no privileged knowledge of intent. Judge only what you can read now.
 2. Trace at least one entrypoint or policy flow to its effect across files. Record at least THREE
    concrete invariants or candidate claims you checked, including the ones that did not become a
    finding. A directory listing is not a trace and a list of filenames is not a review.
-   Before ranking, complete this invariant matrix. For EACH class, either trace it with concrete
-   file/symbol evidence or state why it is genuinely not applicable:
+   Before ranking, complete the invariant matrix. The five classes below are the default for code
+   lenses; a selected lens may explicitly replace them with its own five classes. For EACH required
+   class, either trace it with concrete file/symbol evidence or state why it is genuinely not applicable:
    - `config_domain`: compare every accepted key AND value domain with the downstream dispatcher,
      defaults, and unknown-value behavior. Parser success is not proof the value is implemented.
    - `semantic_sets`: for every consequential count/cap/filter, define the policy noun precisely
@@ -132,8 +133,9 @@ ranked best-first. `coverage` is mandatory even when findings is non-empty: it i
 that lets the Runner distinguish a deep pass from a plausible first hit. `files` names five distinct
 tracked paths (or every path in a smaller repo); `entrypoints` names at least one traced entrypoint or
 policy flow; `checks` names at least three concrete claims/invariants checked (or one per tracked file
-in a smaller repo); `invariants` records all five matrix classes with a `checked:` or
-`not-applicable:` evidence string; `unresolved` states important surfaces you could not settle:
+   in a smaller repo); `invariants` records all five default classes below, or exactly the five
+   replacement classes named by tonight's lens, with a `checked:` or `not-applicable:` evidence
+   string; `unresolved` states important surfaces you could not settle:
 {"found": true,
  "coverage":{"files":["<tracked path>","..."],
              "entrypoints":["<entrypoint/policy -> effect trace>"],

@@ -27,12 +27,14 @@ in throwaway worktrees, lands only on `nightshift/*`, and merges only by a human
 Introduce **review dimensions** (lenses), a **recon** stage, and **coverage rotation** — all with
 the ledger as the single source of memory (ADR 0004/0007) and all policy in the Runner (ADR 0001).
 
-**Dimensions.** A closed-but-extensible set (`correctness, security, infra, docs, tests, perf,
-ui-ux, deps, bloat, craft`), declared in `rulebook.yaml` under `dimensions:` (ORDER = cold-start/tie
-priority). A custom dimension needs a `prompts/dimensions/<id>.md` lens file plus one rulebook line;
-if Recon does not know that id, its yield safely defaults to neutral. Promoting one into the built-in,
-Recon-specialized catalog also adds it to `prompts/recon.md` and the Runner/mock fallback; the catalog
-contract in `tests/test-dimension-catalog.sh` keeps those representations equal. A lens is appended to
+**Dimensions.** The default set is `correctness, security, infra, docs, tests, perf, ui-ux, deps,
+bloat, craft`, declared in `rulebook.yaml` under `dimensions:` (ORDER = cold-start/tie priority).
+`knowledge` is built in but deliberately opt-in per repo: a finite `low` Recon weight would otherwise
+eventually spend a wiki-maintenance pass on every ordinary code repo. A custom dimension needs a
+`prompts/dimensions/<id>.md` lens file plus one rulebook line; if Recon does not know that id, its yield
+safely defaults to neutral. Promoting one into the built-in, Recon-specialized catalog also adds it to
+`prompts/recon.md` and the mock catalog; `tests/test-dimension-catalog.sh` keeps those representations
+aligned while separately enforcing the smaller default set. A lens is appended to
 the shared `explore.md` (which still owns the output schema, the falsifiable-claim contract, and the
 surface/fix guard) — it only aims attention and states dimension-specific proof standards. The
 selected dimension is stamped onto every finding (ledger `dimension` field, nullable/additive) and

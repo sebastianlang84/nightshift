@@ -33,8 +33,8 @@ persistent state except the disposable recon cache.
 
 ## Components
 
-- **Dimensions (lenses).** `correctness, security, infra, docs, tests, perf, ui-ux, deps, bloat,
-  craft`.
+- **Dimensions (lenses).** Defaults: `correctness, security, infra, docs, tests, perf, ui-ux, deps,
+  bloat, craft`; opt-in built-in: `knowledge` for maintained Markdown/OKF corpora.
   Each = `prompts/dimensions/<id>.md` (appended to `explore.md`) + one `dimensions:` line in the
   rulebook. A custom id absent from Recon gets a neutral yield; a built-in, Recon-specialized id
   also joins the Recon and mock/fallback catalogs, kept aligned by `tests/test-dimension-catalog.sh`.
@@ -51,8 +51,11 @@ persistent state except the disposable recon cache.
 - **Multi-finding.** `limits.max_findings_per_item` (per-repo `findings:` override); explore emits
   a ranked `findings[]`; each ships on its own branch from its own fresh worktree (ADR 0011).
 - **Depth evidence.** Explore maps tracked files and a real flow, records concrete checks, and closes
-  five invariant classes. `lib/validate_explore.py` rejects a missing/shallow receipt before rotation
-  or ledger state changes. `evals/deep-review/` measures historical `hit@1`/`hit@3` (ADR 0029).
+  five lens-specific invariant classes. Code lenses use configuration/set/artifact/failure/lifecycle;
+  `knowledge` uses canonicality/consistency/routing/provenance/freshness and receives a deterministic
+  report from `lib/knowledge_probe.py`. `lib/validate_explore.py` rejects a missing/shallow receipt
+  before rotation or ledger state changes. `evals/deep-review/` measures historical code-review
+  `hit@1`/`hit@3` (ADR 0029).
 - **Observability.** Digest gains a coverage matrix (days since each repo×dimension serviced) and
   a per-dimension merge-rate (the ADR 0009 tuning signal).
 
@@ -83,6 +86,10 @@ repos:
     findings: <N>               # optional per-repo override
     dimensions: a,b,c           # optional per-repo override (comma scalar; beats the global set)
 ```
+
+For a knowledge base, use `mode: findings-only` plus `dimensions: knowledge`. The built-in probe
+implements the portable OKF v0.2 structure and Markdown graph checks; a repo's stricter house policy
+remains authoritative and is read, not executed, by Explore.
 
 All new keys are optional with backward-compatible defaults in `lib/parse_rulebook.py`
 (`max_findings_per_item` defaults to 1 = pre-v2 behavior when the key is absent).

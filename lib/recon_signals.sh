@@ -41,6 +41,15 @@ if has '(^|/)docs/' || [ "$top_md_nonreadme" -ge 2 ]; then
   has_docs=true
 fi
 
+# Knowledge bundle: an OKF declaration at the root is a strong signal for the opt-in knowledge
+# lens. Generic docs alone remain a weaker signal interpreted by Recon; they do not make every code
+# repository a knowledge-base target.
+has_knowledge=false
+if printf '%s\n' "$files" | grep -qx 'index.md' && \
+   grep -Eq "^okf_version:[[:space:]]*['\"]?[0-9]+\.[0-9]+" "$repo/index.md" 2>/dev/null; then
+  has_knowledge=true
+fi
+
 has_compose=false
 has '(^|/)(docker-compose|compose)[^/]*\.ya?ml$' && has_compose=true
 
@@ -114,6 +123,7 @@ languages_json="$(printf '%s' "$langs" | json_array)"
 # ---- emit --------------------------------------------------------------------
 jq -nc \
   --argjson has_docs "$has_docs" \
+  --argjson has_knowledge "$has_knowledge" \
   --argjson has_compose "$has_compose" \
   --argjson has_dockerfile "$has_dockerfile" \
   --argjson has_frontend "$has_frontend" \
@@ -122,6 +132,6 @@ jq -nc \
   --argjson has_iac "$has_iac" \
   --argjson lockfiles "$lockfiles_json" \
   --argjson languages "$languages_json" \
-  '{has_docs:$has_docs,has_compose:$has_compose,has_dockerfile:$has_dockerfile,
+  '{has_docs:$has_docs,has_knowledge:$has_knowledge,has_compose:$has_compose,has_dockerfile:$has_dockerfile,
     has_frontend:$has_frontend,has_tests:$has_tests,has_ci:$has_ci,
     lockfiles:$lockfiles,languages:$languages,has_iac:$has_iac}'

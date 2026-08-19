@@ -28,6 +28,21 @@ cat > "$TMP/valid.json" <<'JSON'
 JSON
 python3 "$ROOT/lib/validate_explore.py" "$TMP/repo" "$TMP/valid.json"
 
+jq '.coverage.invariants={
+  "canonicality":"checked: one canonical page per claim",
+  "consistency":"checked: overlapping claims agree",
+  "routing":"checked: index reaches the concepts",
+  "provenance_trust":"checked: claim resolves to source id",
+  "lifecycle_freshness":"checked: stale and superseded states traced"}' \
+  "$TMP/valid.json" > "$TMP/knowledge.json"
+python3 "$ROOT/lib/validate_explore.py" "$TMP/repo" "$TMP/knowledge.json" knowledge
+if python3 "$ROOT/lib/validate_explore.py" "$TMP/repo" "$TMP/knowledge.json" 2> "$TMP/err"; then
+  echo "test-explore-coverage: knowledge matrix passed for a code lens" >&2; exit 1
+fi
+if python3 "$ROOT/lib/validate_explore.py" "$TMP/repo" "$TMP/valid.json" knowledge 2> "$TMP/err"; then
+  echo "test-explore-coverage: code matrix passed for knowledge lens" >&2; exit 1
+fi
+
 jq '.coverage.files=["f1.txt","f2.txt"]' "$TMP/valid.json" > "$TMP/shallow.json"
 if python3 "$ROOT/lib/validate_explore.py" "$TMP/repo" "$TMP/shallow.json" 2> "$TMP/err"; then
   echo "test-explore-coverage: shallow verdict passed" >&2; exit 1

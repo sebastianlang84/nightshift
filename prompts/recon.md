@@ -21,7 +21,7 @@ this repo (docs, compose, dockerfile, frontend, tests, CI, lockfiles, languages,
 FILES exist; use them to anchor `yield`, then read just enough to place the
 `hint`. Do not contradict a signal without reading the evidence that overturns it.
 
-## Dimensions (emit exactly these ten ids, every one, once)
+## Dimensions (emit exactly these eleven built-in ids, every one, once)
 
 - correctness — bugs, wrong results, unhandled edges, contradicted comments/docs.
 - security — secrets, injection, authz gaps, unsafe defaults, exposure.
@@ -32,6 +32,7 @@ FILES exist; use them to anchor `yield`, then read just enough to place the
 - ui-ux — frontend/UI behavior, accessibility, user-facing copy and flows.
 - deps — outdated/unpinned/vulnerable dependencies, lockfile drift.
 - bloat — dead code, redundant paths, speculative abstractions, needless indirection.
+- knowledge — wiki/knowledge-base coherence, canonical claims, provenance, freshness, routing.
 - craft — poor naming, local readability, control-flow clarity, in-repo inconsistency.
 
 ## How to judge `yield` (high | normal | low)
@@ -51,6 +52,8 @@ signal, but STILL rotated in occasionally (never dropped):
 - bloat is `high` only with a concrete structural signal: parallel implementations,
   pass-through layers, stale compatibility paths, unused surfaces, or abstractions with no
   distinct policy. Do not infer bloat from repository size or presumed LLM authorship.
+- `has_knowledge` ⇒ knowledge `high`; a docs-heavy repo may be `normal`; ordinary code with only
+  usage docs ⇒ `low`. The lens is opt-in per repo even though Recon knows how to orient it.
 - security is `high`/`normal` wherever code handles input, secrets, auth, or network/IO;
   `low` only when there is plausibly no such surface.
 - perf is `high` only with a plausible hot path or data-volume concern; otherwise `low`.
@@ -88,5 +91,6 @@ shape, where attention pays off) to orient explore.
    "ui-ux":{"yield":"low","hint":"<one line>"},
    "deps":{"yield":"normal","hint":"<one line>"},
    "bloat":{"yield":"normal","hint":"<one line>"},
+   "knowledge":{"yield":"low","hint":"<one line>"},
    "craft":{"yield":"normal","hint":"<one line>"}
  },"notes":"<one short paragraph orienting explore>"}

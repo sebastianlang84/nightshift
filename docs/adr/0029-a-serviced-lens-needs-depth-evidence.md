@@ -17,9 +17,9 @@ Raising the findings budget alone did not move recall.
 
 ## Decision
 
-**A lens is serviced only after Explore returns a valid coverage receipt.** The top-level verdict now
+**A lens is serviced only after Explore returns a valid coverage receipt.** The top-level verdict
 names inspected tracked files, at least one traced entrypoint/policy flow, concrete checks, unresolved
-surfaces, and an invariant matrix covering:
+surfaces, and a five-class invariant matrix. Code lenses use:
 
 - accepted configuration domains versus downstream dispatch;
 - policy sets versus the exact population counted/filtered;
@@ -27,10 +27,16 @@ surfaces, and an invariant matrix covering:
 - translation of failure/partial/malformed results into durable state;
 - creation through every terminal lifecycle state.
 
+The opt-in `knowledge` lens replaces those classes with canonicality, consistency, routing,
+provenance/trust, and lifecycle/freshness. Before Explore, `lib/knowledge_probe.py` produces a
+deterministic OKF-v0.2/Markdown graph report without executing target-repo code. The report grounds
+structural claims; semantic redundancy and contradiction still require the model to trace the corpus.
+
 `lib/validate_explore.py` enforces the receipt before `considered`, the dimension scan marker, or an
 `empty` ledger row can be written. It requires five distinct tracked files (or the whole repository
-when smaller), one trace, three checks (or one per tracked file when smaller), and all five invariant
-classes. Invalid model JSON and incomplete receipts are stage failures, not clean reviews.
+when smaller), one trace, three checks (or one per tracked file when smaller), and exactly the five
+classes selected by the lens. A failed knowledge probe, invalid model JSON, and incomplete receipts
+are stage failures, not clean reviews.
 
 **Depth quality has a real-model regression eval.** `evals/deep-review/` runs current Recon+Explore
 against four frozen historical snapshots and scores explicit semantic anchors. The opt-in gate is
@@ -57,4 +63,5 @@ weakening the capability boundary.
   turn-limit result is not discarded.
 - Regression coverage: `tests/test-explore-coverage.sh`, `tests/test-json-extraction.sh`,
   `tests/test-stage-artifact-isolation.sh`, `tests/test-explore-incomplete.sh`, and
-  `tests/test-deep-review-eval.sh`.
+  `tests/test-deep-review-eval.sh`; knowledge-specific structure is covered by
+  `tests/test-knowledge-probe.sh` and `tests/test-dimension-catalog.sh`.

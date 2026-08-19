@@ -21,8 +21,9 @@ dead-code/code-bloat, …) chosen per repo from a reconnaissance survey and leas
 [`docs/design/nightshift-v2.md`](docs/design/nightshift-v2.md) and ADRs 0008–0011.
 
 **Deep-review contract:** a lens counts as serviced only after Explore proves breadth with tracked
-files, a traced flow, concrete checks, and five cross-cutting invariant classes. Invalid or shallow
-answers do not advance rotation or become clean ledger evidence. The real-model historical replay in
+files, a traced flow, concrete checks, and five lens-specific invariant classes. The opt-in
+`knowledge` lens also receives a deterministic, read-only OKF-v0.2/Markdown structure report. Invalid
+or shallow answers do not advance rotation or become clean ledger evidence. The historical replay in
 [`evals/deep-review/`](evals/deep-review/) measures `hit@1`, `hit@3`, and cost (ADR 0029).
 
 Start here:

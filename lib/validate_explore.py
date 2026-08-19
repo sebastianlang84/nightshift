@@ -12,13 +12,24 @@ import subprocess
 import sys
 from pathlib import Path
 
-INVARIANT_KEYS = {
+CODE_INVARIANT_KEYS = {
     "config_domain",
     "semantic_sets",
     "artifact_identity",
     "failure_translation",
     "lifecycle",
 }
+KNOWLEDGE_INVARIANT_KEYS = {
+    "canonicality",
+    "consistency",
+    "routing",
+    "provenance_trust",
+    "lifecycle_freshness",
+}
+
+
+def invariant_keys(dimension: str) -> set[str]:
+    return KNOWLEDGE_INVARIANT_KEYS if dimension == "knowledge" else CODE_INVARIANT_KEYS
 
 
 def fail(message: str) -> None:
@@ -33,7 +44,7 @@ def strings(value: object, field: str) -> list[str]:
     return list(dict.fromkeys(item.strip() for item in value))
 
 
-def main(repo_arg: str, verdict_arg: str) -> None:
+def main(repo_arg: str, verdict_arg: str, dimension: str = "") -> None:
     repo = Path(repo_arg).resolve()
     try:
         verdict = json.loads(Path(verdict_arg).read_text(encoding="utf-8"))
@@ -61,10 +72,11 @@ def main(repo_arg: str, verdict_arg: str) -> None:
     entrypoints = strings(coverage.get("entrypoints"), "entrypoints")
     checks = strings(coverage.get("checks"), "checks")
     invariants = coverage.get("invariants")
-    if not isinstance(invariants, dict) or set(invariants) != INVARIANT_KEYS:
+    expected_invariants = invariant_keys(dimension)
+    if not isinstance(invariants, dict) or set(invariants) != expected_invariants:
         fail(
             "coverage.invariants must contain exactly: "
-            + ", ".join(sorted(INVARIANT_KEYS))
+            + ", ".join(sorted(expected_invariants))
         )
     for key, value in invariants.items():
         if not isinstance(value, str):
@@ -101,6 +113,6 @@ def main(repo_arg: str, verdict_arg: str) -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        raise SystemExit("usage: validate_explore.py REPO VERDICT.json")
-    main(sys.argv[1], sys.argv[2])
+    if len(sys.argv) not in (3, 4):
+        raise SystemExit("usage: validate_explore.py REPO VERDICT.json [DIMENSION]")
+    main(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) == 4 else "")

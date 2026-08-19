@@ -556,6 +556,17 @@ blind you to a live bug.
 
 $(cat "$NIGHTSHIFT_HOME/prompts/dimensions/$NIGHTSHIFT_DIMENSION.md")"
   fi
+  if [ "$stage" = explore ] && [ "${NIGHTSHIFT_DIMENSION:-}" = knowledge ] && \
+     [ -s "$id/knowledge-probe.json" ]; then
+    prompt="$prompt
+
+## knowledge_probe (deterministic, read-only OKF/Markdown structure check)
+This report was produced by Nightshift itself without executing target-repo code. Use its diagnostics
+as evidence to investigate, not as automatic findings and not as proof that the corpus is semantically
+consistent.
+
+$(cat "$id/knowledge-probe.json")"
+  fi
   if [ "$stage" = explore ] && [ -n "${NIGHTSHIFT_RECON_NOTES:-}" ]; then
     prompt="$prompt
 
@@ -638,15 +649,24 @@ mock_explore() { # workdir item_dir — emits the v2 container {found, findings:
   [ -f "$wd/NOSCOPE" ] && scope=out_of_scope
   files="$(git -C "$wd" ls-files | sed -n '1,5p' | jq -R . | jq -sc .)"
   jq -nc --argjson f "$arr" --arg scope "$scope" --argjson files "$files" \
+    --arg dimension "${NIGHTSHIFT_DIMENSION:-}" \
     '{found:($f|length>0),findings:$f,
       coverage:{files:$files,
         entrypoints:(if ($files|length)>0 then [($files[0] + " -> repository behavior")] else [] end),
         checks:["searched planted correctness markers","checked selected lens surface","ranked all candidate findings"],
-        invariants:{config_domain:"checked: mock rulebook path",
-          semantic_sets:"checked: mock finding set",
-          artifact_identity:"checked: one mock worktree",
-          failure_translation:"checked: explicit mock exit code",
-          lifecycle:"checked: mock finding lifecycle"},
+        invariants:(if $dimension == "knowledge" then
+          {canonicality:"checked: mock canonical concept",
+           consistency:"checked: mock claim agreement",
+           routing:"checked: mock index path",
+           provenance_trust:"checked: mock source identity",
+           lifecycle_freshness:"checked: mock concept lifecycle"}
+        else
+          {config_domain:"checked: mock rulebook path",
+           semantic_sets:"checked: mock finding set",
+           artifact_identity:"checked: one mock worktree",
+           failure_translation:"checked: explicit mock exit code",
+           lifecycle:"checked: mock finding lifecycle"}
+        end),
         unresolved:[]}}
       + (if ($f|length>0) then {} else {scope:$scope} end)' > "$id/finding.json"
   # A stage that FAILS is not the same as a stage that found nothing, and a stage can fail after
@@ -723,6 +743,7 @@ mock_recon() { # workdir item_dir — deterministic yield straight from recon_si
       "ui-ux":    {yield:(if ($s.has_frontend//false) then "high" else "low" end), hint:"frontend present"},
       deps:       {yield:(if ((($s.lockfiles//[])|length)>0) then "normal" else "low" end), hint:"lockfiles present"},
       bloat:      {yield:(if ((($s.languages//[])|length)>0) then "normal" else "low" end), hint:"code surface and structural redundancy"},
+      knowledge:  {yield:(if ($s.has_knowledge//false) then "high" elif ($s.has_docs//false) then "normal" else "low" end), hint:"OKF/Markdown knowledge structure"},
       craft:      {yield:"normal", hint:"floor lens"}
     }, notes:"mock recon (deterministic yield mapping from filesystem signals)"}' > "$id/recon.json"
 }
@@ -2456,6 +2477,17 @@ main() {
     # spend its findings budget re-reporting an item the Runner would only suppress.
     NIGHTSHIFT_KNOWN_WORK="$(known_work "$repo")"; export NIGHTSHIFT_KNOWN_WORK
     log "  $(basename "$repo") [$mode]: lens=${dim:-none} · budget=$rfind"
+    # Knowledge reviews get a deterministic receipt before the model reads anything. The Runner
+    # owns this probe and executes no target-repo code; if it cannot enumerate the bundle, the lens
+    # is not serviced and no clean ledger evidence is written.
+    if [ "$dim" = knowledge ]; then
+      if ! python3 "$NIGHTSHIFT_HOME/lib/knowledge_probe.py" "$wt" >"$id/knowledge-probe.json" \
+          2>"$id/knowledge-probe.err"; then
+        log "  $(basename "$repo") [$mode]: knowledge probe failed — $(head -1 "$id/knowledge-probe.err")"
+        remove_worktree "$repo" "$wt"
+        continue
+      fi
+    fi
     explore_rc=0
     run_agent explore "$wt" "$id" || explore_rc=$?
     # Bail out BEFORE anything derived from this stage is recorded. A dead agent must not advance the
@@ -2489,7 +2521,7 @@ main() {
     # A syntactically complete verdict is still not evidence of a deep pass. Require a bounded,
     # repo-grounded coverage receipt before the scan marker, considered count, or empty ledger row
     # can claim this lens was serviced. The rejected artifact stays in the item dir for diagnosis.
-    if ! python3 "$NIGHTSHIFT_HOME/lib/validate_explore.py" "$wt" "$id/finding.json" \
+    if ! python3 "$NIGHTSHIFT_HOME/lib/validate_explore.py" "$wt" "$id/finding.json" "$dim" \
         >"$id/explore-validation.out" 2>"$id/explore-validation.err"; then
       log "  $(basename "$repo") [$mode]: explore verdict rejected — $(head -1 "$id/explore-validation.err")"
       remove_worktree "$repo" "$wt"
