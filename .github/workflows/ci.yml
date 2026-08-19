@@ -18,6 +18,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The deep-review regression corpus points at frozen historical commits. A shallow
+          # checkout makes those fixtures disappear and turns a sound suite into a CI-only failure.
+          fetch-depth: 0
 
       # The suite needs jq (ledger assertions) and git; python3 is preinstalled. No pip install:
       # lib/*.py is stdlib-only on purpose, and CI must not be the first place that stops being true.

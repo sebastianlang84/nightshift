@@ -7,6 +7,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+# The frozen cases below are git objects, not copied fixtures. Keep CI on a full checkout and fail
+# with the real configuration error instead of a misleading "not a valid object" from cat-file.
+grep -Eq '^[[:space:]]+fetch-depth:[[:space:]]+0$' "$ROOT/.github/workflows/ci.yml" || {
+  echo "test-deep-review-eval: CI checkout must use fetch-depth: 0 for historical cases" >&2
+  exit 1
+}
+
 for commit in $(jq -r '.[].commit' "$ROOT/evals/deep-review/cases.json"); do
   git -C "$ROOT" cat-file -e "$commit^{commit}"
 done
