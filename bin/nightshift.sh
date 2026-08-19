@@ -1722,11 +1722,16 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 the gate co
     # `read` on the proxy's stdout: it prints one line once the socket is bound and listening. A
     # sleep here would be a race that only shows up as a flaky "registry unreachable" at 04:00.
     exec 8< <(python3 "$NIGHTSHIFT_HOME/lib/egress_proxy.py" "$TEST_EGRESS_DIR/egress.sock" 2>>"$id/egress.log")
-    egress_pid=$!
-    if ! read -r -t 10 -u 8 _ready; then
+    # The pid comes from the READY LINE, not from `$!`. After `exec 8< <(…)`, `$!` names the subshell
+    # bash forks for the substitution; that subshell only *becomes* python3 on a bash that
+    # exec-replaces it (5.2 does, the 5.1 on Debian 11 does not), and killing the wrong pid leaves
+    # the proxy listening after its socket directory is gone. bash does not promise otherwise, so the
+    # process reporting its own pid is the only source that is right on every version.
+    if ! read -r -t 10 -u 8 _ready egress_pid; then
       log "  $(basename "$repo"): the egress proxy did not come up — NOT shipping (see $id/egress.log)"
       exec 8<&-
-      [ -n "$egress_pid" ] && kill "$egress_pid" 2>/dev/null
+      # No pid to kill (that is what failed), so reap by the socket path, which mktemp made unique.
+      pkill -f "egress_proxy.py $TEST_EGRESS_DIR/egress.sock" 2>/dev/null || true
       rm -rf "$TEST_EGRESS_DIR"
       return 2
     fi
