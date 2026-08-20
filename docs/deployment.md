@@ -135,7 +135,12 @@ operationally:
   `NIGHTSHIFT_TEST_PATH` is bound read-only *and* put on the gate's `PATH` — it is a `:`-separated
   list, so the fleet's `node` (nvm) and `uv` (`~/.local/bin`) travel together. Anything a suite needs
   but does not execute from `PATH` goes in `NIGHTSHIFT_TEST_SANDBOX_ROBIND`. A bind that would
-  re-expose `$HOME` is refused with a log line.
+  re-expose `$HOME` is refused with a log line. `nightshift-cron.sh` fills that variable with the
+  operator's **python user site-packages** (`python3 -m site --user-site`) when it exists, because a
+  `pip install --user` package is otherwise invisible in a gate; the bind is read-only and adds
+  nothing to any import path. A suite that needs those packages sets `PYTHONPATH` in its own
+  `test_cmd`, which keeps them out of every other repo's gate. Set the variable yourself to override,
+  empty to opt out.
 - **`test_net: true` does not open this host's network** (ADR 0028). The sandbox always has its own
   network namespace; a `test_net` repo reaches the outside through a proxy that refuses anything
   resolving to a loopback, private, link-local or metadata address, on ports 80/443, HTTPS CONNECT
@@ -147,9 +152,11 @@ operationally:
   it cannot plant a hook or move a ref in the real repository.
 - **A suite that needs one more variable** names it in `NIGHTSHIFT_TEST_ENV_PASS` (e.g.
   `UV_CACHE_DIR,CARGO_HOME`) rather than the gate inheriting the session.
-- A gate that fails only under the sandbox is almost always one of three things: a dependency
-  outside `/usr` that is not bound, a suite that reaches the network without `test_net: true`, or a
-  cold cache running into `limits.test_timeout_seconds`. The suite's own output is in
+- A gate that fails only under the sandbox is almost always one of four things: a dependency
+  outside `/usr` that is not bound, a suite that reaches the network without `test_net: true`, a
+  cold cache running into `limits.test_timeout_seconds`, or an install step whose peak heap exceeds
+  `limits.test_memory_mb` — the gate's `HOME` is disposable, so every package cache starts cold and
+  a `pnpm`/`npm` install extracts the whole dependency tree on every run. The suite's own output is in
   `<runs>/<night>/<item>/tests.log`; bubblewrap's own startup failures land there too, and the run
   log distinguishes them (`could not START its sandbox`) from a red suite.
 
