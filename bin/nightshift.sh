@@ -371,6 +371,41 @@ agent_credentials_failed() { # file… -> 0 if any readable file carries a crede
   return 1
 }
 
+# Quota exhaustion is the same class of event as a bad credential (ADR 0023): the agent could not
+# run, so nothing it "returned" is evidence about the code. It arrives differently, though — the CLI
+# exits 0, emits no result, and says why in a STRUCTURED event rather than in prose. Matching the
+# structure instead of the wording is the point: the sentence the CLI prints for a spent five-hour
+# window is not stable across versions, the event shape is.
+#
+# Observed 2026-08-21, when this went unrecognised and five explore lenses plus one recon were spent
+# against a wall in 21 seconds, each recorded as "no parseable JSON":
+#   {"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1787293200,
+#    "rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"out_of_credits"}}
+claude_quota_rejected() { # raw_file -> 0 if the CLI reported a REJECTED rate limit; echoes reset time
+  local f="$1" resets
+  [ -s "$f" ] || return 1
+  resets=$(jq -r '
+      (if type=="array" then . else [.] end)
+      | map(select((.type? // "") == "rate_limit_event")
+            | .rate_limit_info? // {}
+            | select((.status? // "") == "rejected"))
+      | last | (.resetsAt // empty) | tostring' "$f" 2>/dev/null) || return 1
+  [ -n "$resets" ] && [ "$resets" != null ] || return 1
+  # An epoch we cannot format is still a rejection — report the raw value rather than nothing.
+  date -d "@$resets" '+%Y-%m-%d %H:%M %Z' 2>/dev/null || printf '%s' "$resets"
+  return 0
+}
+
+agent_quota_rejected() { # raw_file -> 0 if THIS adapter's own output says the account is out of quota
+  case "$NIGHTSHIFT_AGENT" in
+    claude) claude_quota_rejected "$1" ;;
+    # codex: no verified signature yet. Guessing one would produce a fatal abort on a healthy night,
+    # which is worse than the miss it would fix — leave it unclaimed until an observed run shows the
+    # shape, the same standard AGENT_AUTH_RE was held to.
+    *) return 1 ;;
+  esac
+}
+
 clear_stage_artifacts() { # stage item_dir — an iteration may never read the previous one's result
   local stage="$1" id="$2" artifact=""
   case "$stage" in
@@ -385,7 +420,7 @@ clear_stage_artifacts() { # stage item_dir — an iteration may never read the p
 }
 
 run_agent() { # stage workdir item_dir
-  local stage="$1" workdir="$2" item_dir="$3" start end status=0 usage='{}'
+  local stage="$1" workdir="$2" item_dir="$3" start end status=0 resets="" usage='{}'
   clear_stage_artifacts "$stage" "$item_dir"
   start=$(date +%s)
   case "$NIGHTSHIFT_AGENT" in
@@ -413,6 +448,12 @@ run_agent() { # stage workdir item_dir
       AGENT_FATAL_AGENT="$NIGHTSHIFT_AGENT"
       log "FATAL: $AGENT_FATAL — aborting the night rather than recording a clean fleet."
       log "FATAL: re-authenticate the $NIGHTSHIFT_AGENT CLI, then run bin/nightshift.sh again."
+    fi
+    if [ -z "$AGENT_FATAL" ] && resets=$(agent_quota_rejected "$rawf"); then
+      AGENT_FATAL="$NIGHTSHIFT_AGENT is out of quota until $resets (stage $stage)"
+      AGENT_FATAL_AGENT="$NIGHTSHIFT_AGENT"
+      log "FATAL: $AGENT_FATAL — aborting the night rather than spending every remaining lens on the same wall."
+      log "FATAL: re-run bin/nightshift.sh after $resets."
     fi
   fi
   # Each real adapter drops ONE compact JSON object per stage (model_id + token/cost counters).
@@ -761,6 +802,14 @@ materialize_stage_output() { # stage item_dir
     advise)  python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/advice.json" 2>>"$id/$stage.err" ;;
     verify)  python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/verify.json" 2>>"$id/$stage.err" ;;
   esac
+  # A repaired verdict parses, so the stage succeeds and run_agent never prints its stderr. Surface
+  # the repair here instead: the artifact that reaches the ledger is not byte-for-byte what the
+  # model wrote, and a night log that hides that is the wrong kind of quiet (ADR 0030).
+  local rc=$?
+  if [ -s "$id/$stage.err" ] && grep -q '^json-repair:' "$id/$stage.err" 2>/dev/null; then
+    log "  stage $stage: $(grep -m1 '^json-repair:' "$id/$stage.err")"
+  fi
+  return $rc
 }
 
 # ---- claude adapter (first-party CLI headless, ADR 0003) ----
