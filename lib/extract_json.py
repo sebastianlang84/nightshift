@@ -5,9 +5,10 @@ Stage models are told to emit JSON only, but often wrap it in prose or code
 fences; this pulls the object out robustly. No JSON is a failed stage, never a
 synthetic clean/abandon verdict.
 
-One class of malformation is repaired rather than refused: a closer that does
-not match the bracket it closes (`{ … ]`). See `repair_closers` for why that
-one is safe and why nothing else is (ADR 0030).
+Two classes of malformation are repaired rather than refused: a closer that
+does not match the bracket it closes (`{ … ]`), and a comma left standing
+before a closer (`[1, 2, ]`). See `repair_syntax` for why those are safe and
+why nothing else is (ADR 0030).
 
 Candidates are TOP-LEVEL objects only. An object that never closes ends the
 search rather than handing the next `{` a turn: that next brace is nested
@@ -20,19 +21,26 @@ import sys
 # A repaired candidate is only trustworthy while the damage is a slip. Past a
 # couple of swapped closers the output is garbled enough that "the model meant
 # this" stops being a reading and starts being a guess.
+#
+# Dropped commas carry no such ceiling, because they need no reading: a comma
+# before a closer separates a value from nothing, so removing it cannot pick
+# one meaning over another. JSON5, JavaScript and Python all accept it; only
+# JSON does not.
 MAX_SWAPS = 2
 CLOSER = {"{": "}", "[": "]"}
 
 
 def scan(text, start, repair=False):
-    """Return (candidate, swaps, end) for the object opening at `start`.
+    """Return (candidate, fixes, end) for the object opening at `start`.
 
     Walks the string with a stack of open brackets, skipping string literals
     and their escapes. `candidate` is None when the object never closes.
+    `fixes` counts the edits made, as (swaps, commas).
     With `repair`, a closer that contradicts the stack is rewritten to the one
-    its opener demands; without it, the text is reproduced verbatim.
+    its opener demands and a comma left standing before a closer is dropped;
+    without it, the text is reproduced verbatim.
     """
-    stack, out, swaps = [], [], 0
+    stack, out, swaps, commas = [], [], 0, 0
     in_str = esc = False
     for i in range(start, len(text)):
         c = text[i]
@@ -60,33 +68,46 @@ def scan(text, start, repair=False):
                 c = want
                 swaps += 1
                 if swaps > MAX_SWAPS:
-                    return None, swaps, i
+                    return None, (swaps, commas), i
+            if repair:
+                # A trailing separator. We are not inside a string here, so a comma at the
+                # end of `out` can only be structural — a string's own comma would sit
+                # behind its closing quote.
+                j = len(out) - 1
+                while j >= 0 and out[j] in " \t\r\n":
+                    j -= 1
+                if j >= 0 and out[j] == ",":
+                    del out[j]
+                    commas += 1
             out.append(c)
             if not stack:
-                return "".join(out), swaps, i
+                return "".join(out), (swaps, commas), i
             continue
         out.append(c)
-    return None, swaps, len(text)
+    return None, (swaps, commas), len(text)
 
 
-def repair_closers(text, start):
+def repair_syntax(text, start):
     """Second pass over a candidate that scanned complete but did not parse.
 
-    The only edit is swapping a closer for the one its own opener demands. The
-    model closed every bracket it opened and named one of them wrong — the
-    nesting it intended is unambiguous, so the swap recovers its answer rather
-    than inventing one. Truncated output is deliberately NOT completed: a
-    missing closer means the model never finished, and appending one would
-    fabricate the part it did not say.
+    Two edits, both of which recover what the model wrote instead of adding to
+    it. Swapping a closer for the one its own opener demands: the model closed
+    every bracket it opened and named one of them wrong, so the nesting it
+    intended is unambiguous. Dropping a comma that stands before a closer: it
+    separates a value from nothing, and no value can be read out of it.
+
+    Truncated output is deliberately NOT completed: a missing closer means the
+    model never finished, and appending one would fabricate the part it did
+    not say.
     """
-    cand, swaps, _ = scan(text, start, repair=True)
-    if cand is None or swaps == 0:
-        return None, 0
+    cand, fixes, _ = scan(text, start, repair=True)
+    if cand is None or fixes == (0, 0):
+        return None, fixes
     try:
         json.loads(cand)
     except Exception:
-        return None, swaps
-    return cand, swaps
+        return None, fixes
+    return cand, fixes
 
 
 def main() -> None:
@@ -111,11 +132,16 @@ def main() -> None:
         return
 
     if first_complete >= 0:
-        cand, swaps = repair_closers(text, first_complete)
+        cand, (swaps, commas) = repair_syntax(text, first_complete)
         if cand is not None:
             # Loud on purpose: the artifact that reaches the ledger is not byte-for-byte
             # what the model wrote, and the night log says so.
-            print(f"json-repair: swapped {swaps} mismatched closer(s) to parse the stage object",
+            edits = []
+            if swaps:
+                edits.append(f"swapped {swaps} mismatched closer(s)")
+            if commas:
+                edits.append(f"dropped {commas} trailing comma(s)")
+            print(f"json-repair: {' and '.join(edits)} to parse the stage object",
                   file=sys.stderr)
             sys.stdout.write(cand)
             return

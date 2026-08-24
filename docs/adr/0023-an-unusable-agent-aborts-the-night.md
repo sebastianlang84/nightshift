@@ -77,8 +77,55 @@ it is recorded.** Concretely:
 - The digest announces the abort, and the process exits **3** — so `bin/nightshift-cron.sh` logs a
   verdict and the systemd unit is marked failed.
 
-The detector is deliberately broad. A false positive costs one aborted night, which the operator
-sees and can re-run. A false negative costs a forged record of a clean fleet, which nobody sees.
+The detector is deliberately broad *within the CLI's own account of the run*. A false negative costs
+a forged record of a clean fleet, which nobody sees.
+
+### Amendment 2026-08-24 — the signatures read the CLI, not the repo
+
+The asymmetry above held; the channel it was applied to did not. `AGENT_AUTH_RE` is prose, and it was
+matched against the stage's entire raw stdout — which carries the model's work, i.e. the words of the
+repository under review. On 2026-08-24 an explore lens serviced nightshift's own infra dimension and
+read [`bin/nightshift.sh`](../../bin/nightshift.sh) — including the comment about self-healing a
+stale symlink after `codex login`. The signature matched the repo's source code, and the night
+aborted after one stage with "no usable credentials" while `.usage_explore` recorded 29,600 output
+tokens, 2.4M cache reads and $3.32 spent. The signature sits latent in **33 of 197** archived raw
+streams on this machine and arms itself whenever a stage fails to parse for any other reason — which
+is exactly what happened that night, one layer below (ADR 0030).
+
+A false positive is not the cheap half of the trade after all. It costs a night *and* points the
+morning at a repair that changes nothing: the credentials were never the problem, so
+re-authenticating and re-running reproduces it.
+
+So the classifier no longer searches the raw stream whole. `agent_diagnosis` extracts what the CLI
+said **about itself** and only that reaches the signatures:
+
+- **claude** emits a JSON event array. Its own verdict is the `result` event; `assistant`, `user` and
+  `system` events are the model's work. A `result` with `is_error: false` is the CLI's receipt that
+  it ran the session, so there is nothing to diagnose — and the `.result` text there is the model's
+  answer, which may discuss credentials as a matter of code. Only a failed result is read, and then
+  its text is the CLI's.
+- **codex** has no verified shape here — no codex night has ever run on this machine — so its raw
+  passes through unfiltered rather than through a guess, the same standard the quota detector was
+  held to. It reports auth failures on stderr regardless.
+- A raw stream that is not a parseable event array is not model output either, and passes through
+  whole. That is the shape of the 2026-08-05 outage: one line of plain text on stdout.
+
+A second, adapter-independent riddle-out runs first and is the only cover codex has:
+`agent_reached_the_api` reads `.usage_<stage>`, which both adapters write from the CLI's own
+counters. **A stage that spent tokens reached the API, so whatever else went wrong, authentication
+did not.** It is a receipt rather than a heuristic, but it is not sufficient alone — a CLI that dies
+before writing the counters leaves nothing to read — so both riddle-outs stand.
+
+Rejected: **narrowing the regex** (dropping `codex login`, say) fixes the one match and not the
+class — `unauthorized`, `not logged in` and `/login` are commoner still in source code, and every
+repo nightshift services is a repo that might discuss authentication. **Matching stderr only** is
+what the raw capture was added to fix: on 2026-08-05 stderr was empty and the CLI reported the
+failure on stdout.
+
+Verified against the archive: of the 33 raw streams the signatures hit, the amended classifier
+aborts on **0**, while a structured `is_error: true` result and the plain-text 2026-08-05 shape are
+both still caught. Regression coverage:
+[`tests/test-agent-auth-false-positive.sh`](../../tests/test-agent-auth-false-positive.sh).
 
 ## Consequences
 
@@ -96,7 +143,8 @@ sees and can re-run. A false negative costs a forged record of a clean fleet, wh
 - The classification is a **heuristic over CLI output**, not a contract. Both CLIs are free to
   reword their errors; a reword degrades this to the pre-ADR behaviour for that message, minus the
   silence, since the stage failure itself is now logged either way. `AGENT_AUTH_RE` is the single
-  place to extend.
+  place to extend — but extending it is only safe because `agent_diagnosis` now bounds what it may
+  read. A signature added to match the CLI will otherwise match the fleet's source code as well.
 - Only credential failures abort. A stage that dies of a timeout, a rate limit, or a transient API
   error is still per-stage best-effort — those are genuinely local and genuinely retryable, and
   ending a night on one would trade a rare silent failure for a frequent noisy one.
