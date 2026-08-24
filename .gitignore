@@ -10,6 +10,8 @@ rulebook.yaml
 # project-level .claude/settings.json or skill stays committable.
 /.claude/worktrees/
 
-# Python bytecode caches from lib/*.py
+# CPython bytecode. The suite imports lib/egress_proxy.py, so a tracked __pycache__ would let the
+# suite dirty its own worktree — which ADR 0027 refuses to ship. bin/setup-sandbox.sh:44 already
+# teaches the demo repo this; the control repo has to hold to it too.
 __pycache__/
 *.py[cod]
