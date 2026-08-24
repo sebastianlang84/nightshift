@@ -2,7 +2,14 @@ name: CI
 
 # nightshift had no CI, which is the same gap ADR 0022 closes for the repos it services: the ship
 # gate proves a nightshift branch is sound before it is pushed, but nothing proved a HUMAN commit
-# was. This runs the same suite the gate runs, on every push and every PR.
+# was. This runs the same suite the gate runs, on every push to main and every PR.
+#
+# The push trigger is filtered to main on purpose, and `nightshift/*` branches lose nothing by it.
+# The ship gate has already run this exact suite against the branch, locally and in the bwrap
+# sandbox, before it was pushed at all; and every one of the twelve that has reached main so far
+# came through a PR, which `pull_request` triggers with no branch filter of its own. An unfiltered
+# push trigger would be the third run of the same tests, and no decision waits on it — the branch
+# is read in the morning, when the PR produces the signal.
 on:
   push:
     branches: [main]

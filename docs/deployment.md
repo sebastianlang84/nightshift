@@ -246,8 +246,11 @@ these flags, is what confines the agent (see [`docs/design/risk-analysis.md`](de
   The accumulator is the point. A bare `for t in tests/*.sh; do bash "$t"; done` exits with the
   status of the LAST test only, and a `|| break` variant exits 0 for every outcome (`break` itself
   succeeds and is the last command run) — both report a red suite as green.
-  [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs the same tests on every push and
-  PR, with the same per-test `rc=1` accumulation and a final `exit $rc`.
+  [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs the same tests on every push to
+  `main` and every PR, with the same per-test `rc=1` accumulation and a final `exit $rc`. The push
+  trigger is filtered to `main`: a `nightshift/*` branch was already put through this suite by the
+  ship gate before it was pushed, and the PR you open in the morning triggers CI with no branch
+  filter, so the third run an unfiltered push trigger would add decides nothing.
 - **Turn the doc guard on once per clone:** `git config core.hooksPath .githooks`. The
   [`pre-commit`](../.githooks/pre-commit) hook runs `lib/check_docs.py` (0.05s) and refuses a commit
   whose docs name something that is not there: a dead relative link, an `ADR 00NN` with no file, a
