@@ -12,3 +12,4 @@ rulebook.yaml
 
 # Python bytecode caches from lib/*.py
 __pycache__/
+*.py[cod]
