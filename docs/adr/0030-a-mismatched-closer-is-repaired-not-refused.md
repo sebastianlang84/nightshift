@@ -51,6 +51,25 @@ A repair is announced on stderr and logged by `materialize_stage_output`. The ar
 the ledger is not byte-for-byte what the model wrote, and a night log that hides that is the wrong
 kind of quiet.
 
+### Amendment 2026-08-24 — a comma before a closer is the same class of slip
+
+The rule above asks what the damage proves about the answer, and a second malformation answers it
+the same way. `"unresolved": [],\n }` — a comma standing before a closer — separates a value from
+nothing. There is no reading to choose: removing it cannot pick one meaning over another, which is
+why JSON5, JavaScript and Python all accept it and only JSON does not. Dropping it recovers the
+model's answer by exactly the standard the closer swap is held to, and needs less inference than
+the swap does.
+
+Hence no ceiling for it, unlike `MAX_SWAPS`. That ceiling exists because a pile of swapped closers
+means the structure itself is uncertain; a pile of trailing commas does not — each one is
+independently meaningless, and the structure around them is intact.
+
+Measured: the explore lens of 2026-08-24 spent seven minutes, wrote a finding, and lost it to one
+such comma. It is also the night the parse failure armed a latent false positive in the credential
+classifier and aborted the whole run (ADR 0023, amendment of the same date) — the two defects
+compound, which is why the [regression
+test](../../tests/test-agent-auth-false-positive.sh) exercises them together.
+
 ## Alternatives rejected
 
 **Retry the stage.** 3–6 minutes and full token cost per attempt, against a slip that is systematic
@@ -70,7 +89,8 @@ A guarantee available in one vendor's CLI cannot be the thing the parser depends
 - 13 of the 14 historical parse failures on this machine are recovered; the fourteenth is a genuine
   malformation inside a string and stays refused. Verified against all 226 stage outputs in `runs/`:
   212 parse identically to before, 13 are recovered, 1 changes — the truncated recon above, which
-  now correctly fails instead of yielding a fragment.
+  now correctly fails instead of yielding a fragment. Re-verified for the comma repair against all
+  243 stage outputs then on disk: 242 identical, 1 recovered, 0 changed, 0 lost.
 - A repaired verdict is visible in the night log. If repairs become routine rather than occasional,
   that is evidence the prompt shape is wrong and should be fixed at the source.
 - The refusal doctrine is unchanged where it matters: no JSON, an unfinished answer, or damage past

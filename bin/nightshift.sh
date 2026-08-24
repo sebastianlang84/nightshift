@@ -358,17 +358,63 @@ codex_stage_home() {
 # resulting `empty` rows are fiction. So classify the failure once and let main() abort the night.
 AGENT_FATAL=""         # non-empty = the agent itself is unusable; set by run_agent, read by main()
 AGENT_FATAL_AGENT=""   # WHICH adapter died — the advisor may legitimately run on a different one
-# Credential-failure signatures, matched against the stage's captured stderr AND raw stdout (the
-# claude CLI reports the failure as a JSON result object on stdout, codex on stderr). Deliberately
-# broad: a false positive costs one aborted night, a false negative costs a forged clean fleet.
+# Credential-failure signatures, matched against what the CLI says about ITSELF: the stage's
+# captured stderr, plus the CLI's own verdict inside raw stdout (the claude CLI reports the failure
+# as a JSON result object there, codex on stderr). Deliberately broad, because a false negative
+# costs a forged clean fleet.
 AGENT_AUTH_RE='not logged in|/login|authentication_failed|invalid api key|unauthorized|oauth token|credentials? (not found|expired|invalid)|codex login'
-agent_credentials_failed() { # file… -> 0 if any readable file carries a credential-failure signature
-  local f
-  for f in "$@"; do
-    [ -s "$f" ] || continue
-    grep -qiE "$AGENT_AUTH_RE" "$f" 2>/dev/null && return 0
-  done
-  return 1
+
+# The signatures are PROSE, and prose matched against a stage's whole raw stdout matches the prose
+# of the repo under review. On 2026-08-24 an explore lens read bin/nightshift.sh — including line
+# 331, which self-heals a stale symlink after `codex login` — and AGENT_AUTH_RE read that as the
+# account being logged out. The night aborted after one stage while .usage_explore recorded 29,600
+# output tokens, 2.4M cache reads and $3.32 spent; a CLI that cannot authenticate spends nothing.
+# The pattern sits latent in 33 of 197 archived raw streams, and goes off whenever a stage fails to
+# parse for any other reason.
+#
+# So the raw stream is no longer searched whole. claude's is a JSON event array in which the CLI's
+# own verdict is the `result` event; the assistant/user/system events are the model's work, i.e.
+# the repo's words. codex's shape is unverified here (no codex night has run), so its raw passes
+# through unfiltered rather than through a guess — the same standard the quota detector was held
+# to. A raw stream that is not a parseable event array is not model output either, and passes
+# through whole: that is the shape of the 2026-08-05 outage, where the CLI printed one line.
+agent_diagnosis() { # raw_file -> what the CLI said about the run, on stdout
+  local f="$1" n
+  [ -s "$f" ] || return 0
+  if [ "${NIGHTSHIFT_AGENT:-}" = claude ]; then
+    n=$(jq -r 'if type=="array" then . else [.] end
+               | map(select((.type? // "") == "result")) | length' "$f" 2>/dev/null) || n=""
+    case "$n" in
+      ''|*[!0-9]*|0) : ;;                 # no result event: not a stream we can filter, so do not
+      *)
+        # `is_error: false` is the CLI's receipt that it ran the session — nothing to diagnose, and
+        # .result there is the MODEL's answer, which may discuss credentials as a matter of code.
+        # Only a failed result is worth reading, and then its text is the CLI's own.
+        jq -r 'if type=="array" then . else [.] end
+               | map(select((.type? // "") == "result"))
+               | if any(.is_error? == false) then ""
+                 else map([(.subtype? // ""), (.result? // "")] | join(" ")) | join("\n") end' \
+          "$f" 2>/dev/null
+        return 0 ;;
+    esac
+  fi
+  cat "$f"
+}
+
+agent_credentials_failed() { # errfile rawfile -> 0 if the CLI's own output reports a credential failure
+  local errf="$1" rawf="$2"
+  [ -s "$errf" ] && grep -qiE "$AGENT_AUTH_RE" "$errf" 2>/dev/null && return 0
+  agent_diagnosis "$rawf" | grep -qiE "$AGENT_AUTH_RE"
+}
+
+# Second, adapter-independent riddle-out, and the one that covers codex too: a stage that reached
+# the API cannot have failed to authenticate. The adapters write .usage_$stage from the CLI's own
+# counters, so a non-zero token count is the CLI's receipt for a completed request.
+agent_reached_the_api() { # usage_file -> 0 if the run spent tokens
+  local f="$1"
+  [ -s "$f" ] || return 1
+  [ "$(jq -r '(((.output_tokens? // 0) + (.input_tokens? // 0)
+               + (.cache_read_tokens? // 0)) > 0) // false' "$f" 2>/dev/null)" = true ]
 }
 
 # Quota exhaustion is the same class of event as a bad credential (ADR 0023): the agent could not
@@ -443,7 +489,8 @@ run_agent() { # stage workdir item_dir
     fi
     log "  stage $stage FAILED (exit $status)${detail}"
     [ -s "$errf" ] && log "  stage $stage: stderr in $errf"
-    if [ -z "$AGENT_FATAL" ] && agent_credentials_failed "$errf" "$rawf"; then
+    if [ -z "$AGENT_FATAL" ] && ! agent_reached_the_api "$item_dir/.usage_$stage" \
+       && agent_credentials_failed "$errf" "$rawf"; then
       AGENT_FATAL="$NIGHTSHIFT_AGENT has no usable credentials (stage $stage)"
       AGENT_FATAL_AGENT="$NIGHTSHIFT_AGENT"
       log "FATAL: $AGENT_FATAL — aborting the night rather than recording a clean fleet."

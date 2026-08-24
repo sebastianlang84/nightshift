@@ -63,4 +63,34 @@ fi
 [ ! -s "$TMP/cut" ]
 grep -q 'no parseable JSON' "$TMP/err"
 
+# A comma left standing before a closer is the same class of slip, and needs even less reading than
+# a swapped closer: it separates a value from nothing, so dropping it cannot pick one meaning over
+# another. JSON5, JavaScript and Python all accept it; only JSON does not. Measured: this cost the
+# explore lens of 2026-08-24, after seven minutes of work and a finding already written.
+printf '%s\n' '{"found":true,"coverage":{"unresolved":[],},"findings":[1,2,],}' |
+  python3 "$ROOT/lib/extract_json.py" > "$TMP/comma" 2> "$TMP/err"
+jq -e '.found == true and (.findings | length) == 2 and (.coverage.unresolved | length) == 0' "$TMP/comma" >/dev/null
+grep -q 'json-repair: dropped 3 trailing comma' "$TMP/err" || {
+  echo "test-json-extraction: trailing commas were dropped silently or not at all" >&2
+  cat "$TMP/err" >&2; exit 1;
+}
+
+# Both repairs in one candidate are reported as both, so the night log names every edit made to the
+# artifact that reaches the ledger.
+printf '%s\n' '{"found":true,"coverage":{"invariants":{"a":"checked"],},"findings":[]}' |
+  python3 "$ROOT/lib/extract_json.py" > "$TMP/both" 2> "$TMP/err"
+jq -e '.coverage.invariants.a == "checked"' "$TMP/both" >/dev/null
+grep -q 'swapped 1 mismatched closer(s) and dropped 1 trailing comma(s)' "$TMP/err" || {
+  echo "test-json-extraction: a candidate needing both repairs did not report both" >&2
+  cat "$TMP/err" >&2; exit 1;
+}
+
+# A comma inside a string is data, not syntax, and must survive untouched — including one sitting
+# right where the scanner looks for a trailing separator.
+printf '%s\n' '{"found":true,"note":"a, b,","findings":[],}' |
+  python3 "$ROOT/lib/extract_json.py" > "$TMP/instr" 2> "$TMP/err"
+jq -e '.note == "a, b,"' "$TMP/instr" >/dev/null || {
+  echo "test-json-extraction: repair reached inside a string literal" >&2; exit 1;
+}
+
 echo "test-json-extraction: ok"
