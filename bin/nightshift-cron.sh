@@ -63,6 +63,22 @@ gate_toolchain_path() { # -> `:`-separated dirs the gates need bound and on PATH
 }
 export NIGHTSHIFT_TEST_PATH="${NIGHTSHIFT_TEST_PATH-$(gate_toolchain_path)}"
 
+# The sandbox has no $HOME, so a python package installed with `pip install --user` is invisible
+# inside a gate — the suite then fails on an import, which reads downstream as "the fix broke the
+# tests". Naming the user site-packages directory here binds it READ-ONLY; it is a directory under
+# $HOME, not $HOME itself, so the sandbox's own refusal of any bind containing $HOME still holds.
+# Nothing is added to any gate's import path by this: a suite that needs those packages says so in
+# its own `test_cmd` (PYTHONPATH=…), which keeps the operator's packages out of every other repo.
+#
+# Set NIGHTSHIFT_TEST_SANDBOX_ROBIND yourself to override; set it empty to opt out entirely.
+gate_user_site() { # -> the operator's user site-packages dir, if python3 has one that exists
+  local d
+  d="$(python3 -m site --user-site 2>/dev/null)" || return 0
+  [ -n "$d" ] && [ -d "$d" ] && printf '%s' "$d"
+  return 0
+}
+export NIGHTSHIFT_TEST_SANDBOX_ROBIND="${NIGHTSHIFT_TEST_SANDBOX_ROBIND-$(gate_user_site)}"
+
 LOG_DIR="${NIGHTSHIFT_LOG_DIR:-$HOME/.local/state/nightshift/logs}"
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/$(date +%Y-%m-%d).log"
@@ -85,6 +101,9 @@ if [ -n "${NIGHTSHIFT_TEST_PATH:-}" ]; then
   echo "[nightshift-cron] test gates bind + prepend $NIGHTSHIFT_TEST_PATH (node $(PATH="$NIGHTSHIFT_TEST_PATH" command -v node >/dev/null 2>&1 && PATH="$NIGHTSHIFT_TEST_PATH" node -v || echo 'not runnable'), uv $(PATH="$NIGHTSHIFT_TEST_PATH" command -v uv >/dev/null 2>&1 && echo present || echo 'not found'))" | tee -a "$LOG"
 else
   echo "[nightshift-cron] no nvm toolchain found — test gates run on $(command -v node || echo 'no node at all')" | tee -a "$LOG"
+fi
+if [ -n "${NIGHTSHIFT_TEST_SANDBOX_ROBIND:-}" ]; then
+  echo "[nightshift-cron] test gates bind read-only $NIGHTSHIFT_TEST_SANDBOX_ROBIND" | tee -a "$LOG"
 fi
 # The orchestrator's exit status is the thing this launcher exists to record, so the
 # pipeline below must NOT be allowed to kill the shell: under `set -e` + `pipefail` a

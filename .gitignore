@@ -9,3 +9,6 @@ rulebook.yaml
 # Harness-created task worktrees. Scoped to the subdirectory, NOT all of .claude/, so a
 # project-level .claude/settings.json or skill stays committable.
 /.claude/worktrees/
+
+# Python bytecode caches from lib/*.py
+__pycache__/
