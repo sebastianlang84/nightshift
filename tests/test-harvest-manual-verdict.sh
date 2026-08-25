@@ -4,7 +4,7 @@ set -euo pipefail
 # harvest manual-verdict UX + ledger hardening:
 #  - a corrupt ledger line aborts loudly (never a silent no-op exiting 0);
 #  - re-recording an identical manual verdict appends nothing (idempotent);
-#  - a selector spanning >1 branch warns and shows them.
+#  - a selector spanning >1 repo-scoped identity is refused and shows stable item ids.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
@@ -30,11 +30,21 @@ n2=$(wc -l < "$LEDGER")
 run verdict nightshift/b1 wontfix >/dev/null
 [ "$(wc -l < "$LEDGER")" -gt "$n2" ] || { echo "verdict change was not recorded" >&2; exit 1; }
 
-# --- multi-branch selector warns ---------------------------------------------------
+# --- ambiguous selectors fail closed ------------------------------------------------
 ship "nightshift/b2" "sha2" "/r:shared:L9"
 ship "nightshift/b3" "sha3" "/r:shared:L9"   # same fingerprint, two branches
-warn="$(run verdict "/r:shared:L9" merged 2>&1 >/dev/null || true)"
-grep -q "distinct branches" <<<"$warn" || { echo "expected multi-branch warning, got: $warn" >&2; exit 1; }
+before=$(wc -l < "$LEDGER")
+rc=0; run verdict "/r:shared:L9" merged >"$TMP/out" 2>"$TMP/err" || rc=$?
+[ "$rc" = 2 ] || { echo "ambiguous fingerprint should exit 2, got $rc" >&2; exit 1; }
+grep -q "ambiguous selector" "$TMP/err" || { echo "ambiguity was not explained" >&2; exit 1; }
+[ "$(wc -l < "$LEDGER")" = "$before" ] || { echo "ambiguous verdict still wrote the ledger" >&2; exit 1; }
+
+# The same branch name can exist in two repos. Branch-only counting called that one target and
+# silently chose the newest row; repo-scoped identity must reject it too.
+jq -nc '{night:"2026-07-13",item:"other-item",repo:"/other",fingerprint:"other:fp",branch:"nightshift/b1",sha:"other-sha",outcome:"shipped",schema_version:2}' >> "$LEDGER"
+rc=0; run verdict nightshift/b1 merged >"$TMP/out" 2>"$TMP/err" || rc=$?
+[ "$rc" = 2 ] || { echo "cross-repo branch selector should exit 2, got $rc" >&2; exit 1; }
+grep -q 'use an item id' "$TMP/err"
 
 # --- unrecognised arguments are rejected, never silently harvested -----------------
 # A typo'd preview flag must NOT fall through to the argument-less (ledger-writing) path.

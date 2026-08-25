@@ -30,7 +30,8 @@ harvest. The row carries the real branch and sha; `fingerprint`/`dimension`/`typ
 are genuinely unknown and set null; `outcome:"shipped"` with `adopted:true` and `source:"orphan-adopt"`
 marks it so it is never mistaken for a first-hand record or double-counted in provenance metrics.
 
-- **Idempotent:** once written, the branch is in the ledger's `known` set and is never adopted again.
+- **Idempotent and repo-scoped:** once written, `(repo, branch)` is in the ledger's `known` set and
+  is never adopted again. The same branch name in another repository remains a distinct ref.
 - **`--dry-run` reports only** ("would adopt"), preserving the read-only preview.
 - Adoption acts on what is really on origin, so it repairs orphans from **any** source — a foreign
   `NIGHTSHIFT_HOME`, another host, or a lost local append — which no run-start guard can.

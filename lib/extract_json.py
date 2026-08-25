@@ -64,7 +64,14 @@ def scan(text, start, repair=False):
             if c != want:
                 if not repair:
                     out.append(c)          # reproduce the damage; the caller will see it
+                    # An outer mismatch is complete only when it really ends the candidate.
+                    # `{"a":1],"b":2}` is not a misspelled final closer: returning at `]`
+                    # would silently discard the rest of the object and manufacture valid JSON.
+                    if not stack and not text[i + 1 :].lstrip().startswith(","):
+                        return "".join(out), (swaps, commas), i
                     continue
+                if not stack and text[i + 1 :].lstrip().startswith(","):
+                    return None, (swaps, commas), i
                 c = want
                 swaps += 1
                 if swaps > MAX_SWAPS:

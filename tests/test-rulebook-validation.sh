@@ -159,6 +159,40 @@ grep -qx "$(printf 'codex_model\tgpt-5 #2')" "$TMP/stdout" || {
   exit 1
 }
 
+# Standard YAML permits sequence items at the same indentation as their section key. This used to
+# parse successfully while emitting no repo at all, turning a configured fleet into a clean no-op.
+cat > "$TMP/same-indent.yaml" <<'EOF'
+dimensions:
+- "correctness"
+repos:
+- path: "/srv/quoted repo"
+  mode: "branch-fix"
+  test_cmd: "printf ok"
+EOF
+python3 "$ROOT/lib/parse_rulebook.py" "$TMP/same-indent.yaml" > "$TMP/stdout"
+grep -qx "$(printf 'dimension\tcorrectness')" "$TMP/stdout"
+grep -q "path=/srv/quoted repo.*mode=branch-fix.*test_cmd=printf ok" "$TMP/stdout" || {
+  echo "same-indent or quoted repo scalars were lost: $(grep '^repo' "$TMP/stdout")" >&2
+  exit 1
+}
+
+printf 'repos:\n' > "$TMP/empty-repos.yaml"
+if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/empty-repos.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
+  echo "parser accepted an empty fleet" >&2
+  exit 1
+fi
+grep -q 'repos must contain at least one repository' "$TMP/stderr"
+
+for bad_path in '  - mode: findings-only' '  - path: relative/repo
+    mode: findings-only'; do
+  printf 'repos:\n%s\n' "$bad_path" > "$TMP/bad-path.yaml"
+  if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/bad-path.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
+    echo "parser accepted a missing or relative repo path" >&2
+    exit 1
+  fi
+  grep -q 'repo path must be absolute and non-empty' "$TMP/stderr"
+done
+
 # The shipped example is the reference rulebook and the fallback every entry point parses when a host
 # has no rulebook.yaml, so it must stay inside those closed key sets: a knob documented there but
 # absent from the parser's sets would now abort every night rather than being quietly ignored.

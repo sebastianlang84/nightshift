@@ -70,7 +70,8 @@ is worktree content — code that is already on the repo's forge — not the SSH
 is the whole difference between "the suite can talk to the network" and "the attacker gets the
 account".
 
-Resolver config (`/etc/resolv.conf`, `/etc/hosts`) is bound only when egress is granted.
+`/etc/resolv.conf` is never bound. A synthetic `/etc/hosts` names only loopback; for an opted-in
+repo the host-side proxy resolves and vets destination names before connecting.
 
 **3. Resource ceilings, not just a wall clock.**
 
@@ -100,7 +101,7 @@ status: **the gate could not run**. Construction failure is detected with `--jso
 from the exit code: bubblewrap exits 1 for a missing bind source, a bad `--chdir` and an unknown
 option alike, and it also propagates the child's own status, so no value is unambiguous. It writes
 an `exit-code` record only once the child has actually run, and the absence of that record is the
-signal. (`child-pid` is not — bwrap forks before it binds, so a failed setup still reports one.) The item is refused (`tests-failed`, no
+signal. (`child-pid` is not — bwrap forks before it binds, so a failed setup still reports one.) The item is refused (`gate-blocked`, no
 branch, no PR) and — unlike a red suite — it does **not** loop back into Fix. A host problem is not
 a regression the Fix stage can repair, and treating it as one would spend every remaining fix
 iteration, every night, on a misconfiguration no model can fix.

@@ -55,8 +55,8 @@ These are implemented and active today. Each is enforced by mechanism, not by pr
 |---|---------|-----------|-------|
 | C1 | **Stage capability boundary** | Claude uses a per-stage tool allowlist and never grants `Bash`. Codex uses `read-only` for Recon/Explore/Review and `workspace-write` with network disabled for Fix; Codex can execute sandboxed commands inside that worktree. | [nightshift.sh](../../bin/nightshift.sh) |
 | C2 | **Repo never touched directly** | Every work item runs in a throwaway `git worktree --detach` under `$TMPDIR`, removed `--force` after. Edits land there, not in the real checkout. | [nightshift.sh:312-315](../../bin/nightshift.sh) |
-| C3 | **Push confinement (Layer 1)** | `hooks/pre-push` checks git's already-**resolved** refs: rejects any ref outside `nightshift/*`, plus deletes and tag pushes. Every bypass spelling (`+main`, `:branch`, `--all`, `--mirror`) is resolved by git before the hook sees it. | [pre-push](../../hooks/pre-push) |
-| C4 | **Can't disable Layer 1 (Layer 2, Claude only)** | `core.hooksPath` is injected into both adapters. Claude also has a `PreToolUse` guard denying bypass flags. Codex has no equivalent tool hook here; its sandbox is the primary agent boundary, while the Runner's final push supplies the hook independently. | [pretooluse-guard.sh](../../hooks/pretooluse-guard.sh), [nightshift.sh](../../bin/nightshift.sh) |
+| C3 | **Push confinement (Layer 1)** | `hooks/pre-push` checks git's already-**resolved** refs: rejects any ref outside `nightshift/*`, deletes, tag pushes, and non-fast-forward updates. Every bypass spelling (`+main`, `:branch`, `--all`, `--mirror`, `--force`) is resolved by git before the hook sees it. | [pre-push](../../hooks/pre-push) |
+| C4 | **Can't disable Layer 1 (Layer 2, Claude only)** | `core.hooksPath` is injected into both adapters. Claude also has a `PreToolUse` guard denying bypass flags and writes to project settings that a later stage would execute as hooks. Codex has no equivalent tool hook here; its sandbox is the primary agent boundary, while the Runner's final push supplies the hook independently. | [pretooluse-guard.sh](../../hooks/pretooluse-guard.sh), [nightshift.sh](../../bin/nightshift.sh) |
 | C5 | **Never merges** | Output is `nightshift/*` branches (+ optional PR on this repo only). A human reviews before any merge. | ADR 0004, `rulebook.yaml` |
 | C6 | **Runaway caps** | Claude has `--max-turns 60` per stage. Both adapters have fix-iteration, open-branch and per-run caps, single-instance `flock`, and the service's wall-clock timeout. Codex currently has no separate per-stage turn cap. | [nightshift.sh](../../bin/nightshift.sh), rulebook, [nightshift-cron.sh](../../bin/nightshift-cron.sh), [nightshift.service](../../scheduler/nightshift.service) |
 | C7 | **Report-only for sensitive repos** | `findings-only` mode reports without ever pushing (e.g. llmstack). | `rulebook.yaml` |
@@ -147,8 +147,8 @@ On drift, the run continues until a cap (C6) stops it.
 Target-repo content is untrusted and reaches the prompt. Injection could steer what the agent flags
 or how it "fixes" code. Worse, it is **second-order**: the explore stage's output — itself derived
 from untrusted content — is re-embedded verbatim as `### finding.json` into the fix **and** review
-prompts ([nightshift.sh:465-468](../../bin/nightshift.sh)), and the staged diff (also
-attacker-influenced) is embedded into review ([nightshift.sh:470-478](../../bin/nightshift.sh)). So
+prompts (`stage_prompt` in [nightshift.sh](../../bin/nightshift.sh)), and the staged diff (also
+attacker-influenced) is embedded into review there. So
 the same adversary shapes both the instruction the fixer follows and the diff the reviewer signs off.
 Backstopped by C5 (human review before merge) for correctness — but **not** for the R1 exfil variant
 (damage done at push time). R9's evidence gap is closed, so what the reviewer sees is now complete;
@@ -189,12 +189,12 @@ defense-in-depth.*
 ### R9 — Untracked files bypass the review evidence chain <a id="r9"></a>
 Review was shown a plain `git -C "$wd" diff`, which reports **tracked modifications only**, not new
 untracked files, while finalize stages everything with `git add -A`
-([nightshift.sh:1199](../../bin/nightshift.sh)) and pushes. A fix stage that *creates* a new file (a
+(`finalize` in [nightshift.sh](../../bin/nightshift.sh)) and pushes. A fix stage that *creates* a new file (a
 secret dump, a malicious `.github/` workflow, a planted binary) was invisible to the reviewer yet
 committed and pushed to the `nightshift/*` branch.
 
-*Mitigated by [N3](#n3) (implemented): the review prompt now runs `git -C "$wd" add -A` and embeds
-`git -C "$wd" diff --staged` ([nightshift.sh:470-478](../../bin/nightshift.sh)), so the reviewer's
+*Mitigated by [N3](#n3) (implemented): the review path stages all candidate content and embeds
+`git diff --staged` (`stage_prompt` in [nightshift.sh](../../bin/nightshift.sh)), so the reviewer's
 evidence is by construction the same index finalize commits — new files included. Both stagings
 honour the target repo's `.gitignore` identically, so an ignored file is absent from review **and**
 from the commit; the evidence chain stays complete.*
@@ -405,9 +405,10 @@ committed diff (the `gh` API path never touches pre-push). Re-issue the `gh` tok
 ### N8 — Sandbox the ship gate <a id="n8"></a>
 **Closes R15. Implemented** — ADR [0026](../adr/0026-the-ship-gate-runs-in-a-sandbox.md).
 `build_test_sandbox` / `run_test_gate` ([nightshift.sh](../../bin/nightshift.sh)) run the repo's
-`test_cmd` under `bwrap` with `--unshare-all` (network re-shared only for a repo declaring
-`test_net: true`), `--clearenv` plus an eight-variable allowlist, `/usr` read-only, a file-by-file
-`/etc` allowlist, size-capped tmpfs on `/tmp` and `/run`, and exactly two writable paths: the
+`test_cmd` under `bwrap` with isolated user/IPC/PID/UTS/cgroup/network namespaces. Network is never
+re-shared; `test_net: true` exposes only a host-side vetting proxy over a bound Unix socket.
+`--clearenv` plus an explicit allowlist, `/usr` read-only, a file-by-file `/etc` allowlist,
+size-capped tmpfs on `/tmp` and `/run`, and exactly two writable paths: the
 worktree and a disposable HOME. `NIGHTSHIFT_TEST_SANDBOX_ROBIND` is the host's escape hatch for a
 dependency outside `/usr`, and a bind that would re-expose `$HOME` is refused with a log line.
 Absent or unconstructable sandbox → the gate returns "could not run", the item is refused without

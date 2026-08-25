@@ -85,6 +85,14 @@ case "$path" in
 esac
 target="$(realpath -m "$abs" 2>/dev/null || printf '%s' "$abs")"
 
+# Claude loads project/local settings again for the next stage. If Fix can write either file, a
+# finding can become an executable hook before Review sees the diff. These two control files are
+# therefore outside the Fix write surface even though they live inside the disposable worktree.
+case "$target" in
+  "$root/.claude/settings.json"|"$root/.claude/settings.local.json"|"$root/.mcp.json")
+    deny "Claude project settings and MCP config are Runner control data, not Fix-stage write targets" ;;
+esac
+
 # Trailing-slash-safe containment: equal to root, or strictly beneath root/. This
 # rejects a sibling that merely shares the prefix (…/worktree-evil vs …/worktree).
 case "$target" in

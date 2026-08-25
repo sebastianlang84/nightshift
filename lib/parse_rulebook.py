@@ -103,10 +103,18 @@ def main(path: str) -> None:
             # Comparing the raw line instead silently demoted `repos: # the fleet` to "no section",
             # which dropped every entry under it without a word.
             head = s.split("#", 1)[0].rstrip()
-            if indent == 0:
+            # YAML permits sequence items at the same indentation as their section key:
+            # `repos:\n- path: …`. Keep the active sequence section for that standard shape;
+            # resetting it here used to accept the file while silently emitting an empty fleet.
+            same_indent_item = (
+                indent == 0
+                and s.startswith("- ")
+                and section in ("dimensions", "repos")
+            )
+            if indent == 0 and not same_indent_item:
                 section = None
                 if s.startswith("branch_prefix:"):
-                    prefix = val(s.split(":", 1)[1])
+                    prefix = quoted_val(s.split(":", 1)[1])
                 elif head == "limits:":
                     section = "limits"
                 elif head == "recon:":
@@ -127,7 +135,7 @@ def main(path: str) -> None:
                 put(agent, "agent", s, AGENT_KEYS, quoted_val)
             elif section == "dimensions":
                 if s.startswith("- "):
-                    dims.append(val(s[2:]))
+                    dims.append(quoted_val(s[2:]))
             elif section == "repos":
                 if s.startswith("- "):
                     if cur:
@@ -135,11 +143,14 @@ def main(path: str) -> None:
                     cur = {}
                     s = s[2:].strip()
                     if s:
-                        put(cur, "repos", s, REPO_KEYS)
+                        put(cur, "repos", s, REPO_KEYS, quoted_val)
                 elif cur is not None:
-                    put(cur, "repos", s, REPO_KEYS)
+                    put(cur, "repos", s, REPO_KEYS, quoted_val)
         if cur:
             repos.append(cur)
+
+    if not repos:
+        raise SystemExit("repos must contain at least one repository")
 
     # The pre-push hook appends `*` to this value. Without a trailing slash, a
     # prefix such as `m` also authorizes `main`; require a distinct branch
@@ -260,6 +271,11 @@ def main(path: str) -> None:
     for d in dims:
         print(f"dimension\t{d}")
     for r in repos:
+        path = r.get("path", "")
+        if not path or not path.startswith("/"):
+            raise SystemExit(
+                f"repo path must be absolute and non-empty, got {path!r}"
+            )
         # base is optional: empty means "auto-detect" (base_ref) in the Runner.
         # findings is optional: empty means "inherit max_findings_per_item".
         # dimensions is optional (comma-separated scalar): empty means "inherit the global set".
@@ -268,7 +284,7 @@ def main(path: str) -> None:
         findings = r.get("findings", "")
         if findings and (not findings.isdecimal() or int(findings) < 1):
             raise SystemExit(
-                f"repo {r.get('path', '')}: findings must be a positive integer"
+                f"repo {path}: findings must be a positive integer"
             )
         # The Runner's select_order() skips any repo whose mode it does not recognise, WITHOUT a log
         # line — so `mode: brnach-fix` silently removed the repo from every night and the operator's

@@ -28,6 +28,12 @@ cat > "$TMP/valid.json" <<'JSON'
 JSON
 python3 "$ROOT/lib/validate_explore.py" "$TMP/repo" "$TMP/valid.json"
 
+# Back-compat: the Runner documents a single finding object without a `findings` array and
+# normalises it after this validator. The validator must not reject that supported shape first.
+jq 'del(.findings) | .found=true | .file="f1.txt" | .summary="single finding"' \
+  "$TMP/valid.json" > "$TMP/single.json"
+python3 "$ROOT/lib/validate_explore.py" "$TMP/repo" "$TMP/single.json"
+
 jq '.coverage.invariants={
   "canonicality":"checked: one canonical page per claim",
   "consistency":"checked: overlapping claims agree",

@@ -75,11 +75,11 @@ Only an item that leaves the loop still broken is refused.
 
 **3. A refusal is recorded, not swallowed.**
 
-The ledger gets an outcome row `tests-failed`, in the same family as `commit-failed` and
-`push-failed`: recorded with the finding's summary and identity, with `branch` and `sha` null
-because neither ever existed. It is distinct from `abandoned` on purpose — the reviewer *wanted* to
-ship and the suite said no, every time, which is a different signal from a fix the reviewer gave up
-on. The digest lists both under "Considered but not shipped".
+The ledger gets `tests-failed` only when the suite was actually red. An unavailable or non-hermetic
+gate gets `gate-blocked`; a rewritten `.git` pointer gets `worktree-tampered`. All carry the
+finding's summary and identity, with `branch` and `sha` null because neither ever existed. They are
+distinct from `abandoned` because the reviewer wanted to ship; the digest lists every refusal under
+"Considered but not shipped".
 
 Crucially the finding is **not** latched as an open finding. `tests-failed` is a fact about one
 night's attempts, not a verdict about the defect — a later night may find the same thing and fix it

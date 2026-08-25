@@ -37,6 +37,12 @@ expect allow "$(w Edit  "$WT/sub/nested.txt")"    "edit nested in worktree"
 expect allow "$(w Write "rel/inside.py")"         "relative path resolves into worktree"
 expect allow "$(w MultiEdit "$WT/multi.txt")"     "multiedit in worktree"
 
+# Project/local settings are loaded as executable hook configuration by the NEXT Claude stage.
+# They are control data, not ordinary candidate content, even though they sit inside the worktree.
+expect deny "$(w Write "$WT/.claude/settings.json")"       "project settings inside worktree"
+expect deny "$(w Edit  ".claude/settings.local.json")"     "local project settings inside worktree"
+expect deny "$(w Write "$WT/.mcp.json")"                   "project MCP config inside worktree"
+
 # --- outside the worktree → deny ---
 expect deny "$(w Write "$HOME/.claude/settings.json")"  "write to ~/.claude"
 expect deny "$(w Edit  "$ROOT/bin/nightshift.sh")"      "edit the runner itself"

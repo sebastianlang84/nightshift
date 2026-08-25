@@ -20,7 +20,7 @@ reject() {
   exit 1
 }
 
-while read -r _local_ref local_sha remote_ref _remote_sha; do
+while read -r _local_ref local_sha remote_ref remote_sha; do
   [ -z "${remote_ref:-}" ] && continue
   case "$remote_ref" in
     refs/tags/*) reject "tag push not allowed ($remote_ref) — nightshift makes branches, not releases" ;;
@@ -33,6 +33,13 @@ while read -r _local_ref local_sha remote_ref _remote_sha; do
     "$prefix"*) : ;;  # inside the allowed branch namespace — OK
     *) reject "push outside ${prefix}* not allowed ($remote_ref) — no main, no merge" ;;
   esac
+  # Namespace ownership does not permit rewriting its published history. Git has already resolved
+  # `+branch`, `--force` and `--force-with-lease` to these object ids; require the remote tip to be
+  # an ancestor of the proposed tip. An unavailable old object fails closed as well.
+  if [ "$remote_sha" != "$zero" ] \
+     && ! git merge-base --is-ancestor "$remote_sha" "$local_sha" >/dev/null 2>&1; then
+    reject "non-fast-forward update not allowed ($remote_ref)"
+  fi
 done
 
 exit 0

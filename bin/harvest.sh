@@ -33,7 +33,7 @@
 #   harvest.sh --dry-run       # show the reconciliation, write nothing
 #   harvest.sh verdict <sel> <verdict> [reason]   # record a manual verdict (findings/override)
 #   harvest.sh todos           # list open findings, numbered, with freshness state
-#   harvest.sh close <#|sel> [reason]             # record `resolved` for one open finding
+#   harvest.sh close <item|sel> [reason]          # record `resolved` for one open finding
 #   harvest.sh probe           # re-run the freshness probe, print the table
 #   harvest.sh retract <night> [reason]           # withdraw a night's `empty` rows as evidence
 #   harvest.sh --help          # print the usage above (see usage(), which this mirrors)
@@ -61,15 +61,17 @@ BRANCH_PREFIX="nightshift/"   # overridden by the rulebook's branch_prefix; the 
 NIGHTSHIFT_COMMIT_EMAIL="nightshift@localhost"
 
 declare -a REPO_PATHS=() REPO_BASES=()
+repo_id() { realpath -m -- "$1" 2>/dev/null || printf '%s' "${1%/}"; }
+
 load_rulebook() {
-  local tag a b c d e parsed
+  local tag a b c d e parsed path
   # Capture output + exit status; a parse error via process substitution is invisible
   # to `set -euo pipefail` and would reconcile on a truncated repo set. Fail closed.
   parsed="$(python3 "$NIGHTSHIFT_HOME/lib/parse_rulebook.py" "$RULEBOOK")" \
     || { echo "rulebook parse failed ($RULEBOOK) — aborting harvest" >&2; exit 1; }
   while IFS=$'\t' read -r tag a b c d e; do
     case "$tag" in
-      repo)   REPO_PATHS+=("${a#path=}"); REPO_BASES+=("${c#base=}") ;;
+      repo)   path="$(repo_id "${a#path=}")"; REPO_PATHS+=("$path"); REPO_BASES+=("${c#base=}") ;;
       prefix) [ -n "$a" ] && BRANCH_PREFIX="$a" ;;
     esac
   done <<< "$parsed"
@@ -103,12 +105,12 @@ base_for_repo() {
   resolve_base "$path" ""
 }
 
-# last recorded verdict for a branch as "verdict<TAB>source" (empty fields if none).
+# last recorded verdict for a repo+branch as "verdict<TAB>source" (empty fields if none).
 # source distinguishes a human 'manual' verdict from a machine reconcile so the loop
 # can refuse to clobber a human decision.
-last_verdict_meta() { # branch
-  jq -rs --arg b "$1" \
-    '([.[]|select(.outcome=="verdict" and .branch==$b)]|last) as $v
+last_verdict_meta() { # repo branch
+  jq -rs --arg r "$1" --arg b "$2" \
+    '([.[]|select(.outcome=="verdict" and .repo==$r and .branch==$b)]|last) as $v
      | "\($v.verdict // "")\t\($v.source // "")"' \
     "$LEDGER" 2>/dev/null || printf '\t\n'
 }
@@ -208,8 +210,15 @@ adopt_orphan() { # repo branch sha
 # --dry-run reports only. This is the backstop the run-start guard (ADR 0017) cannot be — it repairs
 # orphans from ANY origin (other checkout, other host) because it acts on what is really on origin.
 sweep_orphans() {
-  local i repo known n=0 sha ref b
-  known="$(jq -rs '[.[]|select((.branch//"")!="")|.branch]|unique|.[]' "$LEDGER" 2>/dev/null || true)"
+  local i repo n=0 sha ref b key known_repo known_branch
+  local -A known=()
+  # Branch names are unique only inside one repository; the ledger spans the whole fleet.
+  while IFS=$'\x1f' read -r known_repo known_branch; do
+    [ -n "$known_repo" ] && [ -n "$known_branch" ] || continue
+    known_repo="$(repo_id "$known_repo")"
+    known["$known_repo"$'\x1f'"$known_branch"]=1
+  done < <(jq -rs '.[]|select((.repo//"")!="" and (.branch//"")!="")
+                       | [.repo,.branch]|join("\u001f")' "$LEDGER" 2>/dev/null || true)
   for i in "${!REPO_PATHS[@]}"; do
     repo="${REPO_PATHS[$i]}"
     [ "${FETCHED[$repo]:-}" = fail ] && continue   # unreachable — don't guess (fail closed)
@@ -217,7 +226,8 @@ sweep_orphans() {
     while read -r sha ref; do
       [ -n "$ref" ] || continue
       b="${ref#refs/heads/}"
-      grep -qxF "$b" <<<"$known" && continue
+      key="$repo"$'\x1f'"$b"
+      [ -n "${known[$key]:-}" ] && continue
       [ "$n" -eq 0 ] && printf 'orphan %s* branches on origin (pushed, no ledger row):\n' "$BRANCH_PREFIX"
       if [ "$DRYRUN" -eq 1 ]; then
         printf '  %-28s %-46s %s\n' "$(basename "$repo")" "$b" "(would adopt)"
@@ -253,13 +263,15 @@ manual_verdict() { # selector verdict [reason]
   if [ "$matches" = "[]" ]; then
     echo "no shipped/finding ledger row matches '$sel'" >&2; exit 1
   fi
-  # Don't silently guess: if the selector spans more than one branch, warn and show them; the
-  # newest still wins (matching prior behaviour), but the operator can now see the mis-target.
+  # Human verdicts outrank the machine, so ambiguity is not a warning. A branch/fingerprint can be
+  # repeated in another fleet repo; refuse it and require the stable item id instead of choosing
+  # whichever matching row happens to be newest.
   local ndistinct
-  ndistinct=$(jq -r '[.[]|.branch]|unique|length' <<<"$matches")
+  ndistinct=$(jq -r '[.[]|[.repo, (.branch // ""), (.fingerprint // "")]]|unique|length' <<<"$matches")
   if [ "$ndistinct" -gt 1 ]; then
-    echo "warning: '$sel' matches $ndistinct distinct branches; applying to the newest —" >&2
-    jq -r '.[]|"  \(.branch // "(finding)")  [\(.item)]"' <<<"$matches" | sort -u >&2
+    echo "ambiguous selector '$sel' matches $ndistinct repo-scoped findings/branches; use an item id —" >&2
+    jq -r '.[]|"  \(.repo)  \(.branch // "(finding)")  [\(.item)]"' <<<"$matches" | sort -u >&2
+    exit 2
   fi
   local row item repo fp branch sha
   row=$(jq -c 'last' <<<"$matches")
@@ -268,7 +280,7 @@ manual_verdict() { # selector verdict [reason]
   sha=$(jq -r '.sha // ""' <<<"$row")
   # Idempotent: don't append a duplicate identical manual verdict on the same branch.
   local was was_src
-  IFS=$'\t' read -r was was_src < <(last_verdict_meta "$branch") || true
+  IFS=$'\t' read -r was was_src < <(last_verdict_meta "$repo" "$branch") || true
   if [ -n "$branch" ] && [ "$was" = "$verdict" ] && [ "$was_src" = manual ]; then
     printf 'unchanged: %s is already %s (manual) — nothing appended\n' "$branch" "$verdict"
     return 0
@@ -294,14 +306,13 @@ age_days() { # iso_ts
   echo $(( (now - then) / 86400 ))
 }
 
-# Open findings, oldest first — ONE ordering shared by `todos` and `close`, so the number a human
-# reads off the list is the item `close` acts on.
+# Open findings, oldest first. The ordinal is informational; mutations use the stable item id.
 todo_items() { jq -r '[.items[]] | sort_by(.ts) | .[] | @base64' "$PROBE_SNAPSHOT" 2>/dev/null; }
 
 list_todos() {
   run_probe >/dev/null || { echo "probe failed — cannot list findings" >&2; exit 1; }
   local n=0 row item repo dim state ts summary verify age mark
-  printf '%-4s %-6s %-18s %-11s %-13s %s\n' '#' 'AGE' 'REPO' 'DIMENSION' 'STATE' 'SUMMARY'
+  printf '%-4s %-6s %-18s %-11s %-13s %-24s %s\n' '#' 'AGE' 'REPO' 'DIMENSION' 'STATE' 'ITEM' 'SUMMARY'
   while IFS= read -r row; do
     [ -n "$row" ] || continue
     n=$((n + 1))
@@ -317,26 +328,24 @@ list_todos() {
       *)            mark="unknown" ;;
     esac
     [ -n "$verify" ] && mark="$mark/$verify"
-    printf '%-4s %-6s %-18s %-11s %-13s %s\n' \
-      "$n" "$age" "$(basename "$repo")" "${dim:-—}" "$mark" "${summary:0:96}"
+    printf '%-4s %-6s %-18s %-11s %-13s %-24s %s\n' \
+      "$n" "$age" "$(basename "$repo")" "${dim:-—}" "$mark" "$(jq -r '.item' <<<"$item")" "${summary:0:96}"
   done < <(todo_items)
   if [ "$n" -eq 0 ]; then
     echo "(no open findings)"
   else
-    printf '\n%d open finding(s). Close one with: harvest.sh close <#> [reason]\n' "$n"
+    printf '\n%d open finding(s). Close one with: harvest.sh close <item> [reason]\n' "$n"
   fi
 }
 
-# Record a human `resolved` for an open finding, addressed by its `todos` line number (or any
-# selector manual_verdict understands). Human input stays ground truth (ADR 0007) — this is just
-# the ergonomic front door to `verdict <sel> resolved`.
-close_todo() { # <n|selector> [reason]
-  local sel="$1" reason="${2:-}" item
+# Record a human `resolved` for an open finding. A displayed row number is ephemeral across
+# processes: an automatic probe can reorder it between `todos` and `close`. Refuse numeric input
+# instead of silently closing a different finding; `todos` prints the stable item id.
+close_todo() { # <selector> [reason]
+  local sel="$1" reason="${2:-}"
   if [[ "$sel" =~ ^[0-9]+$ ]]; then
-    [ -f "$PROBE_SNAPSHOT" ] || run_probe >/dev/null || true
-    item=$(todo_items | sed -n "${sel}p" | base64 -d 2>/dev/null | jq -r '.item // ""')
-    [ -n "$item" ] || { echo "no open finding #$sel — run: harvest.sh todos" >&2; exit 1; }
-    sel="$item"
+    echo "numeric close selectors are unsafe because todo numbering can change; use the ITEM shown by: harvest.sh todos" >&2
+    exit 2
   fi
   manual_verdict "$sel" resolved "$reason"
   # Re-probe so the snapshot (and with it the dashboard) drops the item immediately instead of
@@ -394,8 +403,8 @@ usage:
   harvest.sh verdict <sel> <verdict> [reason]   record a manual verdict (findings/override)
       <sel>      item id | branch | fingerprint
       <verdict>  merged | dropped | resolved | wontfix | open
-  harvest.sh todos                              list open findings, numbered, with freshness state
-  harvest.sh close <#|sel> [reason]             record `resolved` for one open finding
+  harvest.sh todos                              list open findings with stable item ids and freshness
+  harvest.sh close <item|sel> [reason]          record `resolved` for one open finding
   harvest.sh probe                              re-run the finding freshness probe, print the table
   harvest.sh retract <YYYY-MM-DD> [reason]      withdraw that night's `empty` rows as evidence
                                                 (a night whose stages never ran claimed nothing real)
@@ -430,7 +439,7 @@ case "${1:-}" in
       || { echo "verdict takes <selector> <verdict> [reason] (quote a multi-word reason)" >&2; usage >&2; exit 2; } ;;
   close)
     [ "$#" -ge 2 ] && [ "$#" -le 3 ] \
-      || { echo "close takes <#|selector> [reason] (quote a multi-word reason)" >&2; usage >&2; exit 2; } ;;
+      || { echo "close takes <item|selector> [reason] (quote a multi-word reason)" >&2; usage >&2; exit 2; } ;;
   retract)
     [ "$#" -ge 2 ] && [ "$#" -le 3 ] \
       || { echo "retract takes <YYYY-MM-DD> [reason] (quote a multi-word reason)" >&2; usage >&2; exit 2; } ;;
@@ -458,19 +467,20 @@ esac
 # prefetch each repo once
 declare -A FETCHED=()
 
-# Precompute the latest verdict+source per branch in ONE ledger pass. last_verdict_meta
+# Precompute the latest verdict+source per repo+branch in ONE ledger pass. last_verdict_meta
 # slurps the whole append-only ledger on every call; calling it once per shipped branch in
 # the reconcile loop below was O(shipped_branches x ledger_rows) — quadratic as history
-# accumulates (the ledger is append-only, never pruned). Branch names are globally unique
-# (timestamp+seq+dim), so no branch is reconciled twice and this map is behaviour-identical
-# to the per-call scan. group_by preserves input order, so .[-1] is the last-appended verdict.
+# accumulates (the ledger is append-only, never pruned). Branch names are repo-local; keying this
+# central fleet map by name alone lets one repo's verdict leak into another. group_by preserves
+# input order, so .[-1] is the last-appended verdict.
 declare -A LAST_VERDICT=()
-while IFS=$'\t' read -r _b _v _s; do
-  [ -n "$_b" ] && LAST_VERDICT["$_b"]="$_v"$'\t'"$_s"
-done < <(jq -rs '[.[]|select(.outcome=="verdict" and (.branch//"")!="")]
-                 | group_by(.branch)[]
+while IFS=$'\x1f' read -r _r _b _v _s; do
+  _r="$(repo_id "$_r")"
+  [ -n "$_r" ] && [ -n "$_b" ] && LAST_VERDICT["$_r"$'\x1f'"$_b"]="$_v"$'\t'"$_s"
+done < <(jq -rs '[.[]|select(.outcome=="verdict" and (.repo//"")!="" and (.branch//"")!="")]
+                 | group_by([.repo,.branch])[]
                  | .[-1]
-                 | "\(.branch)\t\(.verdict // "")\t\(.source // "")"' "$LEDGER" 2>/dev/null)
+                 | [.repo,.branch,(.verdict//""),(.source//"")]|join("\u001f")' "$LEDGER" 2>/dev/null)
 
 printf '%-28s %-46s %-8s -> %-8s %s\n' REPO BRANCH WAS NOW ""
 changed=0
@@ -498,7 +508,8 @@ while IFS=$'\x1f' read -r item repo fp branch sha pr_url; do
   fi
   base=$(base_for_repo "$repo")
   now=$(reconcile "$repo" "$base" "$branch" "$sha" "$pr_url")
-  IFS=$'\t' read -r was was_src <<< "${LAST_VERDICT[$branch]:-}" || true
+  verdict_key="$(repo_id "$repo")"$'\x1f'"$branch"
+  IFS=$'\t' read -r was was_src <<< "${LAST_VERDICT[$verdict_key]:-}" || true
   # A probe that could not decide (skip) leaves the recorded verdict untouched.
   if [ "$now" = skip ]; then
     printf '%-28s %-46s %-8s -> %-8s %s\n' "$(basename "$repo")" "$branch" "${was:-—}" "skip" "(probe failed — fail closed)"

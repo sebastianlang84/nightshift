@@ -39,6 +39,14 @@ already_surfaced "a.py:bug:parse_config" "SIG1" || { echo "matching-sig finding 
 # known_work lists the still-open finding for its repo (before any clearing verdict).
 grep -q "a.py:bug:parse_config" <<<"$(known_work repoX)" || { echo "known_work omitted the open finding" >&2; exit 1; }
 
+# A terminal verdict closes the occurrence before it, not every future recurrence forever. Once
+# changed code produces a new row for the same identity, known_work must feed it back to Explore.
+ledger_append oldB repoX "b.py:bug:parse_config" "" "" finding "old occurrence" "" "" "" correctness "" "SIG1"
+printf '{"outcome":"verdict","item":"oldB","repo":"repoX","fingerprint":"b.py:bug:parse_config","verdict":"resolved","ts":"2026-07-12T00:00:01+00:00"}\n' >> "$TMP/state/ledger.jsonl"
+ledger_append newB repoX "b.py:bug:parse_config" "" "" finding "new occurrence" "" "" "" correctness "" "SIG2"
+grep -q "b.py:bug:parse_config" <<<"$(known_work repoX)" \
+  || { echo "known_work omitted a finding re-emitted after an older terminal verdict" >&2; exit 1; }
+
 # A human wontfix is permanent — suppressed even after the code changed (new sig) — and drops from known_work.
 printf '{"outcome":"verdict","fingerprint":"a.py:bug:parse_config","verdict":"wontfix","ts":"2026-07-12T00:00:00+00:00"}\n' >> "$TMP/state/ledger.jsonl"
 already_surfaced "a.py:bug:parse_config" "SIG2" || { echo "wontfix not permanently suppressing" >&2; exit 1; }
@@ -88,5 +96,16 @@ STATE_DIR="$BTMP/state" LEDGER="$BLEDGER" RULEBOOK="$BTMP/rulebook.yaml" \
 brun 2
 open_after="$(sed -n '/## Open findings (all nights/,/^## /p' "$BTMP/digests"/*.md | grep -c 'NOTES.md' || true)"
 [ "$open_after" -eq 0 ] || { echo "resolved finding still listed as open" >&2; exit 1; }
+
+# Change the target so ADR 0014 invalidation emits the identity again. The latest digest must carry
+# the new occurrence even though an older occurrence has a resolved verdict.
+printf 'AMBIGUOUS divergence changed after resolution\n' > "$BTMP/repo/NOTES.md"
+git -C "$BTMP/repo" -c user.name=t -c user.email=t@l add NOTES.md
+git -C "$BTMP/repo" -c user.name=t -c user.email=t@l commit -q -m changed
+git -C "$BTMP/repo" push -q origin main
+brun 3
+open_after_reemit="$(sed -n '/## Open findings (all nights/,/^## /p' "$BTMP/digests"/*.md | grep -c 'NOTES.md' || true)"
+[ "$open_after_reemit" -eq 1 ] \
+  || { echo "re-emitted finding missing from the digest after invalidation" >&2; exit 1; }
 
 echo "test-finding-identity: ok"

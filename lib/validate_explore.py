@@ -55,8 +55,16 @@ def main(repo_arg: str, verdict_arg: str, dimension: str = "") -> None:
 
     findings = verdict.get("findings")
     found = verdict.get("found")
-    if not isinstance(found, bool) or not isinstance(findings, list):
-        fail("found must be boolean and findings must be an array")
+    if not isinstance(found, bool):
+        fail("found must be boolean")
+    # The Runner still accepts the original single-finding object shape and normalises it after
+    # validation. Validate that documented compatibility shape against the same coverage contract.
+    if findings is None and found:
+        findings = [verdict]
+    elif findings is None and not found:
+        findings = []
+    if not isinstance(findings, list):
+        fail("findings must be an array")
     if found != bool(findings):
         fail("found must agree with whether findings is empty")
     if not findings and verdict.get("scope") not in (

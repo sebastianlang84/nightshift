@@ -85,8 +85,10 @@ log_model_selection() { # adapter env_var_name rulebook_value
   fi
 }
 
+repo_id() { realpath -m -- "$1" 2>/dev/null || printf '%s' "${1%/}"; }
+
 load_rulebook() {
-  local tag a b c d e f g rb_run_branches="" parsed
+  local tag a b c d e f g rb_run_branches="" parsed path
   # Capture the parser's output AND its exit status. Reading it directly via
   # `done < <(python3 …)` hides a nonzero exit from `set -euo pipefail`, so a
   # mid-stream parse error (e.g. a bad `findings:` on repo #2) silently truncated
@@ -114,7 +116,7 @@ load_rulebook() {
       claude_model)          RB_CLAUDE_MODEL="$a" ;;
       codex_model)           RB_CODEX_MODEL="$a" ;;
       dimension)             DIMENSIONS+=("$a") ;;
-      repo)                  REPO_PATHS+=("${a#path=}"); REPO_MODES+=("${b#mode=}"); REPO_BASES+=("${c#base=}"); REPO_FINDINGS+=("${d#findings=}"); REPO_DIMS+=("${e#dimensions=}"); REPO_TEST_NETS+=("${f#test_net=}"); REPO_TEST_CMDS+=("${g#test_cmd=}") ;;
+      repo)                  path="$(repo_id "${a#path=}")"; REPO_PATHS+=("$path"); REPO_MODES+=("${b#mode=}"); REPO_BASES+=("${c#base=}"); REPO_FINDINGS+=("${d#findings=}"); REPO_DIMS+=("${e#dimensions=}"); REPO_TEST_NETS+=("${f#test_net=}"); REPO_TEST_CMDS+=("${g#test_cmd=}") ;;
     esac
   done <<< "$parsed"
   MAX_FINDINGS="${MAX_FINDINGS:-1}"
@@ -271,18 +273,24 @@ already_surfaced() { _suppressed_for '["finding"]' "$@"; }                      
 known_work() { # repo -> compact "fingerprint — summary" list of STILL-OPEN items for the explore prompt
   local repo="$1"
   [ -f "$LEDGER" ] || return 0
-  # Latest verdict per fingerprint, then keep findings/open-branches whose verdict is NOT a terminal
-  # clear (merged/resolved/wontfix/dropped). Cap the list so the prompt stays bounded.
+  # The ledger is an event stream: a terminal verdict closes prior work, while a later `open` or a
+  # newly emitted invalidated finding reopens it. `wontfix` alone is permanent (ADR 0014). Attach the
+  # append index instead of sorting timestamps: DST offsets and copied legacy rows need not sort in
+  # event order. Cap the final prompt block so it stays bounded.
   jq -rs --arg r "$repo" '
-    . as $rows
+    to_entries | map(.value + {__order:.key}) as $rows
     | ([ $rows[] | select(.outcome=="verdict" and .fingerprint!=null)
          | . as $verdict
          | ([ $rows[] | select(.fingerprint==$verdict.fingerprint and .repo!=null) | .repo] | unique) as $owners
-         | select(.repo==$r or (.repo==null and $owners==[$r])) ] | group_by(.fingerprint)
-      | map(sort_by(.ts)|last) | map({key:.fingerprint, value:.verdict}) | from_entries) as $v
+         | select(.repo==$r or (.repo==null and $owners==[$r])) ]) as $verdicts
+    | ($verdicts | map(select(.verdict=="wontfix") | .fingerprint) | unique) as $ignored
+    | ($verdicts | group_by(.fingerprint) | map(max_by(.__order))
+       | map({key:.fingerprint, value:.}) | from_entries) as $v
     | [$rows[] | select(.repo==$r and (.outcome=="finding" or .outcome=="shipped") and .fingerprint!=null)]
-    | group_by(.fingerprint) | map(sort_by(.ts)|last)
-    | map(select((($v[.fingerprint] // "") | (. == "merged" or . == "resolved" or . == "wontfix" or . == "dropped")) | not))
+    | group_by(.fingerprint) | map(max_by(.__order))
+    | map(. as $work | select(($ignored | index($work.fingerprint)) == null))
+    | map(. as $work | select(($v[$work.fingerprint].verdict // "") == "open"
+                             or (($v[$work.fingerprint].__order // -1) < $work.__order)))
     | .[0:40] | map("- " + .fingerprint + " — " + (.summary // "")) | join("\n")' \
     "$LEDGER" 2>/dev/null || true
 }
@@ -1551,7 +1559,7 @@ _test_robind() { # path -> append a read-only bind, refusing anything that would
   # `/`, `/home`, `$HOME` — a bind of any ancestor of $HOME hands the suite ~/.ssh and the gh token
   # back, i.e. exactly the reach this sandbox exists to remove. Refuse it out loud; a silently
   # widened sandbox is worse than none, because the ADR says it is closed.
-  if [ -n "${HOME:-}" ] && { [ "$rp" = "$HOME" ] || [ "${HOME#"$rp"/}" != "$HOME" ]; }; then
+  if [ "$rp" = / ] || { [ -n "${HOME:-}" ] && { [ "$rp" = "$HOME" ] || [ "${HOME#"$rp"/}" != "$HOME" ]; }; }; then
     log "  test sandbox: REFUSING read-only bind $p — it contains \$HOME"
     return 0
   fi
@@ -1796,7 +1804,7 @@ assert_worktree_git_sane() { # repo worktree -> 0 sane, 1 tampered (and says so)
   return 1
 }
 
-run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 the gate could not run at all
+run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 blocked, 3 tampered
   local repo="$1" wt="$2" id="$3" tcmd net trc=0 sbhome persist=0
   tcmd=$(repo_test_cmd "$repo")
   if [ -z "$tcmd" ]; then
@@ -1921,7 +1929,7 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 the gate co
       "Refusing the item: the next git command would read a gitdir the suite chose." >"$id/tests.log"
     log "  $(basename "$repo"): .git POINTER TAMPERED — refusing the item (see $id/tests.log)"
     stop_egress
-    return 2
+    return 3
   fi
 
   if [ "$trc" -ne 0 ]; then
@@ -2398,19 +2406,23 @@ write_digest() { # made open status [advice]
     echo
     echo "## Considered but not shipped"
     [ -f "$LEDGER" ] && jq -r --arg n "$NIGHT" \
-      'select(.night==$n and (.outcome=="abandoned" or .outcome=="push-failed" or .outcome=="commit-failed" or .outcome=="tests-failed")) | "- " + .repo + " — " + .outcome + ": " + (.summary // .fingerprint)' \
+      'select(.night==$n and (.outcome=="abandoned" or .outcome=="push-failed" or .outcome=="commit-failed" or .outcome=="tests-failed" or .outcome=="gate-blocked" or .outcome=="worktree-tampered")) | "- " + .repo + " — " + .outcome + ": " + (.summary // .fingerprint)' \
       "$LEDGER" 2>/dev/null || true
     echo
-    # Carry-forward (ADR 0014): every surfaced finding, across ALL nights, that a human has not yet
-    # cleared (merged/resolved/wontfix/dropped) — so an unresolved TODO stays visible until acted on.
+    # Carry-forward (ADR 0014): every surfaced finding whose latest lifecycle event leaves it open.
+    # A new finding after resolved/dropped/merged is a reopened identity; wontfix remains permanent.
     echo "## Open findings (all nights — awaiting a human)"
     [ -f "$LEDGER" ] && jq -rs '
-      ([.[]|select(.outcome=="verdict" and .fingerprint!=null)] | group_by([.repo, .fingerprint])
-        | map(sort_by(.ts)|last)
-        | map({key:([.repo, .fingerprint] | tojson), value:.verdict}) | from_entries) as $v
-      | [.[]|select(.outcome=="finding" and .fingerprint!=null)]
-      | group_by([.repo, .fingerprint]) | map(sort_by(.ts)|last)
-      | map(select((($v[([.repo, .fingerprint] | tojson)] // "") | (. == "merged" or . == "resolved" or . == "wontfix" or . == "dropped")) | not))
+      to_entries | map(.value + {__order:.key}) as $rows
+      | ([$rows[]|select(.outcome=="verdict" and .repo!=null and .fingerprint!=null)]) as $verdicts
+      | ($verdicts | map(select(.verdict=="wontfix") | [.repo,.fingerprint] | tojson) | unique) as $ignored
+      | ($verdicts | group_by([.repo,.fingerprint]) | map(max_by(.__order))
+         | map({key:([.repo,.fingerprint] | tojson), value:.}) | from_entries) as $v
+      | [$rows[]|select(.outcome=="finding" and .repo!=null and .fingerprint!=null)]
+      | group_by([.repo, .fingerprint]) | map(max_by(.__order))
+      | map(. as $work | ([.repo,.fingerprint] | tojson) as $key
+          | select(($ignored | index($key)) == null)
+          | select(($v[$key].verdict // "") == "open" or (($v[$key].__order // -1) < $work.__order)))
       | map("- " + .repo + " — " + (.summary // .fingerprint) + "  (" + .fingerprint + ", since " + .night + ")")
       | join("\n")' "$LEDGER" 2>/dev/null || true
     [ -n "$advice" ] && printf '%s\n' "$advice"
@@ -2730,7 +2742,7 @@ main() {
         # The Review stage stages the worktree (`git add -A`, N3) to show the reviewer exactly what
         # finalize will commit — unsandboxed, and BEFORE the ship gate exists to check anything. So
         # a `.git` the Fix stage rewrote detonates here, earlier than any gate could catch it.
-        if ! assert_worktree_git_sane "$repo" "$wt"; then gate=fail; verdict=revise; break; fi
+        if ! assert_worktree_git_sane "$repo" "$wt"; then gate=tampered; verdict=revise; break; fi
         # Record the exact tree object the reviewer is about to judge. THIS object, and nothing
         # assembled later, is what finalize commits (ADR 0027): "the reviewer saw what shipped"
         # stops being a property that holds as long as nothing touches the worktree in between and
@@ -2748,10 +2760,13 @@ main() {
           # back on the next turn. Only running out of iterations refuses the item.
           grc=0; run_test_gate "$repo" "$wt" "$fd" || grc=$?
           if [ "$grc" -eq 0 ]; then gate=pass; break; fi
-          gate=fail; verdict=revise
-          # rc=2 is "the gate could not run" (no sandbox, ADR 0026) — a host problem, not a
-          # regression, so there is nothing for another fix iteration to repair. Refuse now.
-          [ "$grc" -eq 2 ] && break
+          verdict=revise
+          # An unavailable/non-hermetic gate is an operational block; pointer tampering is a
+          # safety event. Neither is evidence that the repo's tests were red, and neither can be
+          # repaired by another Fix iteration.
+          if [ "$grc" -eq 2 ]; then gate=blocked; break; fi
+          if [ "$grc" -eq 3 ]; then gate=tampered; break; fi
+          gate=fail
           log "  $(basename "$repo"): gate overrules ship — fix attempt $iter/$MAX_FIX_ITER broke the suite"
         fi
       done
@@ -2761,6 +2776,12 @@ main() {
           made=$((made + 1)); open=$((open + 1)); progress=1; ship_progress=1
           log "  $(basename "$repo"): shipped -> $b"
         fi
+      elif [ "$gate" = tampered ]; then
+        ledger_append "$(basename "$fd")" "$repo" "$fp" "" "" "worktree-tampered" "$summary" "" "" "" "$dim" "" "$csig"
+        log "  $(basename "$repo"): worktree tampering refused — not shipped ($fp)"
+      elif [ "$gate" = blocked ]; then
+        ledger_append "$(basename "$fd")" "$repo" "$fp" "" "" "gate-blocked" "$summary" "" "" "" "$dim" "" "$csig"
+        log "  $(basename "$repo"): test gate was unavailable or non-hermetic — not shipped ($fp)"
       elif [ "$gate" = fail ]; then
         # Distinct from `abandoned`: the reviewer WANTED to ship and the suite said no, every time.
         # Recorded as a fact about this attempt, not a verdict on the defect — the finding stays

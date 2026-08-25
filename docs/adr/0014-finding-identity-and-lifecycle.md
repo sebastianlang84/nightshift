@@ -55,7 +55,9 @@ human clears them.
 **5. Invalidation via content signature.** Each finding/shipped/abandoned row stores `code_sig` — a
 hash of its target files' blob shas at HEAD. When the underlying code changes, the signature changes
 and the identity becomes eligible again (suppression requires a matching or absent signature). A
-`wontfix` is the sole exception: it suppresses permanently, regardless of later code change.
+`wontfix` is the sole exception: it suppresses permanently, regardless of later code change. Ledger
+readers therefore apply verdicts in append order: a terminal verdict closes the occurrence before
+it, while a later `open` verdict or newly emitted invalidated finding reopens the identity.
 
 ## Consequences
 

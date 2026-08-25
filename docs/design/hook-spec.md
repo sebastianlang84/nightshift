@@ -29,10 +29,12 @@ line:
 - `<remote ref>` must match `refs/heads/<branch_prefix>*` (default `refs/heads/nightshift/*`) → else **reject**
 - `<local sha>` all-zeros (a delete) → **reject**
 - `<remote ref>` under `refs/tags/*` → **reject** (no releases)
+- non-zero `<remote sha>` is not an ancestor of `<local sha>` → **reject** (no force update)
 
 Because git resolves everything first, this catches every bypass at once: `+main` presents
 `refs/heads/main` → reject; `:branch` presents a delete → reject; `--all`/`--mirror` present
-main/develop → reject.
+main/develop → reject. A forced rewrite inside the allowed namespace still presents its old and new
+object ids; the ancestry check rejects it.
 
 **Installation:** the Fix stage provisions the worktree and points `core.hooksPath` at a
 nightshift-owned hooks directory, so the `pre-push` hook is guaranteed present (it is not part of a
@@ -61,6 +63,10 @@ those tools accept **absolute paths** — so without a check the agent could edi
 symlinks in existing prefixes), and denies anything not equal to or strictly beneath the worktree
 root. The root is the Runner-injected `NIGHTSHIFT_WORKTREE` (primary), else the payload `.cwd`, else
 `$PWD`. Containment is trailing-slash-safe (a prefix-sibling like `…/worktree-evil` is *not* inside).
+The exceptions inside the root are `.claude/settings.json`, `.claude/settings.local.json`, and
+`.mcp.json`: Claude loads them as executable hook or MCP-server configuration for the next stage, so
+Fix may not create or edit them. A repository that intentionally changes those files needs human
+handling.
 
 **The denial itself is built with `jq`,** not string-interpolated: its reason quotes the resolved
 target, i.e. an agent-supplied path, and a quote/backslash/control character in that path would

@@ -19,6 +19,15 @@ printf 'x\n' > "$TMP/repo/f.txt"
 $GC -C "$TMP/repo" add -A && $GC -C "$TMP/repo" commit -q -m initial
 git -C "$TMP/repo" push -q -u origin main
 
+# A second repo deliberately carries the SAME branch name as repo 1. Branch refs are repo-local;
+# the fleet ledger must not treat repo 1's row as ownership of repo 2's ref.
+git init -q --bare "$TMP/remote2.git"
+git init -q -b main "$TMP/repo2"
+git -C "$TMP/repo2" remote add origin "$TMP/remote2.git"
+printf 'second\n' > "$TMP/repo2/f.txt"
+$GC -C "$TMP/repo2" add -A && $GC -C "$TMP/repo2" commit -q -m initial
+git -C "$TMP/repo2" push -q -u origin main
+
 mkbranch() { # name
   git -C "$TMP/repo" checkout -q -b "$1" main
   printf '%s\n' "$1" >> "$TMP/repo/f.txt"
@@ -28,6 +37,10 @@ mkbranch() { # name
 }
 KNOWN_SHA="$(mkbranch nightshift/known)"
 mkbranch nightshift/orphan >/dev/null
+git -C "$TMP/repo2" checkout -q -b nightshift/known main
+printf 'same branch name, different repo\n' >> "$TMP/repo2/f.txt"
+$GC -C "$TMP/repo2" commit -q -am second
+git -C "$TMP/repo2" push -q -u origin nightshift/known
 
 # only the 'known' branch gets a shipped ledger row
 jq -nc --arg repo "$TMP/repo" --arg sha "$KNOWN_SHA" \
@@ -43,7 +56,10 @@ recon:
 dimensions:
   - docs
 repos:
-  - path: $TMP/repo
+  - path: $TMP/repo/
+    mode: branch-fix
+    test_cmd: true
+  - path: $TMP/repo2
     mode: branch-fix
     test_cmd: true
 EOF
@@ -56,12 +72,17 @@ grep -q "orphan nightshift/\* branches on origin" "$TMP/out" \
 # the orphan section (from its header to end) must list the orphan and not the known branch
 sect="$(sed -n '/orphan nightshift.* branches on origin/,$p' "$TMP/out")"
 grep -q "nightshift/orphan" <<<"$sect" || { echo "orphan branch not reported" >&2; cat "$TMP/out" >&2; exit 1; }
-grep -q "nightshift/known"  <<<"$sect" && { echo "known branch wrongly reported as orphan" >&2; cat "$TMP/out" >&2; exit 1; }
+known_lines="$(grep -c 'nightshift/known' <<<"$sect" || true)"
+[ "$known_lines" = 1 ] && grep -qE '^  repo2 +nightshift/known ' <<<"$sect" \
+  || { echo "repo-local orphan scoping is wrong for the same-named branch" >&2; cat "$TMP/out" >&2; exit 1; }
 
 # --- ADR 0018: the orphan is ADOPTED — a synthetic shipped row now exists for it ---------------
 grep -q "(adopted -> shipped)" "$TMP/out" || { echo "orphan not marked adopted" >&2; cat "$TMP/out" >&2; exit 1; }
 adopted="$(jq -sc '[.[]|select(.branch=="nightshift/orphan" and .outcome=="shipped" and .adopted==true)]|length' "$LEDGER")"
 [ "$adopted" = 1 ] || { echo "expected exactly 1 adopted shipped row for the orphan, got $adopted" >&2; exit 1; }
+same_name_adopted="$(jq -sc --arg r "$TMP/repo2" '[.[]|select(.repo==$r and .branch=="nightshift/known" and .outcome=="shipped" and .adopted==true)]|length' "$LEDGER")"
+[ "$same_name_adopted" = 1 ] \
+  || { echo "same-named branch in repo2 was hidden by repo1's ledger row" >&2; exit 1; }
 
 # idempotent: a second harvest must NOT adopt again (the branch is now in the known set)
 STATE_DIR="$TMP/state" LEDGER="$LEDGER" RULEBOOK="$TMP/rulebook.yaml" \
@@ -70,6 +91,18 @@ again="$(jq -sc '[.[]|select(.branch=="nightshift/orphan" and .adopted==true)]|l
 [ "$again" = 1 ] || { echo "adoption not idempotent: $again adopted rows after 2nd run" >&2; exit 1; }
 sect2="$(sed -n '/orphan nightshift.* branches on origin/,$p' "$TMP/out2")"
 grep -q "nightshift/orphan" <<<"$sect2" && { echo "orphan re-reported after adoption (should be known)" >&2; cat "$TMP/out2" >&2; exit 1; }
+
+# A verdict for repo2's same-named branch must not become repo1's prior state. If the verdict cache
+# is keyed by branch alone, harvest appends a bogus `open` verdict for repo1 here.
+jq -nc --arg r "$TMP/repo2" '{night:"2026-07-13",item:"repo2-verdict",repo:$r,
+  fingerprint:null,branch:"nightshift/known",sha:null,outcome:"verdict",verdict:"dropped",
+  source:"reconcile",ts:"2026-07-13T03:00:00+00:00",schema_version:2}' >> "$LEDGER"
+STATE_DIR="$TMP/state" LEDGER="$LEDGER" RULEBOOK="$TMP/rulebook.yaml" \
+  bash "$ROOT/bin/harvest.sh" > "$TMP/out-scope" 2>&1 \
+  || { echo "scoped-verdict harvest failed" >&2; cat "$TMP/out-scope" >&2; exit 1; }
+repo1_verdicts="$(jq -sc --arg r "$TMP/repo" '[.[]|select(.repo==$r and .branch=="nightshift/known" and .outcome=="verdict")]|length' "$LEDGER")"
+[ "$repo1_verdicts" = 0 ] \
+  || { echo "repo2 verdict leaked into repo1's same-named branch" >&2; cat "$TMP/out-scope" >&2; exit 1; }
 
 # --dry-run reports but writes nothing
 mkbranch nightshift/orphan2 >/dev/null

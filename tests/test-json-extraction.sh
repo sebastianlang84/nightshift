@@ -44,6 +44,23 @@ grep -q 'json-repair: swapped 1' "$TMP/err" || {
   echo "test-json-extraction: a repaired verdict was returned silently" >&2; exit 1;
 }
 
+# The same repair must work when the mismatched closer is the outermost one. The first scan needs
+# to return that complete malformed candidate so the repair pass gets a chance to correct it.
+printf '%s\n' '{"found":false,"findings":[]]' |
+  python3 "$ROOT/lib/extract_json.py" > "$TMP/outer-swapped" 2> "$TMP/err"
+jq -e '.found == false and .findings == []' "$TMP/outer-swapped" >/dev/null
+grep -q 'json-repair: swapped 1' "$TMP/err"
+
+# A mismatched outer closer followed by another object member is not an end marker. Repairing only
+# the prefix would silently drop the remaining fields and turn a partial stage verdict into valid
+# JSON, so this shape must stay fail-closed.
+if printf '%s\n' '{"verdict":"ship"],"caveats":["not reviewed"]}' |
+  python3 "$ROOT/lib/extract_json.py" > "$TMP/truncated-prefix" 2> "$TMP/err"; then
+  echo "test-json-extraction: repair silently truncated a continued object" >&2
+  exit 1
+fi
+[ ! -s "$TMP/truncated-prefix" ]
+
 # Repair has a ceiling. Past it the output is garbled enough that "the model meant this" is a guess.
 if printf '%s\n' '{"a":{"b":{"c":{"d":1],"e":2],"f":3],"g":4]}' |
   python3 "$ROOT/lib/extract_json.py" > "$TMP/garbled" 2> "$TMP/err"; then

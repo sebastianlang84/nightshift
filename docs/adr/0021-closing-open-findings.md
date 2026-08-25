@@ -55,8 +55,9 @@ re-enters the queue exactly when its code moves again. That, plus `max_verifies_
 5, `0` disables the stage entirely), bounds what closure can cost per night.
 
 **5. A human front door for what the machine will not decide.** `harvest.sh todos` lists open
-findings numbered, with age and probe state; `harvest.sh close <n> [reason]` records the manual
-`resolved`. `unknown` items — including every pre-0014 row — are closed this way or not at all.
+findings with a stable item id, age and probe state; `harvest.sh close <item> [reason]` records the
+manual `resolved`. Numeric selectors are refused because a concurrent probe can reorder them between
+commands. `unknown` items — including every pre-0014 row — are closed this way or not at all.
 
 ## Consequences
 

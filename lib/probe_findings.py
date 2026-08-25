@@ -61,34 +61,56 @@ def read_ledger(path: str) -> list[dict]:
 
 
 def open_findings(rows: list[dict]) -> list[dict]:
-    """`finding` rows with no TERMINAL verdict, newest row per identity.
+    """Return the newest currently-open `finding` row per identity.
 
-    A verdict matches its finding by `item`, or — for a verdict recorded against the identity
-    rather than the work item — by fingerprint within the same repo. Fingerprints are only
-    repo-unique (the same path exists in several repos), so the repo must match too."""
-    cleared_items: set[str] = set()
-    cleared_fps: set[tuple[str, str]] = set()
-    for r in rows:
-        if r.get("outcome") != "verdict" or r.get("verdict") not in TERMINAL:
-            continue
-        item = r.get("item")
-        if isinstance(item, str) and item:
-            cleared_items.add(item)
-        fp, repo = r.get("fingerprint"), r.get("repo")
-        if isinstance(fp, str) and fp and isinstance(repo, str) and repo:
-            cleared_fps.add((repo, fp))
+    The ledger is an event stream, so order matters. A terminal verdict closes the finding that
+    precedes it; a later `open` verdict or a newly emitted finding reopens the identity. The latter
+    is ADR 0014 invalidation in action: changed target code makes a resolved identity eligible again.
+    `wontfix` alone stays permanent.
 
-    out: list[dict] = []
-    for r in rows:
-        if r.get("outcome") != "finding":
+    A verdict matches by repo-scoped fingerprint where available, else by its exact item id for
+    legacy rows. Fingerprints are not globally unique across repos."""
+    states: dict[tuple[str, ...], dict[str, object]] = {}
+    item_keys: dict[str, tuple[str, ...]] = {}
+
+    for order, row in enumerate(rows):
+        outcome = row.get("outcome")
+        item = str(row.get("item") or "")
+        repo = str(row.get("repo") or "")
+        fingerprint = str(row.get("fingerprint") or "")
+        key: tuple[str, ...] | None = None
+        if repo and fingerprint:
+            key = ("fingerprint", repo, fingerprint)
+        elif item:
+            key = item_keys.get(item, ("item", item))
+
+        if outcome == "finding":
+            if key is None:
+                continue
+            if item:
+                item_keys[item] = key
+            state = states.setdefault(key, {"open": False, "wontfix": False})
+            if not state["wontfix"]:
+                state.update(row=row, open=True, order=order)
             continue
-        item = str(r.get("item") or "")
-        fp = str(r.get("fingerprint") or "")
-        repo = str(r.get("repo") or "")
-        if item in cleared_items or (repo, fp) in cleared_fps:
+
+        if outcome != "verdict":
             continue
-        out.append(r)
-    return out
+        if item and item in item_keys:
+            key = item_keys[item]
+        if key is None or key not in states:
+            continue
+        state = states[key]
+        verdict = row.get("verdict")
+        if verdict == "wontfix":
+            state.update(open=False, wontfix=True)
+        elif verdict in TERMINAL:
+            state["open"] = False
+        elif verdict == "open" and not state["wontfix"]:
+            state["open"] = True
+
+    active = (state for state in states.values() if state.get("open") and state.get("row"))
+    return [state["row"] for state in sorted(active, key=lambda state: int(state["order"]))]
 
 
 def targets(fingerprint: str) -> list[str]:

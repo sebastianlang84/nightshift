@@ -49,6 +49,8 @@ ledgers diverge silently: duplicate branches, broken caps and rotation). See
    rather than silently servicing a partial fleet. A key it does not recognise counts as malformed:
    every section takes a closed set of keys, so a typo (`max_open_branchs:`, `test-cmd:`) fails the
    parse by name instead of dropping that knob and running the night on the default you never wrote.
+   `repos:` must contain at least one entry with an absolute, non-empty `path`; an empty fleet aborts
+   instead of producing a false-clean no-op night.
 
    **Every `branch-fix` repo needs a `test_cmd`, and the parse aborts without one**
    ([ADR 0022](adr/0022-a-repos-own-tests-gate-the-ship.md),
@@ -314,8 +316,8 @@ never push outside `nightshift/*` (see [`docs/design/hook-spec.md`](design/hook-
   branch**, so the merge/delete flow above structurally cannot reach it; it is closed from the
   numbered list instead:
   ```
-  bin/harvest.sh todos              # open findings, oldest first, numbered, with freshness state
-  bin/harvest.sh close <#> [reason] # record `resolved` for one of them (quote a multi-word reason)
+  bin/harvest.sh todos                 # open findings, oldest first, with stable ITEM and freshness
+  bin/harvest.sh close <item> [reason] # record `resolved` (quote a multi-word reason)
   ```
   The `STATE` column comes from the freshness probe that runs at the end of every harvest — it
   recomputes each finding's content signature and never invents a verdict:
@@ -328,8 +330,8 @@ never push outside `nightshift/*` (see [`docs/design/hook-spec.md`](design/hook-
 
   Left open, a finding repeats in every digest and keeps consuming Explore prompt budget, so this is
   the routine that keeps the backlog honest. `bin/harvest.sh probe` refreshes the snapshot on demand
-  and prints it by state and fingerprint, reconciling nothing — but `close <#>` always counts against
-  the numbering `todos` prints, so run `todos` when you mean to act. Your verdict outranks the
+  and prints it by state and fingerprint, reconciling nothing. Numeric selectors are refused because
+  another harvest can reorder them between commands; copy the stable `ITEM` from `todos`. Your verdict outranks the
   machine's ([ADR 0007](adr/0007-human-verdicts-outrank-machine-reconcile.md),
   [ADR 0021](adr/0021-closing-open-findings.md)).
 - **Independent branch review (opt-in):** set `NIGHTSHIFT_BRANCH_REVIEW=1` to have a fresh read-only

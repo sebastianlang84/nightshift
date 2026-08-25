@@ -7,7 +7,7 @@ set -euo pipefail
 #  - a terminal verdict removes the finding from the snapshot entirely;
 #  - a verify result survives a re-probe only while its signature still holds;
 #  - the snapshot's `dimension` is the explicit lens or blank — never the fingerprint's type;
-#  - `todos` numbers the open findings and `close <n>` records a manual `resolved` for that one.
+#  - `todos` exposes stable item ids and `close <item>` records a manual `resolved` for that one.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
@@ -77,18 +77,41 @@ probe
 [ "$(jq -r '.items[]|select(.item=="item-drift")|has("verify")' "$SNAP")" = false ] \
   || { echo "verify result made against older code must be dropped" >&2; exit 1; }
 
-# --- harvest front door: todos numbering, close records a manual resolved -------------
+# --- harvest front door: todos exposes a stable id; close records a manual resolved ------------
 run() { STATE_DIR="$TMP" LEDGER="$LEDGER" PROBE_SNAPSHOT="$SNAP" RULEBOOK="$ROOT/rulebook.example.yaml" \
         bash "$ROOT/bin/harvest.sh" "$@"; }
 rows() { run todos | grep -cE '^[0-9]+ +[0-9?]+d'; }   # data rows only, not the trailing count line
 [ "$(rows)" = 5 ] || { echo "todos must list all five open findings, listed $(rows)" >&2; exit 1; }
-# Findings share a ts, so `close 1` may land on any of them — assert on what it reports, not on order.
-closed=$(run close 1 "fixed by hand" | sed -n 's/.*\[item=\([^ ]*\).*/\1/p')
+# A row number can change if another harvest refreshes the snapshot between commands. Refuse it;
+# the item id printed in the same row is the mutation-safe selector.
+if run close 1 "fixed by hand" >"$TMP/close-out" 2>"$TMP/close-err"; then
+  echo "numeric close selector was accepted" >&2; exit 1
+fi
+grep -q 'numeric close selectors are unsafe' "$TMP/close-err"
+closed=$(run todos | awk 'NR==2 {print $6}')
+[ -n "$closed" ] || { echo "todos did not print a stable ITEM column" >&2; exit 1; }
+run close "$closed" "fixed by hand" >"$TMP/close-out"
+closed=$(sed -n 's/.*\[item=\([^ ]*\).*/\1/p' "$TMP/close-out")
 [ -n "$closed" ] || { echo "close did not report the item it acted on" >&2; exit 1; }
 jq -es --arg i "$closed" 'any(.[]; .outcome=="verdict" and .item==$i and .verdict=="resolved" and .source=="manual")' \
   "$LEDGER" >/dev/null || { echo "close must append a manual resolved verdict" >&2; exit 1; }
 [ "$(jq --arg i "$closed" '[.items[]|select(.item==$i)]|length' "$SNAP")" = 0 ] \
   || { echo "a closed finding must leave the snapshot" >&2; exit 1; }
 [ "$(rows)" = 4 ] || { echo "todos must drop the closed finding" >&2; exit 1; }
+
+# `open` is a real lifecycle event, not decoration: it must supersede the earlier terminal verdict.
+run verdict "$closed" open "reopened by hand" >/dev/null
+[ "$(rows)" = 5 ] || { echo "a later open verdict must restore the finding" >&2; exit 1; }
+run close "$closed" "closed again" >/dev/null
+[ "$(rows)" = 4 ] || { echo "the reopened finding must be closable again" >&2; exit 1; }
+
+# ADR 0014 invalidation can emit the same identity again after its target code changes. The old
+# terminal verdict closes only the old occurrence; otherwise the new TODO is silently lost forever.
+run close item-drift "old occurrence resolved" >/dev/null
+finding "drift.md:bug:anchor" "$(sig_of drift.md)" item-drift-reopened
+probe
+[ "$(state_of item-drift-reopened)" = untouched ] \
+  || { echo "a new finding after an old terminal verdict must reopen the identity" >&2; exit 1; }
+[ "$(rows)" = 4 ] || { echo "the reopened identity must appear in todos" >&2; exit 1; }
 
 echo "test-finding-probe: ok"

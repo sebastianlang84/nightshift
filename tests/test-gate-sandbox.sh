@@ -169,6 +169,11 @@ grep -q 'sandbox DISABLED' <<<"$out" || { echo "$out" >&2; fail "the disabled sa
 out="$(gate 'ls ~/.ssh /home 2>&1; echo done' NIGHTSHIFT_TEST_SANDBOX_ROBIND="${HOME:-/home}")"
 grep -q 'REFUSING read-only bind' <<<"$out" \
   || { echo "$out" >&2; fail "a read-only bind of \$HOME was accepted — the sandbox can be silently widened"; }
+# `/` is the special ancestor that the string-prefix check cannot recognise (`//` is not a HOME
+# prefix). Accepting it restores every secret path while the run still claims to be sandboxed.
+out="$(gate 'echo root-bind-checked' NIGHTSHIFT_TEST_SANDBOX_ROBIND=/)"
+grep -q 'REFUSING read-only bind /' <<<"$out" \
+  || { echo "$out" >&2; fail "a read-only bind of / was accepted — the entire host is visible"; }
 # …while a legitimate bind outside /usr still arrives.
 mkdir -p "$TMP/dep"; echo "dependency" > "$TMP/dep/marker"
 out="$(gate "cat '$TMP/dep/marker'" NIGHTSHIFT_TEST_SANDBOX_ROBIND="$TMP/dep")"
@@ -284,10 +289,10 @@ grep -qF 'gitdir: '"$TREPO"'/.git/worktrees/trap-a' "$TMP/trap-a/.git" \
 # (b) unsandboxed opt-out: the write lands, so detection must refuse the item.
 git -C "$TREPO" worktree add -q --detach "$TMP/trap-b"
 out="$(gate "$(trap_attack "$TMP/trap-b" "$TMP/canary-b")" WT="$TMP/trap-b" REPO="$TREPO" NIGHTSHIFT_TEST_SANDBOX=none)"
-grep -q 'GATE_RC=2' <<<"$out" \
-  || { echo "$out" >&2; fail "a rewritten .git pointer did not refuse the item (rc=2) — finalize would detonate it"; }
+grep -q 'GATE_RC=3' <<<"$out" \
+  || { echo "$out" >&2; fail "a rewritten .git pointer was not classified as tampering (rc=3)"; }
 
-# And rc=2 is the status that keeps finalize away: it is NOT rc=1, which loops back into Fix and
+# And rc=3 is the status that keeps finalize away: it is NOT rc=1, which loops back into Fix and
 # would simply run the hostile command again.
 grep -q 'GATE_RC=1' <<<"$out" && fail "the tamper was classified as a red suite — Fix would re-run it"
 

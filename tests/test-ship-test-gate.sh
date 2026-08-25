@@ -10,7 +10,7 @@ set -euo pipefail
 #   fails every iteration -> ledger `tests-failed`, no branch anywhere, the finding stays unlatched
 #   passes -> ships exactly as before
 #   absent on a branch-fix repo -> the run ABORTS (ADR 0026; ADR 0022 §4 used to ship it ungated)
-#   unsandboxable -> refused without retrying, because that is a host problem (ADR 0026)
+#   unsandboxable -> `gate-blocked`, without retrying, because that is a host problem (ADR 0026)
 # Throwing the fix away on the first red suite was the wrong reaction: the Fix stage caused the
 # breakage, is still in the loop with budget left, and is the thing best placed to repair it.
 
@@ -208,8 +208,11 @@ grep -q "no sandbox (bwrap missing)" "$d/err" "$d/out" \
 if [ -f "$LEDGER" ] && jq -e 'select(.outcome=="shipped")' "$LEDGER" >/dev/null 2>&1; then
   jq -c . "$LEDGER" >&2; fail "a branch shipped although the gate could not be sandboxed"
 fi
-jq -e 'select(.outcome=="tests-failed")' "$LEDGER" >/dev/null 2>&1 \
-  || { jq -c . "$LEDGER" >&2; fail "an unsandboxable gate must be recorded as tests-failed"; }
+jq -e 'select(.outcome=="gate-blocked")' "$LEDGER" >/dev/null 2>&1 \
+  || { jq -c . "$LEDGER" >&2; fail "an unsandboxable gate must be recorded as gate-blocked"; }
+if jq -e 'select(.outcome=="tests-failed")' "$LEDGER" >/dev/null 2>&1; then
+  jq -c . "$LEDGER" >&2; fail "an unrunnable gate was misreported as a red suite"
+fi
 [ "$(grep -c "no sandbox (bwrap missing)" "$d/err")" -eq 1 ] \
   || { cat "$d/err" >&2; fail "the unrunnable gate was retried — a host problem is not a revision request"; }
 if git -C "$d/remote.git" for-each-ref --format='%(refname)' 'refs/heads/nightshift/*' | grep -q .; then

@@ -82,6 +82,8 @@ fi
 # legitimately refreshed lands here too and the operator has to know why the finding stalled.
 grep -q "MODIFIED the worktree" "$d/err" "$d/out" \
   || { cat "$d/err" >&2; fail "the run refused without saying the suite had modified the worktree"; }
+jq -e 'select(.outcome=="gate-blocked")' "$LEDGER" >/dev/null 2>&1 \
+  || { jq -c . "$LEDGER" >&2; fail "a non-hermetic gate must be recorded as gate-blocked"; }
 # And it must not have burned every fix iteration re-running the same non-hermetic suite.
 [ "$(grep -c "MODIFIED the worktree" "$d/err")" -le 1 ] \
   || { cat "$d/err" >&2; fail "the refusal was retried — a non-hermetic suite is not a regression Fix can repair"; }
