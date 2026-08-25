@@ -20,6 +20,12 @@ on:
   # to get CI onto a commit is to push another one on top of it.
   workflow_dispatch:
 
+# Keep the workflow default explicit instead of inheriting a mutable repository setting. The
+# current job only checks out code and runs local commands, so it needs no token scope beyond
+# `contents: read`. A future job can still override this under its own `permissions:` key.
+permissions:
+  contents: read
+
 jobs:
   suite:
     runs-on: ubuntu-latest
