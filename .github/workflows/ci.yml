@@ -20,6 +20,19 @@ on:
   # to get CI onto a commit is to push another one on top of it.
   workflow_dispatch:
 
+# The least privilege this job can run on, declared rather than inherited. With no `permissions:`
+# key a workflow's GITHUB_TOKEN gets whatever the repository/organization default grants, and that
+# default may be "Read and write permissions" — a setting in a web UI, not in this tree, which can
+# change without a commit. At the top level this sets the ceiling for every job in the file.
+#
+# It matters here more than in an ordinary repo: `pull_request` above carries no branch filter, so
+# this job runs the `tests/*.sh` of `nightshift/*` branches, which the Fix stage wrote. Nothing
+# below needs write — no step calls the API, pushes a ref, publishes, or writes a check or comment;
+# checkout only reads. A branch from a fork would already get a read-only token, but a nightshift
+# branch is pushed to this repo and is not a fork, so it would otherwise inherit the default.
+permissions:
+  contents: read
+
 jobs:
   suite:
     runs-on: ubuntu-latest
