@@ -8,18 +8,34 @@
 
 ```sh
 bin/setup-sandbox.sh                    # throwaway target repo + local bare remote + a planted typo
-bin/nightshift.sh                       # one night, mock agent (default)
-NIGHTSHIFT_AGENT=claude bin/nightshift.sh   # one night, real claude -p stages
-NIGHTSHIFT_AGENT=codex NIGHTSHIFT_CODEX_MODEL=<model> NIGHTSHIFT_CODEX_REASONING_EFFORT=high bin/nightshift.sh
+SB=$PWD/sandbox                         # or the absolute dir you passed to setup-sandbox.sh
+
+# Point the run at the sandbox. setup-sandbox.sh writes its rulebook INTO $SB and deliberately
+# does NOT touch your live one, so these variables are what makes a night hit the sandbox: without
+# them `bin/nightshift.sh` reads the live $NIGHTSHIFT_HOME/rulebook.yaml — real repos, real
+# origins — and writes the live ledger, runs and digests. The script prints this same command.
+export RULEBOOK=$SB/rulebook.yaml NIGHTSHIFT_STATE_DIR=$SB/state NIGHTSHIFT_RUNS_DIR=$SB/runs
+export NIGHTSHIFT_DIGEST_DIR=$SB/digests NIGHTSHIFT_WORKTREES=$SB/wt
+
+NIGHTSHIFT_AGENT=mock bash bin/nightshift.sh     # one night, mock agent (the default agent)
+NIGHTSHIFT_AGENT=claude bash bin/nightshift.sh   # one night, real claude -p stages
+NIGHTSHIFT_AGENT=codex NIGHTSHIFT_CODEX_MODEL=<model> NIGHTSHIFT_CODEX_REASONING_EFFORT=high bash bin/nightshift.sh
 ```
+
+`bin/schedule.sh dry-run` does all of the above in one command — sandbox, isolated dirs, launcher
+included — and is the sanctioned way to prove the wiring on a host that already has a live
+installation (see [`docs/deployment.md`](../deployment.md)). It also puts the sandbox under
+`$TMPDIR`, which the `claude` adapter prefers: worktrees under `$HOME` inherit `~/.claude/CLAUDE.md`
+and the run says so — pass an absolute `$TMPDIR` path to `bin/setup-sandbox.sh` to get the same.
 
 Per-repo `mode` (rulebook.yaml): **`branch-fix`** does the full loop and pushes a `nightshift/*`
 branch; **`findings-only`** runs Explore only and just reports (no fix, no branch) — the safe
 trust-ramp entry, and the first mode to point at a real repo. Worktrees are created *outside* the
 control repo (default `${TMPDIR}/nightshift-worktrees`) so nightshift can even target its own repo.
 
-Then look at `digests/<date>.md`, `state/ledger.jsonl`, `state/runs.jsonl`, and the pushed
-`nightshift/*` branch in the sandbox remote.
+Then look at `$SB/digests/<date>.md`, `$SB/state/ledger.jsonl`, `$SB/state/runs.jsonl`, and the
+pushed `nightshift/*` branch in the sandbox remote (`$SB/remote.git`) — all of it disposable: the
+whole night lives under `$SB`, which you can `rm -rf` when you are done.
 
 ## What the prototype demonstrates (verified)
 
