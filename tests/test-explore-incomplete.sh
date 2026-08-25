@@ -131,8 +131,8 @@ run_night "$d" claude
 [ "$(cat "$d/rc")" = 0 ] || { cat "$d/err" >&2; fail "the night exited $(cat "$d/rc") on the real partial path"; }
 grep -q 'left 1 finding(s) — continuing with those' "$d/err" \
   || { cat "$d/err" >&2; fail "real adapter discarded a valid result on nonzero exit"; }
-jq -e 'select(.outcome=="abandoned" and .summary=="fix typo")' "$d/state/ledger.jsonl" >/dev/null 2>&1 \
-  || { cat "$d/err" >&2; fail "real partial finding never entered the finding lifecycle"; }
+jq -e 'select(.outcome=="stage-failed" and .summary=="fix typo")' "$d/state/ledger.jsonl" >/dev/null 2>&1 \
+  || { cat "$d/err" >&2; fail "real partial finding never entered the retryable lifecycle"; }
 
 # --- 3. mock failure after the stage had already written findings --------------------------------
 # Those must be used, not thrown away — dropping them would be a second, self-inflicted loss.

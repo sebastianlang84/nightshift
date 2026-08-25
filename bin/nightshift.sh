@@ -65,6 +65,9 @@ fi
 
 # ---------------------------------------------------------------- rulebook ----
 declare -a REPO_PATHS=() REPO_MODES=() REPO_BASES=() REPO_FINDINGS=() REPO_DIMS=() REPO_TEST_NETS=() REPO_TEST_CMDS=() DIMENSIONS=()
+BASE_RESOLUTION_WARN_MISSING=1
+# shellcheck source=../lib/base_resolution.sh
+source "$NIGHTSHIFT_HOME/lib/base_resolution.sh"
 # Rulebook-declared model per adapter (ADR 0020); empty = the rulebook declares none. Kept separate
 # from the NIGHTSHIFT_*_MODEL env vars so the precedence env > rulebook > CLI default stays legible.
 RB_CLAUDE_MODEL="" RB_CODEX_MODEL="" RB_MAX_VERIFY=""
@@ -473,6 +476,18 @@ clear_stage_artifacts() { # stage item_dir — an iteration may never read the p
   rm -f "$id/$stage.out" "$id/.raw_$stage" "$id/$stage.err" "$id/.usage_$stage" ${artifact:+"$artifact"}
 }
 
+review_artifact_usable() { # item_dir -> a reviewer actually chose one documented verdict
+  jq -e 'type=="object" and ((.verdict // "") as $v | $v=="ship" or $v=="revise" or $v=="abandon")' \
+    "$1/review.md" >/dev/null 2>&1
+}
+
+verify_artifact_usable() { # item_dir -> a complete finding-verification result
+  jq -e 'type=="object"
+         and ((.resolved | type) == "boolean")
+         and ((.confidence // "") as $c | $c=="high" or $c=="low")
+         and ((.evidence | type) == "string")' "$1/verify.json" >/dev/null 2>&1
+}
+
 run_agent() { # stage workdir item_dir
   local stage="$1" workdir="$2" item_dir="$3" start end status=0 resets="" usage='{}'
   clear_stage_artifacts "$stage" "$item_dir"
@@ -785,6 +800,13 @@ mock_fix() { # workdir item_dir — applies the fix for THIS finding (dispatched
 }
 mock_review() { # workdir item_dir
   local _wd="$1" id="$2" sentinel="${NIGHTSHIFT_MOCK_ABANDON_IF:-}"
+  if [ "${NIGHTSHIFT_MOCK_REVIEW_FATAL:-0}" = 1 ]; then
+    AGENT_FATAL="mock agent unavailable (stage review)"
+    AGENT_FATAL_AGENT=mock
+    return "${NIGHTSHIFT_MOCK_REVIEW_RC:-1}"
+  fi
+  [ "${NIGHTSHIFT_MOCK_REVIEW_NO_ARTIFACT:-0}" != 1 ] \
+    || return "${NIGHTSHIFT_MOCK_REVIEW_RC:-1}"
   # Deterministic `abandon`, so the reviewer's give-up verdict is reachable in mock mode like every
   # other path. The trigger is a sentinel PATH, not content in the worktree, because a test must be
   # able to arm it MID-loop — from a failing test_cmd, say.
@@ -794,9 +816,10 @@ mock_review() { # workdir item_dir
   case "$sentinel" in ""|/*) ;; *) sentinel="$_wd/$sentinel" ;; esac
   if [ -n "$sentinel" ] && [ -e "$sentinel" ]; then
     jq -nc '{verdict:"abandon",reason:"mock: abandon sentinel present."}' > "$id/review.md"
-    return 0
+    return "${NIGHTSHIFT_MOCK_REVIEW_RC:-0}"
   fi
   jq -nc '{verdict:"ship",reason:"Typo fix; single file, reversible, no behaviour change — clears the smallness bar."}' > "$id/review.md"
+  return "${NIGHTSHIFT_MOCK_REVIEW_RC:-0}"
 }
 mock_advise() { # workdir item_dir — deterministic second-opinion from the branch's finding type
   local _wd="$1" id="$2" type
@@ -809,6 +832,8 @@ mock_advise() { # workdir item_dir — deterministic second-opinion from the bra
 }
 mock_verify() { # workdir item_dir — resolved iff the planted defect is gone from the target file
   local wd="$1" id="$2" file marker
+  [ "${NIGHTSHIFT_MOCK_VERIFY_NO_ARTIFACT:-0}" != 1 ] \
+    || return "${NIGHTSHIFT_MOCK_VERIFY_RC:-1}"
   file=$(jq -r '.file // ((.files // [])[0] // "")' "$id/finding.json" 2>/dev/null || echo "")
   case "$file" in
     README.md) marker="teh " ;;
@@ -822,6 +847,7 @@ mock_verify() { # workdir item_dir — resolved iff the planted defect is gone f
     jq -nc --arg f "$file" '{resolved:false,confidence:"high",
       evidence:("defect still present in " + $f)}' > "$id/verify.json"
   fi
+  return "${NIGHTSHIFT_MOCK_VERIFY_RC:-0}"
 }
 mock_recon() { # workdir item_dir — deterministic yield straight from recon_signals.json (ADR 0015)
   local _wd="$1" id="$2" sig
@@ -1449,26 +1475,6 @@ open_branch_count() { # count nightshift/* still awaiting the operator's decisio
 # Every work item runs in a throwaway, isolated git worktree — never the repo's
 # live checkout. So nightshift never touches your branch/state, and any misstep
 # (incl. non-git shell, §2b) is confined to a dir we delete afterwards.
-base_ref() { # repo -> best base ref to branch from
-  local repo="$1" r
-  for r in ORIGIN_HEAD origin/main origin/master main master; do
-    if [ "$r" = ORIGIN_HEAD ]; then
-      r=$(git -C "$repo" symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null | sed 's#refs/remotes/##') || true
-      [ -z "$r" ] && continue
-    fi
-    git -C "$repo" rev-parse -q --verify "$r" >/dev/null 2>&1 && { echo "$r"; return 0; }
-  done
-  echo HEAD
-}
-resolve_base() { # repo cfgbase -> ref to branch from (rulebook `base:` wins, else auto-detect)
-  local repo="$1" cfg="$2"
-  if [ -n "$cfg" ]; then
-    if git -C "$repo" rev-parse -q --verify "origin/$cfg" >/dev/null 2>&1; then echo "origin/$cfg"; return 0; fi
-    if git -C "$repo" rev-parse -q --verify "$cfg"        >/dev/null 2>&1; then echo "$cfg";        return 0; fi
-    log "  $(basename "$repo"): configured base '$cfg' not found — auto-detecting"
-  fi
-  base_ref "$repo"
-}
 setup_worktree() { git -C "$1" worktree add -q --detach "$2" "$3"; }   # repo wt base
 remove_worktree() {                                                    # repo wt
   git -C "$1" worktree remove --force "$2" 2>/dev/null || true
@@ -2123,7 +2129,7 @@ verify_findings() {
   [ "${MAX_VERIFY:-0}" -gt 0 ] || return 0
   [ -f "$LEDGER" ] || return 0
   run_probe
-  local n=0 cand row item repo fp sig summary dim ts base wt id resolved conf ev
+  local n=0 cand row item repo fp sig summary dim ts base wt id resolved conf ev verify_rc
   # Oldest candidate first, and only those never verified against TODAY's signature — the probe
   # drops a stale verify block itself, so an item re-enters this queue exactly when its code moves.
   cand=$(jq -r '[.items[]? | select(.state=="code_changed" and (has("verify")|not))]
@@ -2150,9 +2156,21 @@ verify_findings() {
     jq -nc --arg s "$summary" --arg fp "$fp" --arg d "$dim" --arg ts "$ts" \
       --argjson files "$(jq -c '[(.fingerprint|split(":")[0]|split(","))[]|select(length>0)]' <<<"$row")" \
       '{summary:$s,fingerprint:$fp,dimension:$d,recorded:$ts,files:$files}' > "$id/finding.json"
-    run_agent verify "$wt" "$id" || true
+    verify_rc=0
+    run_agent verify "$wt" "$id" || verify_rc=$?
     remove_worktree "$repo" "$wt"
     n=$((n + 1))
+    # A valid partial result remains evidence even when the adapter exits nonzero (for example after
+    # a turn ceiling). Without a complete artifact there is no model verdict to remember. In
+    # particular, an auth/quota failure must leave no derived snapshot state (ADR 0023).
+    if [ -n "$AGENT_FATAL" ]; then
+      log "  verify: agent unavailable — no result recorded ($fp)"
+      return 0
+    fi
+    if ! verify_artifact_usable "$id"; then
+      log "  verify: stage produced no usable result (exit $verify_rc) — retryable ($fp)"
+      continue
+    fi
     resolved=$(jq -r '.resolved // false' "$id/verify.json" 2>/dev/null || echo false)
     conf=$(jq -r '.confidence // "low"' "$id/verify.json" 2>/dev/null || echo low)
     ev=$(jq -r '.evidence // ""' "$id/verify.json" 2>/dev/null || echo "")
@@ -2406,7 +2424,7 @@ write_digest() { # made open status [advice]
     echo
     echo "## Considered but not shipped"
     [ -f "$LEDGER" ] && jq -r --arg n "$NIGHT" \
-      'select(.night==$n and (.outcome=="abandoned" or .outcome=="push-failed" or .outcome=="commit-failed" or .outcome=="tests-failed" or .outcome=="gate-blocked" or .outcome=="worktree-tampered")) | "- " + .repo + " — " + .outcome + ": " + (.summary // .fingerprint)' \
+      'select(.night==$n and (.outcome=="abandoned" or .outcome=="push-failed" or .outcome=="commit-failed" or .outcome=="tests-failed" or .outcome=="gate-blocked" or .outcome=="worktree-tampered" or .outcome=="stage-failed")) | "- " + .repo + " — " + .outcome + ": " + (.summary // .fingerprint)' \
       "$LEDGER" 2>/dev/null || true
     echo
     # Carry-forward (ADR 0014): every surfaced finding whose latest lifecycle event leaves it open.
@@ -2514,7 +2532,7 @@ main() {
     codex)  log_model_selection codex  NIGHTSHIFT_CODEX_MODEL  "$RB_CODEX_MODEL"  ;;
   esac
 
-  local made=0 considered=0 findings=0 repo mode cfgbase id fp fnj iter verdict wt base b summary open="" pass=0 progress ship_progress stop_reason=ok disp rfind farr n_find k fd dim explore_rc n_partial
+  local made=0 considered=0 findings=0 repo mode cfgbase id fp fnj iter verdict wt base b summary open="" pass=0 progress ship_progress stop_reason=ok disp rfind farr n_find k fd dim explore_rc n_partial fix_rc review_rc
   # verify_findings above is the night's first agent call of all. If the credentials are already
   # dead there, every later stage is too — skip straight to the digest so the abort is on record.
   if [ -n "$AGENT_FATAL" ]; then stop_reason=agent_unavailable; fi
@@ -2738,7 +2756,14 @@ main() {
         # a different outcome on purpose (ADR 0022 §3), and unlike `abandoned` it does not latch the
         # finding, so the reviewer's refusal would come back for a fresh attempt every night.
         gate=""
-        run_agent fix "$wt" "$fd" || true
+        fix_rc=0
+        run_agent fix "$wt" "$fd" || fix_rc=$?
+        if [ -n "$AGENT_FATAL" ]; then gate=agent-fatal; verdict=""; break; fi
+        if [ ! -s "$fd/worknote.md" ]; then
+          gate=stage-failed; verdict=""
+          log "  $(basename "$repo"): fix produced no usable worknote (exit $fix_rc) — retryable ($fp)"
+          break
+        fi
         # The Review stage stages the worktree (`git add -A`, N3) to show the reviewer exactly what
         # finalize will commit — unsandboxed, and BEFORE the ship gate exists to check anything. So
         # a `.git` the Fix stage rewrote detonates here, earlier than any gate could catch it.
@@ -2750,8 +2775,15 @@ main() {
         # Done in the loop rather than in stage_prompt because the mock adapter builds no prompt.
         git -C "$wt" add -A
         git -C "$wt" write-tree > "$fd/reviewed-tree" 2>/dev/null || rm -f "$fd/reviewed-tree"
-        run_agent review "$wt" "$fd" || true
-        verdict=$(jq -r '.verdict' "$fd/review.md" 2>/dev/null || echo abandon)
+        review_rc=0
+        run_agent review "$wt" "$fd" || review_rc=$?
+        if [ -n "$AGENT_FATAL" ]; then gate=agent-fatal; verdict=""; break; fi
+        if ! review_artifact_usable "$fd"; then
+          gate=stage-failed; verdict=""
+          log "  $(basename "$repo"): review produced no usable verdict (exit $review_rc) — retryable ($fp)"
+          break
+        fi
+        verdict=$(jq -r '.verdict' "$fd/review.md")
         [ "$verdict" = abandon ] && break
         if [ "$verdict" = ship ]; then
           # The reviewer is satisfied that the FINDING is fixed. The gate asks the other question —
@@ -2788,12 +2820,21 @@ main() {
         # unlatched so a later night may try again.
         ledger_append "$(basename "$fd")" "$repo" "$fp" "" "" "tests-failed" "$summary" "" "" "" "$dim" "" "$csig"
         log "  $(basename "$repo"): test gate refused every ship attempt in $MAX_FIX_ITER iterations — not shipped ($fp)"
+      elif [ "$gate" = stage-failed ]; then
+        # Operational fact, not a judgment on the finding. Deliberately absent from already_acted so
+        # unchanged code is retried on the next night.
+        ledger_append "$(basename "$fd")" "$repo" "$fp" "" "" "stage-failed" "$summary" "" "" "" "$dim" "" "$csig"
+        log "  $(basename "$repo"): stage-failed — retryable ($fp)"
+      elif [ "$gate" = agent-fatal ]; then
+        # ADR 0023: nothing derived from an unusable agent enters the ledger.
+        log "  $(basename "$repo"): agent unavailable — no finding verdict recorded ($fp)"
       else
         ledger_append "$(basename "$fd")" "$repo" "$fp" "" "" "abandoned" "$summary" "" "" "" "$dim" "" "$csig"
         log "  $(basename "$repo"): abandoned ($fp)"
       fi
       remove_worktree "$repo" "$wt"
       [ -n "$b" ] && git -C "$repo" branch -q -D "$b" >/dev/null 2>&1 || true
+      if [ -n "$AGENT_FATAL" ]; then stop_reason=agent_unavailable; break; fi
     done
     case "$stop_reason" in backpressure|budget|agent_unavailable) break ;; esac
   done < <(select_order)

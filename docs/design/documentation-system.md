@@ -35,16 +35,13 @@ one). Clean split: target repos carry *output*, the control repo carries *record
 ```
 rulebook.yaml              # governance: allowed repos, per-repo mode, limits — HUMAN writes
 state/
-  ledger.jsonl             # append-only: every work-item outcome (incl. outcome: abandoned|deferred
-                           #   + finding fingerprint = sorted(files):type:symbol, ADR 0014 — line
-                           #   numbers excluded), all nights — SINGLE TRUTH
+  ledger.jsonl             # append-only work-item outcomes and human/machine verdicts — SINGLE TRUTH
   runs.jsonl               # append-only telemetry: one line per stage invocation — RUNNER writes
 runs/<date>/<item-id>/     # ephemeral per-night hand-off (archived after the night)
   finding.json             #   Explore writes
   worknote.md              #   Fix writes
   review.md                #   Review writes
 digests/<date>.md          # derived morning digest — HUMAN reads
-CONVENTIONS.md             # branch naming, item-id scheme, finding-hash rule
 ```
 
 ### Target repo — minimal footprint, output only
@@ -58,16 +55,16 @@ NIGHTSHIFT.md (optional)           # local "don't touch" rules, robots.txt-style
 
 | Stage | reads | writes |
 |-------|-------|--------|
-| **Select** (Brain) | rulebook · ledger (distilled, incl. `outcome: abandoned\|deferred` rows) | — (picks a repo) |
+| **Select** (Brain) | rulebook · ledger (distilled lifecycle and coverage) | — (picks a repo) |
 | **Explore** | target repo · NIGHTSHIFT.md · "already done here" (derived from ledger) | `finding.json` |
 | **Fix** | `finding.json` · target files | branch + commits · `worknote.md` |
 | **Review** | `finding.json` · `worknote.md` · the diff | `review.md` |
-| **Finalize** (Brain) | `review.md` | successful push → `shipped`; failed push → retryable `push-failed`; rejected work → `abandoned\|deferred` |
+| **Finalize** (Brain) | `review.md` | successful push → `shipped`; failed push → retryable `push-failed`; reviewer rejection → `abandoned`; unusable stage output → retryable `stage-failed` |
 | **Digest** (end of night) | tonight's `ledger.jsonl` entries · all `review.md` | `digests/<date>.md` |
-| **Human** (morning) | `digests/<date>.md`, then the branches | `rulebook.yaml` (governance only) |
+| **Human** (morning) | `digests/<date>.md`, then the branches | `rulebook.yaml` and explicit `harvest.sh` verdicts |
 
-Reads flow strictly downstream. The human touches exactly two things: the digest (read) and the
-rulebook (write).
+Reads flow strictly downstream. Humans read the digest/branches, own the rulebook and record
+verdicts that Git history cannot prove.
 
 Orthogonal to the stages, the **Runner** wraps every stage invocation and appends one
 `state/runs.jsonl` line of operational telemetry. The Runner is its single writer; the agents do not
@@ -108,17 +105,15 @@ Where the numbers come from, and how to read them:
   `null` (codex, mock, older CLI shapes) the bound is all there is.
 
 Statistics are derived from this file on demand and summarised in the digest; v1 records but does not
-auto-act on them (distinct from the deferred §5 value-learning).
+auto-act on them.
 
 ## Consequences / resolved questions
 
-- **OPEN-QUESTIONS §2 (central vs per-repo memory): resolved → central.** There is one
+- **Central vs per-repo memory is resolved → central.** There is one
   `ledger.jsonl`; per-repo views are *derived* from it by filtering, never kept as separate files
   (invariants 1 & 2). Format is JSONL append-only; the semantic/notes tier is **not** in v1.
-- **`backlog.md` is cut for v1 (re-review §4): decided.** It was the semantic tier's last remnant —
-  agent-authored free-prose with no provenance. Deferred ideas are instead `ledger.jsonl` rows with
-  `outcome: deferred` (+ fingerprint), surfaced in a digest section. Same need, no confabulation
-  surface, no hand-maintained parallel file.
+- **`backlog.md` is cut for v1.** Active implementation work belongs in `todo.md`; runtime attempts
+  and outcomes belong in the ledger. There is no agent-authored free-prose backlog.
 - **A push is shipped only after remote success.** A failed push records `outcome: push-failed`
   with the attempted branch and commit SHA, appears in the digest, and remains eligible for retry;
   it never enters the shipped/dedup set.
@@ -129,4 +124,4 @@ auto-act on them (distinct from the deferred §5 value-learning).
   both the meta layer (designing nightshift) and the runtime layer (nightshift at work).
 
 _Related: [memory-model.md](memory-model.md) (this supersedes its two-tier proposal for v1),
-[constitution-and-rulebook.md](constitution-and-rulebook.md) (rulebook.yaml), OPEN-QUESTIONS §2, §3, §6._
+[constitution-and-rulebook.md](constitution-and-rulebook.md) (rulebook.yaml)._

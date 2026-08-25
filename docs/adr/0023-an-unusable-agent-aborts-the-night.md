@@ -76,6 +76,10 @@ it is recorded.** Concretely:
   failing stage rather than walking the rest of the fleet into the same wall.
 - The digest announces the abort, and the process exits **3** — so `bin/nightshift-cron.sh` logs a
   verdict and the systemd unit is marked failed.
+- A nonzero exit and an unusable result are separate facts. Explore, Fix, Review and Verify may keep
+  a complete artifact returned before a turn ceiling. Without a complete artifact, Fix/Review append
+  retryable `stage-failed`; Verify writes no negative snapshot result. Neither path enters the
+  suppression sets. If the failure set `AGENT_FATAL`, no ledger or Verify state is written at all.
 
 The detector is deliberately broad *within the CLI's own account of the run*. A false negative costs
 a forged record of a clean fleet, which nobody sees.

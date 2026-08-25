@@ -4,16 +4,15 @@ Autonomous overnight steward for code repositories. Given a set of repos it is a
 touch, nightshift reviews and fixes code while you sleep — self-selecting what to work on,
 remembering what it already did, and staying inside configurable rules and a time/quota budget.
 
-> Like the *Heinzelmännchen*: it does the work at night, within its rules, and stops when the
-> budget runs out.
-
-**Status: early prototype.** The v1 scope is decided ([ADR 0004](docs/adr/0004-v1-scope-branch-isolated-steward.md))
-and a runnable **mock** prototype exercises the full loop end-to-end against a throwaway sandbox — see
+**Status: operational, human-gated.** The scheduler runs the implemented v1/v2 pipeline, but output
+remains isolated on `nightshift/*` branches and is never auto-merged. A deterministic **mock** mode
+exercises the full loop end-to-end against a throwaway sandbox — see
 [`docs/design/prototype.md`](docs/design/prototype.md). Run `bin/setup-sandbox.sh` and then the isolated
 `RULEBOOK=… NIGHTSHIFT_STATE_DIR=… bash bin/nightshift.sh` command it prints (it no longer overwrites your
 live `rulebook.yaml`). First-party `claude -p` and `codex exec` adapters run the real
 Recon/Explore/Fix/Review stages plus the read-only Verify stage that closes out old findings
-(ADR 0021); adapter and model selection are environment configuration.
+([ADR 0021](docs/adr/0021-closing-open-findings.md)); adapter and model selection are environment
+configuration.
 
 **v2 (dimension-rotating, multi-finding):** explore now emits several ranked findings per repo — each on
 its own branch — aimed by a rotating review *dimension* (correctness, security, infra, ui-ux,

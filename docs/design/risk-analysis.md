@@ -28,16 +28,16 @@ nightshift launches a selected first-party CLI headlessly (`claude -p` or `codex
 orchestrated by a "dumb" launcher fired from a systemd **user** timer with linger enabled. The
 original threat analysis targeted Claude; adapter-specific differences are explicit below.
 
-- **Identity:** runs as the interactive user `llmadmin`. That account is a member of the `docker`
+- **Identity:** runs as the interactive user `wasti`. That account is a member of the `docker`
   and `sudo` groups and can read the user's SSH private keys, the `gh` OAuth token
   (scopes incl. `repo`, `admin:public_key`), and any secrets its group membership grants.
 - **Reach of that account (if any confinement layer failed):** `docker` group membership is
   equivalent to host root (`docker run -v /:/host …`). The host is shared with other services
   (partflow, llmstack, open-webui, dashboard). So the *theoretical* blast radius of a full
   containment failure is the entire VM — see [R2](#r2).
-- **Targets** (`rulebook.yaml`): five local repos, mostly `findings-only` (report, never push);
-  a few `branch-fix` (push `nightshift/*` branches). Only this repo opens a PR. Nothing is ever
-  merged automatically (ADR 0004).
+- **Targets** (`rulebook.yaml`): five local repos; four are `branch-fix` (push `nightshift/*`
+  branches), one is `findings-only` (report, never push). Automatic PR opening is disabled on this
+  host; nothing is ever merged automatically (ADR 0004).
 - **Untrusted input:** the *contents* of the target repos. Third-party code, dependencies, commit
   messages and comments the agent reads are attacker-influenceable and reach the model context.
 
@@ -57,8 +57,8 @@ These are implemented and active today. Each is enforced by mechanism, not by pr
 | C2 | **Repo never touched directly** | Every work item runs in a throwaway `git worktree --detach` under `$TMPDIR`, removed `--force` after. Edits land there, not in the real checkout. | [nightshift.sh:312-315](../../bin/nightshift.sh) |
 | C3 | **Push confinement (Layer 1)** | `hooks/pre-push` checks git's already-**resolved** refs: rejects any ref outside `nightshift/*`, deletes, tag pushes, and non-fast-forward updates. Every bypass spelling (`+main`, `:branch`, `--all`, `--mirror`, `--force`) is resolved by git before the hook sees it. | [pre-push](../../hooks/pre-push) |
 | C4 | **Can't disable Layer 1 (Layer 2, Claude only)** | `core.hooksPath` is injected into both adapters. Claude also has a `PreToolUse` guard denying bypass flags and writes to project settings that a later stage would execute as hooks. Codex has no equivalent tool hook here; its sandbox is the primary agent boundary, while the Runner's final push supplies the hook independently. | [pretooluse-guard.sh](../../hooks/pretooluse-guard.sh), [nightshift.sh](../../bin/nightshift.sh) |
-| C5 | **Never merges** | Output is `nightshift/*` branches (+ optional PR on this repo only). A human reviews before any merge. | ADR 0004, `rulebook.yaml` |
-| C6 | **Runaway caps** | Claude has `--max-turns 60` per stage. Both adapters have fix-iteration, open-branch and per-run caps, single-instance `flock`, and the service's wall-clock timeout. Codex currently has no separate per-stage turn cap. | [nightshift.sh](../../bin/nightshift.sh), rulebook, [nightshift-cron.sh](../../bin/nightshift-cron.sh), [nightshift.service](../../scheduler/nightshift.service) |
+| C5 | **Never merges** | Output is `nightshift/*` branches; PR creation is optional and currently disabled. A human reviews before any merge. | ADR 0004, `rulebook.yaml` |
+| C6 | **Runaway caps** | Claude has `--max-turns 60` per stage. Both adapters have fix-iteration, open-branch and per-run caps, a 300-minute rulebook budget, single-instance `flock`, and a hard 5h service timeout. Codex currently has no separate per-stage turn cap. | [nightshift.sh](../../bin/nightshift.sh), rulebook, [nightshift-cron.sh](../../bin/nightshift-cron.sh), [nightshift.service](../../scheduler/nightshift.service) |
 | C7 | **Report-only for sensitive repos** | `findings-only` mode reports without ever pushing (e.g. llmstack). | `rulebook.yaml` |
 | C8 | **Change-size pressure** | Soft file/line budgets injected into explore/fix prompts (15 files / 400 lines) to keep changes reviewable. | [nightshift.sh:205-207](../../bin/nightshift.sh) |
 | C9 | **Ship-gate sandbox** | The one component that deliberately *executes* candidate content runs under `bwrap`: no `$HOME`, `/etc` by allowlist, no docker socket, no network unless the repo opts in, allowlisted environment, writable only the worktree + a throwaway HOME, rlimits. No sandbox ⇒ no ship. | `build_test_sandbox`/`run_test_gate` in [nightshift.sh](../../bin/nightshift.sh), ADR 0026 |
@@ -84,8 +84,8 @@ Severity = impact × likelihood given the controls above. Status: **Open** / **P
 
 | ID | Risk | Severity | Status |
 |----|------|----------|--------|
-| [R15](#r15) | The **ship gate executes** candidate-controlled repo content (`npm ci` lifecycle scripts) as `llmadmin` | **High** | **Mitigated** |
-| [R8](#r8) | Write/Edit accept **absolute paths** → code execution as `llmadmin` with no `Bash` | **High** | **Mitigated** |
+| [R15](#r15) | The **ship gate executes** candidate-controlled repo content (`npm ci` lifecycle scripts) as `wasti` | **High** | **Mitigated** |
+| [R8](#r8) | Write/Edit accept **absolute paths** → code execution as `wasti` with no `Bash` | **High** | **Mitigated** |
 | [R1](#r1) | Secret exfiltration via prompt-injection → commit content → pushed branch | **High** | **Open** |
 | [R9](#r9) | New **untracked** files bypass the review evidence chain, then get committed | **High** | **Mitigated** |
 | [R2](#r2) | All containment is application-layer, on a `docker`/`sudo` account (host-root blast radius if a layer fails) | **High** | **Partial** |
@@ -106,7 +106,7 @@ Severity = impact × likelihood given the controls above. Status: **Open** / **P
 
 ### R1 — Secret exfiltration via commit content <a id="r1"></a>
 `Read` is unrestricted: no deny-paths in the agent settings, and no OS sandbox around the `claude`
-process. As `llmadmin`, the agent can read `~/.ssh/id_ed25519`, the `gh` token, `.env` files, and
+process. As `wasti`, the agent can read `~/.ssh/id_ed25519`, the `gh` token, `.env` files, and
 group-readable secrets. Two exposures follow:
 - **Anything read enters the model context** and thus leaves the host to the LLM provider.
 - **A path that bypasses the human-review backstop:** a crafted file in a target repo instructs the
@@ -165,14 +165,15 @@ future tool addition would open a channel with no second barrier.
 *Residual: no OS-level egress control.* Closed together with [M2](#m2).
 
 ### R7 — Quota / cost runaway <a id="r7"></a>
-Bounded by `--max-turns`, `max_fix_iterations`, `max_open_branches` (hard halt at 2/2),
-`max_branches_per_run`, and single-instance `flock`. Per-stage token/cost are recorded to the ledger.
+Bounded by `--max-turns`, `max_fix_iterations`, `max_open_branches` (hard halt at 4/4),
+`max_branches_per_run`, `max_run_minutes=300`, the hard 5h service timeout, and single-instance
+`flock`. Per-stage token/cost are recorded to the ledger.
 
 *Residual: low.* The value-based throttle in autonomy-and-shutoff.md would tighten it further.
 
-### R8 — Write/Edit accept absolute paths → code execution as `llmadmin` <a id="r8"></a>
+### R8 — Write/Edit accept absolute paths → code execution as `wasti` <a id="r8"></a>
 The fix stage grants `Write,Edit`, and `Write`/`Edit` take absolute paths. Before N1, merely doing
-`cd "$wd"` did not confine them: a prompt-injected fix stage could write anywhere `llmadmin` could —
+`cd "$wd"` did not confine them: a prompt-injected fix stage could write anywhere `wasti` could —
 `~/.bashrc`, `~/.ssh/authorized_keys`, `~/.config/systemd/user/*.service`,
 `~/.claude/settings.json`, or a fake binary in `~/.local/bin/`. That exposed arbitrary code
 execution as a `docker`+`sudo` account (→ host root, R2) with **no `Bash` at all**. C1 removed only
@@ -240,10 +241,11 @@ The `gh` token carries `admin:public_key` and `repo` (§1). If exfiltrated (R1/R
 register SSH keys on the account — persistence beyond this repo. Separately, `open_pr` builds the PR
 title/body from model-derived `summary`/`worknote`/`proof` and sends it via the **GitHub API**, not
 `git push` ([nightshift.sh:383](../../bin/nightshift.sh)) — so a diff-content scanner (M3/N6) as
-scoped to commits would never see it. Lower live risk today: `NIGHTSHIFT_OPEN_PR` defaults 0
-([nightshift.sh:17](../../bin/nightshift.sh)).
+scoped to commits would never see it. The host currently enforces `NIGHTSHIFT_OPEN_PR=0`, matching
+the code default ([nightshift.sh:17](../../bin/nightshift.sh)).
 
-*Residual: latent while PRs are off; scope + API-text gap remain.* Addressed by [N6](#n6).
+*Residual: the API-text channel is inactive while PRs are off; the over-scoped credential and the
+missing scanner still block re-enabling it.* Addressed by [N6](#n6).
 
 ### R13 — Predictable state paths in world-writable `/tmp` <a id="r13"></a>
 `LOCK` and `WORKTREES_DIR` default under `/tmp` ([nightshift-cron.sh:21](../../bin/nightshift-cron.sh),
@@ -281,7 +283,7 @@ uncategorized in merge-rate breakdowns; and the guard is bypassable with the ove
 Named the single highest-priority finding by an independent cross-vendor architecture review
 (gpt-5.6-sol, 2026-08-14). `run_test_gate` (ADR 0022) exists to run the target repo's **own** suite
 against the worktree the Fix stage just wrote, and it did so through an unsandboxed `bash -c` as
-`llmadmin`. For a JS repo the declared command is `npm ci && npm test`, which executes `preinstall`
+`wasti`. For a JS repo the declared command is `npm ci && npm test`, which executes `preinstall`
 / `prepare` / `pretest` lifecycle scripts out of a `package.json` the agent may have modified.
 
 That inverted the whole containment story. C1 removes `Bash` from every stage; N1 confines
@@ -302,7 +304,7 @@ unconstructable sandbox refuses the ship instead of running unconfined. Covered 
 *A second, sharper leg of the same risk was found while verifying the fix against the real fleet,
 and is closed by the same ADR: confining the gate **while it runs** is not enough, because
 `$wt/.git` is a plain pointer file in the writable worktree and `finalize` then runs `checkout -b`,
-`add -A` and `commit` in that worktree **outside** the sandbox as `llmadmin`. A `pretest` that
+`add -A` and `commit` in that worktree **outside** the sandbox as `wasti`. A `pretest` that
 repoints it at a gitdir it built inside the worktree gets `core.fsmonitor` (arbitrary command) or
 a `pre-commit` hook executed by the Runner seconds later — a complete bypass that leaves the sandbox
 looking intact. Verified firing, then closed twice over: the pointer is re-bound read-only inside

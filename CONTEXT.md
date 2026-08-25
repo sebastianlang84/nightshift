@@ -24,10 +24,7 @@ An **unattended overnight steward**. Given a set of repositories it is allowed t
    ([ADR 0004](docs/adr/0004-v1-scope-branch-isolated-steward.md));
 6. is **budget-aware** — it works until its time/quota window is spent, then checkpoints and stops.
 
-Guiding image: the *Heinzelmännchen* — works at night within its rules, stops when observed / out
-of budget. Steady, not heroic.
-
-## Architecture (intended)
+## Architecture
 
 Ports-and-adapters. The **core is harness-neutral**; only the runner knows a specific tool.
 

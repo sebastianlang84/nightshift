@@ -29,7 +29,7 @@ unset NIGHTSHIFT_TEST_SANDBOX NIGHTSHIFT_TEST_SANDBOX_ROBIND NIGHTSHIFT_TEST_SAN
 # user namespaces. It is also the part that decides whether a destination is internal, which is the
 # whole security property.
 python3 - "$ROOT" <<'PY' || fail "the egress address policy is wrong"
-import importlib.util, pathlib, sys
+import importlib.util, pathlib, socket, sys, threading, time
 spec = importlib.util.spec_from_file_location("ep", pathlib.Path(sys.argv[1], "lib", "egress_proxy.py"))
 ep = importlib.util.module_from_spec(spec); spec.loader.exec_module(ep)
 
@@ -54,6 +54,33 @@ if ep.vet("example.com", 22) is not None:
 # name for a private address, which is the shape a DNS-rebinding attempt takes.
 if ep.vet("localhost", 443) is not None:
     print("localhost:443 was allowed", file=sys.stderr); sys.exit(1)
+
+# A client that opens a partial CONNECT may not hold a host thread indefinitely.
+reader, writer = socket.socketpair()
+started = time.monotonic()
+try:
+    try:
+        ep.read_request_head(reader, timeout=0.05)
+        print("partial request did not time out", file=sys.stderr); sys.exit(1)
+    except socket.timeout:
+        pass
+finally:
+    reader.close(); writer.close()
+if time.monotonic() - started > 1:
+    print("request timeout was not bounded", file=sys.stderr); sys.exit(1)
+
+# The host process has its own cap; sandbox RLIMITs do not cover its threads or memory.
+slots = threading.BoundedSemaphore(1)
+slots.acquire()
+server, client = socket.socketpair()
+try:
+    if ep.dispatch(server, slots):
+        print("connection was dispatched past the active-handler cap", file=sys.stderr); sys.exit(1)
+    client.settimeout(1)
+    if b"503" not in client.recv(1024):
+        print("overloaded proxy did not return a readable refusal", file=sys.stderr); sys.exit(1)
+finally:
+    server.close(); client.close(); slots.release()
 print("policy ok")
 PY
 

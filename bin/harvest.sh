@@ -62,6 +62,8 @@ NIGHTSHIFT_COMMIT_EMAIL="nightshift@localhost"
 
 declare -a REPO_PATHS=() REPO_BASES=()
 repo_id() { realpath -m -- "$1" 2>/dev/null || printf '%s' "${1%/}"; }
+# shellcheck source=../lib/base_resolution.sh
+source "$NIGHTSHIFT_HOME/lib/base_resolution.sh"
 
 load_rulebook() {
   local tag a b c d e parsed path
@@ -75,34 +77,6 @@ load_rulebook() {
       prefix) [ -n "$a" ] && BRANCH_PREFIX="$a" ;;
     esac
   done <<< "$parsed"
-}
-
-# --- base resolution, mirrored from bin/nightshift.sh (resolve_base / base_ref) ---
-base_ref() {
-  local repo="$1" r
-  for r in ORIGIN_HEAD origin/main origin/master main master; do
-    if [ "$r" = ORIGIN_HEAD ]; then
-      r=$(git -C "$repo" symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null | sed 's#refs/remotes/##') || true
-      [ -z "$r" ] && continue
-    fi
-    git -C "$repo" rev-parse -q --verify "$r" >/dev/null 2>&1 && { echo "$r"; return 0; }
-  done
-  echo HEAD
-}
-resolve_base() {
-  local repo="$1" cfg="$2"
-  if [ -n "$cfg" ]; then
-    git -C "$repo" rev-parse -q --verify "origin/$cfg" >/dev/null 2>&1 && { echo "origin/$cfg"; return 0; }
-    git -C "$repo" rev-parse -q --verify "$cfg"        >/dev/null 2>&1 && { echo "$cfg";        return 0; }
-  fi
-  base_ref "$repo"
-}
-base_for_repo() {
-  local path="$1" i
-  for i in "${!REPO_PATHS[@]}"; do
-    [ "${REPO_PATHS[$i]}" = "$path" ] && { resolve_base "$path" "${REPO_BASES[$i]}"; return 0; }
-  done
-  resolve_base "$path" ""
 }
 
 # last recorded verdict for a repo+branch as "verdict<TAB>source" (empty fields if none).

@@ -45,4 +45,4 @@ the human showed up.** That keeps both goals — mostly-autonomous employee *and
 
 _Related: [self-evaluation.md](self-evaluation.md) (throttle = trust-ramp in reverse),
 [execution-modes.md](execution-modes.md) (budget/governor), [constitution-and-rulebook.md](constitution-and-rulebook.md)
-(safety enforcement), OPEN-QUESTIONS §5, §6, §7._
+(safety enforcement)._

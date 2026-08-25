@@ -61,6 +61,9 @@ proxy, and that path is the only one there is.
   whose `/etc/hosts` names this machine's LAN.
 - The proxy is started per gate and torn down on every exit from it, so nothing outlives the run it
   served. If it fails to come up, the gate takes the could-not-run path and the item is refused.
+- Both proxy halves admit at most 64 active handlers. The host proxy gives a client five seconds to
+  complete its CONNECT header; an incomplete request cannot retain a host thread for the gate's full
+  ten-minute timeout. Excess connections receive HTTP 503 and close immediately.
 
 ## Consequences
 
@@ -75,6 +78,10 @@ honour the proxy variables.
 
 **Egress is now logged, per destination, per gate.** `<item>/egress.log` records every allow and
 refuse. That did not exist before: `--share-net` was unobservable by construction.
+
+**The proxy has its own resource boundary.** Sandbox `RLIMIT_NPROC`/memory limits do not cover the
+host-side process, so its 64-handler cap and five-second header timeout are enforced there rather
+than inferred from the sandbox.
 
 **`python3` becomes load-bearing for `test_net` repos**, on both sides of the boundary. It is
 already a hard dependency of every entry point, and both scripts are stdlib-only like the rest of

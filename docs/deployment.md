@@ -147,8 +147,9 @@ operationally:
   network namespace; a `test_net` repo reaches the outside through a proxy that refuses anything
   resolving to a loopback, private, link-local or metadata address, on ports 80/443, HTTPS CONNECT
   only. Every decision is logged to `<runs>/<night>/<item>/egress.log`. A suite that ignores
-  `HTTPS_PROXY` simply has no network. Grant it only to repos whose suite installs dependencies as
-  it runs.
+  `HTTPS_PROXY` simply has no network. The host proxy admits 64 active connections and gives a
+  client five seconds to complete its CONNECT header. Grant it only to repos whose suite installs
+  dependencies as it runs.
 - **Git works inside the gate.** The worktree is a linked one, so its `.git` is a file pointing into
   the repo; the repo's git dir is bound **read-only** for that reason. A suite may read git history;
   it cannot plant a hook or move a ref in the real repository.
@@ -359,7 +360,9 @@ never push outside `nightshift/*` (see [`docs/design/hook-spec.md`](design/hook-
 - **A single failed stage:** any stage exiting non-zero is logged as `stage <name> FAILED (exit N)`
   with the last line of its stderr. The full output is kept in the run's item directory:
   `runs/<date>/<item>/<stage>.err` (stderr) and `.raw_<stage>` (the CLI's unparsed stdout). A
-  one-off failure is not fatal — the night carries on and the repo is picked up on the next pass.
+  complete partial result is still used. Without one, Fix/Review record retryable `stage-failed` and
+  Verify records no negative result; unchanged code is eligible again. A one-off failure is not
+  fatal — the night carries on and the repo is picked up on the next pass.
 
 ## Teardown
 

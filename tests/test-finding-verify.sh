@@ -91,4 +91,22 @@ verify_findings
 [ "$(find "$RUNS_DIR" -maxdepth 1 -name 'verify-*' | wc -l)" = "$((runs_before + 1))" ] \
   || { echo "the cap must bound how many findings are verified per run" >&2; exit 1; }
 
+# --- an unusable result remains retryable; it is not a negative verdict ----------------
+printf 'before\n' > "$REPO/retry.md"
+git -C "$REPO" add retry.md; git -C "$REPO" commit -qm retry-before
+finding item-retry retry.md
+printf 'after\n' > "$REPO/retry.md"
+git -C "$REPO" commit -qam retry-after
+
+MAX_VERIFY=5
+export NIGHTSHIFT_MOCK_VERIFY_NO_ARTIFACT=1 NIGHTSHIFT_MOCK_VERIFY_RC=7
+verify_findings
+unset NIGHTSHIFT_MOCK_VERIFY_NO_ARTIFACT NIGHTSHIFT_MOCK_VERIFY_RC
+[ "$(snap_get item-retry result)" = "" ] \
+  || { echo "a failed verify stage was persisted as a negative verdict" >&2; exit 1; }
+
+verify_findings
+[ "$(snap_get item-retry result)" = open ] \
+  || { echo "the unchanged finding was not retried after verify recovered" >&2; exit 1; }
+
 echo "test-finding-verify: ok"

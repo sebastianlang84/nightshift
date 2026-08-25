@@ -29,6 +29,8 @@ import threading
 
 ALLOWED_PORTS = (80, 443)
 BUFSIZE = 65536
+REQUEST_HEADER_TIMEOUT_SECONDS = 5
+MAX_ACTIVE_CONNECTIONS = 64
 # A refused CONNECT gets a real HTTP status so the tool reports something an operator can read,
 # rather than a bare socket close that surfaces as "network unreachable" three layers up.
 REFUSED = (
@@ -40,6 +42,10 @@ REFUSED = (
 BAD_REQUEST = (
     b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n"
     b"nightshift egress proxy: only HTTPS CONNECT is proxied.\r\n"
+)
+OVERLOADED = (
+    b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n"
+    b"nightshift egress proxy: active connection limit reached.\r\n"
 )
 
 
@@ -102,8 +108,11 @@ def splice(a: socket.socket, b: socket.socket) -> None:
                 pass
 
 
-def read_request_line(conn: socket.socket) -> bytes:
-    """Read up to the end of the CONNECT request head, bounded so a peer cannot exhaust us."""
+def read_request_head(
+    conn: socket.socket, timeout: float = REQUEST_HEADER_TIMEOUT_SECONDS
+) -> bytes:
+    """Read a size- and time-bounded CONNECT request head."""
+    conn.settimeout(timeout)
     buf = b""
     while b"\r\n\r\n" not in buf:
         chunk = conn.recv(BUFSIZE)
@@ -118,7 +127,7 @@ def read_request_line(conn: socket.socket) -> bytes:
 def handle(conn: socket.socket) -> None:
     upstream = None
     try:
-        head = read_request_line(conn)
+        head = read_request_head(conn)
         first = head.split(b"\r\n", 1)[0].decode("latin-1", "replace")
         parts = first.split()
         if len(parts) < 2 or parts[0].upper() != "CONNECT":
@@ -147,6 +156,7 @@ def handle(conn: socket.socket) -> None:
         upstream.settimeout(30)
         upstream.connect(sockaddr)
         upstream.settimeout(None)
+        conn.settimeout(None)
         log(f"allow {host}:{port} -> {sockaddr[0]}")
         conn.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
 
@@ -165,6 +175,34 @@ def handle(conn: socket.socket) -> None:
                     pass
 
 
+def _run_handler(conn: socket.socket, slots: threading.BoundedSemaphore) -> None:
+    try:
+        handle(conn)
+    finally:
+        slots.release()
+
+
+def dispatch(conn: socket.socket, slots: threading.BoundedSemaphore) -> bool:
+    """Start one bounded handler; refuse immediately when the host-side cap is full."""
+    if not slots.acquire(blocking=False):
+        log(f"refuse — active connection limit reached ({MAX_ACTIVE_CONNECTIONS})")
+        try:
+            conn.sendall(OVERLOADED)
+        except OSError:
+            pass
+        finally:
+            conn.close()
+        return False
+    try:
+        threading.Thread(target=_run_handler, args=(conn, slots), daemon=True).start()
+    except RuntimeError as exc:
+        slots.release()
+        conn.close()
+        log(f"refuse — could not start handler ({exc})")
+        return False
+    return True
+
+
 def main(sock_path: str) -> None:
     if os.path.exists(sock_path):
         os.unlink(sock_path)
@@ -181,12 +219,13 @@ def main(sock_path: str) -> None:
     # `$!` there leaves this proxy alive with its socket directory already deleted -- a listener
     # outliving the gate it was built for, which tests/test-gate-egress.sh is there to catch.
     print(f"ready {os.getpid()}", flush=True)
+    slots = threading.BoundedSemaphore(MAX_ACTIVE_CONNECTIONS)
     while True:
         try:
             conn, _ = srv.accept()
         except OSError:
             break
-        threading.Thread(target=handle, args=(conn,), daemon=True).start()
+        dispatch(conn, slots)
 
 
 if __name__ == "__main__":
