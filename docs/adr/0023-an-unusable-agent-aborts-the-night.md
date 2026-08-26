@@ -84,6 +84,16 @@ it is recorded.** Concretely:
 The detector is deliberately broad *within the CLI's own account of the run*. A false negative costs
 a forged record of a clean fleet, which nobody sees.
 
+### Amendment 2026-08-27 — an explicit second adapter may absorb quota exhaustion
+
+A structured rejected quota event still proves that the current adapter produced no evidence, but
+it no longer has to cost the whole night. When `NIGHTSHIFT_QUOTA_FALLBACK_AGENT` names a different
+adapter, Nightshift records and preserves the rejected attempt, retries the same stage once through
+that adapter, and keeps later stages on it. If the fallback fails, the existing fatal path still
+aborts before derived repo state is written. Credential failures and ordinary stage failures never
+switch vendors. This is host opt-in; unset keeps the original abort behavior.
+Regression coverage: [`tests/test-agent-quota-fallback.sh`](../../tests/test-agent-quota-fallback.sh).
+
 ### Amendment 2026-08-24 — the signatures read the CLI, not the repo
 
 The asymmetry above held; the channel it was applied to did not. `AGENT_AUTH_RE` is prose, and it was
@@ -144,14 +154,16 @@ both still caught. Regression coverage:
   that produced a digest: a missing date is a night that never started, not a failure.
 - The rest of the fleet is *not* serviced once the agent is known dead. That is intended — those
   stages would fail identically, and each one would write another false record.
+- A configured quota fallback is the exception: the rejected attempt is recorded separately, the
+  same stage is retried once, and later stages do not probe the spent provider window again.
 - The classification is a **heuristic over CLI output**, not a contract. Both CLIs are free to
   reword their errors; a reword degrades this to the pre-ADR behaviour for that message, minus the
   silence, since the stage failure itself is now logged either way. `AGENT_AUTH_RE` is the single
   place to extend — but extending it is only safe because `agent_diagnosis` now bounds what it may
   read. A signature added to match the CLI will otherwise match the fleet's source code as well.
-- Only credential failures abort. A stage that dies of a timeout, a rate limit, or a transient API
-  error is still per-stage best-effort — those are genuinely local and genuinely retryable, and
-  ending a night on one would trade a rare silent failure for a frequent noisy one.
+- Credential failures abort. A structured rejected quota event either switches to the configured
+  fallback or aborts; timeouts and transient API errors remain per-stage best-effort because they
+  are local and retryable.
 - `NIGHTSHIFT_ADVISOR_AGENT` is gated on *which* adapter died, not on the fact that one did: an
   advisor on a different vendor is unaffected by the outage and still gives a usable second opinion
   on already-pushed branches.

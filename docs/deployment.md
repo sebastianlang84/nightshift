@@ -107,6 +107,7 @@ agent:
 | `NIGHTSHIFT_CLAUDE_MODEL` | claude | the rulebook's `agent.claude_model`, else no `--model` |
 | `NIGHTSHIFT_CLAUDE_FLAGS` | claude | `--dangerously-skip-permissions --max-turns 60` |
 | `NIGHTSHIFT_CLAUDE_SETTING_SOURCES` | claude | `--setting-sources project,local` (stage isolation) |
+| `NIGHTSHIFT_QUOTA_FALLBACK_AGENT` | claude | unset; a structured rejected quota event aborts the night |
 | `NIGHTSHIFT_CODEX_MODEL` | codex | the rulebook's `agent.codex_model`, else no `--model` |
 | `NIGHTSHIFT_CODEX_REASONING_EFFORT` | codex | the CLI default effort applies |
 | `NIGHTSHIFT_CODEX_STAGE_HOME` | codex | `state/codex-home` (stage isolation); empty = your own `CODEX_HOME` |
@@ -119,6 +120,13 @@ agent:
 | `NIGHTSHIFT_TEST_MEMORY_MB` | all | the rulebook's `limits.test_memory_mb`, else 4096 (`RLIMIT_DATA`) |
 | `NIGHTSHIFT_TEST_FSIZE_MB` | all | the rulebook's `limits.test_fsize_mb`, else 2048 (`RLIMIT_FSIZE`) |
 | `NIGHTSHIFT_TEST_MAX_PROCS` | all | the rulebook's `limits.test_max_procs`, else 2048 (`RLIMIT_NPROC`) |
+
+`NIGHTSHIFT_QUOTA_FALLBACK_AGENT=codex` makes a rejected Claude quota event retry that same stage
+once through the Codex adapter, then keeps the rest of the night on Codex. The rejected attempt and
+the retry are separate `runs.jsonl` rows, and the raw quota event is retained in the item directory.
+Credentials and ordinary stage failures do not trigger the fallback. Configure its model and effort
+through the normal Codex settings, for example `agent.codex_model: gpt-5.6-sol` plus
+`NIGHTSHIFT_CODEX_REASONING_EFFORT=medium`.
 
 ### The ship gate runs in a sandbox — and refuses to run without one
 

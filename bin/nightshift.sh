@@ -9,6 +9,8 @@ set -euo pipefail
 
 NIGHTSHIFT_HOME="${NIGHTSHIFT_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 NIGHTSHIFT_AGENT="${NIGHTSHIFT_AGENT:-mock}"
+RUN_PRIMARY_AGENT="$NIGHTSHIFT_AGENT"
+RUN_AGENT_ROUTE="$NIGHTSHIFT_AGENT"
 # After pushing a nightshift/* branch, optionally open a PR for it (1=on). OFF by default:
 # a PR is a host-API object that needs per-host API credentials (GitHub token, Bitbucket app
 # password, ...) which the SSH git transport does NOT provide — so branch-only is the credential-
@@ -476,6 +478,13 @@ clear_stage_artifacts() { # stage item_dir — an iteration may never read the p
   rm -f "$id/$stage.out" "$id/.raw_$stage" "$id/$stage.err" "$id/.usage_$stage" ${artifact:+"$artifact"}
 }
 
+preserve_quota_attempt() { # stage item_dir adapter — keep the rejected provider evidence
+  local stage="$1" id="$2" adapter="$3" f
+  for f in "$id/.raw_$stage" "$id/$stage.err" "$id/.usage_$stage"; do
+    [ ! -e "$f" ] || mv "$f" "$f.$adapter-quota"
+  done
+}
+
 review_artifact_usable() { # item_dir -> a reviewer actually chose one documented verdict
   jq -e 'type=="object" and ((.verdict // "") as $v | $v=="ship" or $v=="revise" or $v=="abandon")' \
     "$1/review.md" >/dev/null 2>&1
@@ -490,6 +499,7 @@ verify_artifact_usable() { # item_dir -> a complete finding-verification result
 
 run_agent() { # stage workdir item_dir
   local stage="$1" workdir="$2" item_dir="$3" start end status=0 resets="" usage='{}'
+  local attempt_agent="$NIGHTSHIFT_AGENT" fallback="${NIGHTSHIFT_QUOTA_FALLBACK_AGENT:-}"
   clear_stage_artifacts "$stage" "$item_dir"
   start=$(date +%s)
   case "$NIGHTSHIFT_AGENT" in
@@ -520,8 +530,26 @@ run_agent() { # stage workdir item_dir
       log "FATAL: re-authenticate the $NIGHTSHIFT_AGENT CLI, then run bin/nightshift.sh again."
     fi
     if [ -z "$AGENT_FATAL" ] && resets=$(agent_quota_rejected "$rawf"); then
-      AGENT_FATAL="$NIGHTSHIFT_AGENT is out of quota until $resets (stage $stage)"
-      AGENT_FATAL_AGENT="$NIGHTSHIFT_AGENT"
+      if { [ "$fallback" = claude ] || [ "$fallback" = codex ]; } \
+         && [ "$fallback" != "$attempt_agent" ]; then
+        # Keep both attempts in runs.jsonl. The rejected provider's raw event is renamed before the
+        # retry clears the canonical stage paths, so the morning still has the exact quota evidence.
+        if [ "$attempt_agent" != mock ] && [ -s "$item_dir/.usage_$stage" ]; then
+          usage=$(jq -c 'if type=="object" then . else {} end' "$item_dir/.usage_$stage" 2>/dev/null || true)
+          [ -n "$usage" ] || usage='{}'
+        fi
+        end=$(date +%s)
+        append_run "$stage" "$attempt_agent" "$start" "$((end - start))" "$status" \
+          "$(basename "$item_dir")" "$usage"
+        preserve_quota_attempt "$stage" "$item_dir" "$attempt_agent"
+        NIGHTSHIFT_AGENT="$fallback"
+        RUN_AGENT_ROUTE="$RUN_PRIMARY_AGENT -> $fallback"
+        log "  stage $stage: $attempt_agent quota rejected until $resets — switching the rest of the night to $fallback"
+        run_agent "$stage" "$workdir" "$item_dir"
+        return $?
+      fi
+      AGENT_FATAL="$attempt_agent is out of quota until $resets (stage $stage)"
+      AGENT_FATAL_AGENT="$attempt_agent"
       log "FATAL: $AGENT_FATAL — aborting the night rather than spending every remaining lens on the same wall."
       log "FATAL: re-run bin/nightshift.sh after $resets."
     fi
@@ -534,7 +562,7 @@ run_agent() { # stage workdir item_dir
     [ -n "$usage" ] || usage='{}'
   fi
   end=$(date +%s)
-  append_run "$stage" "$NIGHTSHIFT_AGENT" "$start" "$((end - start))" "$status" "$(basename "$item_dir")" "$usage"
+  append_run "$stage" "$attempt_agent" "$start" "$((end - start))" "$status" "$(basename "$item_dir")" "$usage"
   return "$status"
 }
 
@@ -2201,6 +2229,7 @@ advise_branches() {
   # Dynamic-scope override: run_agent reads the global NIGHTSHIFT_AGENT; a local here rebinds it for
   # every advise call without disturbing the night's own adapter.
   local NIGHTSHIFT_AGENT="${NIGHTSHIFT_ADVISOR_AGENT:-$NIGHTSHIFT_AGENT}"
+  local NIGHTSHIFT_QUOTA_FALLBACK_AGENT=""
   # If the advisor runs on the adapter that just failed to authenticate, every call would die the
   # same way and stamp "?" over every open branch in the digest. A DIFFERENT vendor is unaffected by
   # the outage, and its second opinion on already-pushed branches is still worth having — so gate on
@@ -2273,7 +2302,7 @@ write_digest() { # made open status [advice]
     echo
     local fcount=0
     [ -f "$LEDGER" ] && fcount=$(jq -s --arg n "$NIGHT" '[.[]|select(.night==$n and .outcome=="finding")]|length' "$LEDGER" 2>/dev/null || echo 0)
-    echo "- agent: \`$NIGHTSHIFT_AGENT\` · shipped this run: ${made} · surfaced (findings): ${fcount} · open (awaiting your verdict): ${open}/${MAX_OPEN} (cap)"
+    echo "- agent: \`$RUN_AGENT_ROUTE\` · shipped this run: ${made} · surfaced (findings): ${fcount} · open (awaiting your verdict): ${open}/${MAX_OPEN} (cap)"
     [ "$status" = budget ] && echo "- **Stopped: time budget exhausted** (\`${MAX_RUN_SECONDS:-?}s\`) — the night ended on the spend cap, not for lack of work."
     # An aborted night must announce itself in the ONE artifact the operator actually reads in the
     # morning. Without this the digest of a credential outage is indistinguishable from a clean
@@ -2502,6 +2531,17 @@ guard_state_remote_incoherence() { # hard-stop (override NIGHTSHIFT_ALLOW_SPLIT_
 # --------------------------------------------------------------------- main ----
 main() {
   load_rulebook
+  case "${NIGHTSHIFT_QUOTA_FALLBACK_AGENT:-}" in
+    "") ;;
+    codex)
+      if [ "$NIGHTSHIFT_AGENT" != claude ]; then
+        log "invalid quota fallback route: $NIGHTSHIFT_AGENT -> codex (currently supported: claude -> codex)"
+        return 2
+      fi ;;
+    *)
+      log "invalid NIGHTSHIFT_QUOTA_FALLBACK_AGENT=$NIGHTSHIFT_QUOTA_FALLBACK_AGENT (currently supported: codex)"
+      return 2 ;;
+  esac
   guard_state_remote_incoherence
   write_claude_settings
   write_codemap_mcp
@@ -2511,6 +2551,18 @@ main() {
   MAX_RUN_SECONDS="${NIGHTSHIFT_MAX_RUN_SECONDS:-}"
   if [ -z "$MAX_RUN_SECONDS" ] && [ -n "${RB_MAX_RUN_MINUTES:-}" ]; then
     MAX_RUN_SECONDS=$(( RB_MAX_RUN_MINUTES * 60 ))
+  fi
+  # Announce the configured route before verify_findings makes the first agent call. A quota
+  # fallback there changes NIGHTSHIFT_AGENT for the rest of the process, so logging afterwards
+  # would mislabel the fallback as the primary.
+  log "agent=$NIGHTSHIFT_AGENT prefix=$BRANCH_PREFIX · cap: max $MAX_OPEN undecided ${BRANCH_PREFIX} branches · run ceiling $MAX_RUN_BRANCHES · fix iters $MAX_FIX_ITER"
+  case "$NIGHTSHIFT_AGENT" in
+    claude) log_model_selection claude NIGHTSHIFT_CLAUDE_MODEL "$RB_CLAUDE_MODEL" ;;
+    codex)  log_model_selection codex  NIGHTSHIFT_CODEX_MODEL  "$RB_CODEX_MODEL"  ;;
+  esac
+  if [ -n "${NIGHTSHIFT_QUOTA_FALLBACK_AGENT:-}" ]; then
+    log "quota fallback: $NIGHTSHIFT_QUOTA_FALLBACK_AGENT (activated only after a structured rejected quota event)"
+    log_model_selection codex NIGHTSHIFT_CODEX_MODEL "$RB_CODEX_MODEL"
   fi
   # Harvest first: reconcile prior shipped branches against git reality (merged/
   # dropped) so the morning digest scoreboard is current. Non-fatal — a harvest
@@ -2526,11 +2578,6 @@ main() {
   # Then close the loop harvest cannot reach: open findings (no branch, no sha). Runs before the
   # night's work so a finding cleared here also drops out of tonight's known_work injection.
   verify_findings
-  log "agent=$NIGHTSHIFT_AGENT prefix=$BRANCH_PREFIX · cap: max $MAX_OPEN undecided ${BRANCH_PREFIX} branches · run ceiling $MAX_RUN_BRANCHES · fix iters $MAX_FIX_ITER"
-  case "$NIGHTSHIFT_AGENT" in
-    claude) log_model_selection claude NIGHTSHIFT_CLAUDE_MODEL "$RB_CLAUDE_MODEL" ;;
-    codex)  log_model_selection codex  NIGHTSHIFT_CODEX_MODEL  "$RB_CODEX_MODEL"  ;;
-  esac
 
   local made=0 considered=0 findings=0 repo mode cfgbase id fp fnj iter verdict wt base b summary open="" pass=0 progress ship_progress stop_reason=ok disp rfind farr n_find k fd dim explore_rc n_partial fix_rc review_rc
   # verify_findings above is the night's first agent call of all. If the credentials are already

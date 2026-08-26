@@ -167,7 +167,9 @@ future tool addition would open a channel with no second barrier.
 ### R7 — Quota / cost runaway <a id="r7"></a>
 Bounded by `--max-turns`, `max_fix_iterations`, `max_open_branches` (hard halt at 4/4),
 `max_branches_per_run`, `max_run_minutes=300`, the hard 5h service timeout, and single-instance
-`flock`. Per-stage token/cost are recorded to the ledger.
+`flock`. Per-stage token/cost are recorded to the ledger. An opt-in quota fallback may use a second
+provider, but only after a structured rejection; the rejected attempt and retry are recorded
+separately, and the run stays under the same wall-clock and branch caps.
 
 *Residual: low.* The value-based throttle in autonomy-and-shutoff.md would tighten it further.
 
