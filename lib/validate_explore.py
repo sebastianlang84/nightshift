@@ -12,6 +12,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+# These key sets are what prompts/explore.md and the lens prompts that replace the code matrix
+# (prompts/dimensions/knowledge.md) ask the model to emit; renaming a key on either side alone
+# refuses every verdict for that lens. tests/test-explore-coverage.sh binds the two together.
 CODE_INVARIANT_KEYS = {
     "config_domain",
     "semantic_sets",
