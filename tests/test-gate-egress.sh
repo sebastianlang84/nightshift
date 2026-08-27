@@ -202,4 +202,13 @@ after="$( { pgrep -f 'egress_proxy.py' 2>/dev/null || true; } | wc -l)"
 find "$TMP/worktrees" -maxdepth 1 -name 'gate-egress.*' | grep -q . \
   && fail "the egress socket directory was left behind"
 
+# --- 6. tearing the proxy down is silent --------------------------------------
+# bash announces a process-substitution job killed by SIGTERM as a bare `Terminated` on stderr, and
+# it does so at the NEXT command — so it surfaces in the night log between "test gate passed" and
+# the push, reading like a crash inside a run that succeeded. Every test_net gate did this. SIGINT
+# is silent and egress_proxy.py already exits cleanly on KeyboardInterrupt.
+out="$(gate 'true' GATE_NET=true)"
+grep -q 'Terminated' <<<"$out" \
+  && { echo "$out" >&2; fail "the egress teardown printed a bare 'Terminated' into the run output"; }
+
 echo "test-gate-egress: ok"

@@ -1881,7 +1881,12 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 blocked, 3 
     # shell — `2>/dev/null || true` does not save it. That killed the whole night right after the
     # first gate of every repo without test_net, which reads downstream as "the loop never retried".
     if [ -n "${egress_pid:-}" ]; then
-      kill "$egress_pid" 2>/dev/null || true
+      # SIGINT, not SIGTERM. bash announces a process-substitution job killed by SIGTERM as a bare
+      # `Terminated` on stderr — deferred to the next command, so it lands in the night log between
+      # "test gate passed" and the push and reads like a crash in a run that succeeded. bash stays
+      # silent for SIGINT and SIGPIPE, and `lib/egress_proxy.py` already exits cleanly on
+      # KeyboardInterrupt, so the quieter signal costs nothing. Every `test_net` gate did this.
+      kill -INT "$egress_pid" 2>/dev/null || true
       exec 8<&-
     fi
     [ -n "${TEST_EGRESS_DIR:-}" ] && rm -rf "$TEST_EGRESS_DIR"
