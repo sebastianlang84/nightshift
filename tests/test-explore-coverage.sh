@@ -79,4 +79,72 @@ if python3 "$ROOT/lib/validate_explore.py" "$TMP/repo" "$TMP/empty-evidence.json
 fi
 grep -q 'coverage.invariants.lifecycle needs' "$TMP/err"
 
+# The matrices above are only enforceable while the prompts ask the model for those exact keys:
+# nothing in the code links the two sides, so a reworded prompt would make the Runner reject every
+# Explore verdict for that lens (bin/nightshift.sh: the ADR 0029 receipt gates `considered` and the
+# dimension scan marker) with the suite still green. Bind them the way tests/test-dimension-catalog.sh
+# binds the dimension catalog to prompts/recon.md.
+
+code_keys() { # code_keys DIMENSION — the keys validate_explore.py demands, sorted, one per line
+  python3 - "$ROOT/lib/validate_explore.py" "$1" <<'PY'
+import importlib.util, sys
+
+spec = importlib.util.spec_from_file_location("validate_explore", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print("\n".join(sorted(module.invariant_keys(sys.argv[2]))))
+PY
+}
+
+# matrix_keys FILE MARKER — the backticked keys of the bullet list introduced by MARKER, sorted.
+# Collection stops at the first line that starts a new unindented paragraph.
+matrix_keys() {
+  awk -v marker="$2" '
+    index($0, marker) { collecting = 1; next }
+    collecting && /^ *- `[a-z_]+`:/ { gsub(/^ *- `|`:.*$/, ""); print; found = 1; next }
+    found && /^[^ -]/ { exit }
+  ' "$1" | sort
+}
+
+mapfile -t default_code < <(code_keys "")
+mapfile -t default_matrix < <(matrix_keys "$ROOT/prompts/explore.md" 'complete the invariant matrix')
+[ "${default_matrix[*]}" = "${default_code[*]}" ] || {
+  echo "test-explore-coverage: prompts/explore.md matrix '${default_matrix[*]}' does not match" \
+    "validate_explore.py '${default_code[*]}'" >&2; exit 1;
+}
+
+# Both output templates (found:true and found:false) must spell out the same keys.
+mapfile -t contract_keys < <(
+  grep -oE '"[a-z_]+":"checked: <evidence>"' "$ROOT/prompts/explore.md" |
+    sed 's/^"//; s/":"checked.*//' | sort -u
+)
+[ "${contract_keys[*]}" = "${default_code[*]}" ] || {
+  echo "test-explore-coverage: explore output contract '${contract_keys[*]}' does not match" \
+    "validate_explore.py '${default_code[*]}'" >&2; exit 1;
+}
+contract_slots=$(grep -cE '"[a-z_]+":"checked: <evidence>"' "$ROOT/prompts/explore.md" || true)
+[ "$contract_slots" -eq $((2 * ${#default_code[@]})) ] || {
+  echo "test-explore-coverage: expected both explore output templates to name all" \
+    "${#default_code[@]} invariants, found $contract_slots slots" >&2; exit 1;
+}
+
+# A lens may replace the code matrix with its own five classes; the validator must know about
+# exactly the lenses that do, and about no others.
+for prompt in "$ROOT"/prompts/dimensions/*.md; do
+  dim="$(basename "$prompt" .md)"
+  mapfile -t lens_code < <(code_keys "$dim")
+  mapfile -t lens_matrix < <(matrix_keys "$prompt" 'REPLACE the generic code invariant matrix')
+  if [ "${#lens_matrix[@]}" -eq 0 ]; then
+    [ "${lens_code[*]}" = "${default_code[*]}" ] || {
+      echo "test-explore-coverage: validate_explore.py demands a replacement matrix for '$dim'" \
+        "that prompts/dimensions/$dim.md never asks for" >&2; exit 1;
+    }
+    continue
+  fi
+  [ "${lens_matrix[*]}" = "${lens_code[*]}" ] || {
+    echo "test-explore-coverage: prompts/dimensions/$dim.md matrix '${lens_matrix[*]}' does not" \
+      "match validate_explore.py '${lens_code[*]}'" >&2; exit 1;
+  }
+done
+
 echo "test-explore-coverage: ok"
