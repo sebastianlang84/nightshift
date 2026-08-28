@@ -21,6 +21,18 @@ yield-weighting / never-exclude with the empty-scope feedback loop (ADR 0015).
   model-derived PR title/body for secrets and re-issue the machine's `gh` credential without
   `admin:public_key` (risk-analysis R12/N6). Credential rotation is an operator action.
 
+## Runner behavior
+
+- **`max_branches_per_run` overshoots by up to one pass.** The `MAX_RUN_BRANCHES` check sits at the
+  top of the pass loop in `run_night` ([`bin/nightshift.sh`](bin/nightshift.sh)), while the
+  open-branch cap is re-checked per item inside the pass. A pass therefore runs every repo to
+  completion before the ceiling is consulted again: observed 2026-08-28 with `max_branches_per_run: 3`,
+  where pass 1 shipped 5 branches (two repos at a findings budget of 2, plus one) and what actually
+  stopped the run was `max_open_branches: 5`. Nothing is unsafe about this — the open-branch cap is
+  the real bound and it held — but the knob does not mean what its name says, which matters for an
+  operator throttling a run deliberately. Either move the check next to the per-item cap check, or
+  rename it and say in [`rulebook.example.yaml`](rulebook.example.yaml) that it is a per-pass floor.
+
 ## Conditional / deferred
 
 - **Wake from suspend:** only if catch-up-on-wake is operationally insufficient.
