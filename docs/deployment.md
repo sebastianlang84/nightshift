@@ -282,6 +282,7 @@ these flags, is what confines the agent (see [`docs/design/risk-analysis.md`](de
 | `state/recon/` | Per-repo recon caches (derived, disposable) | `NIGHTSHIFT_STATE_DIR` |
 | `state/dim-scans/` | Per-(repo,dim) explore markers driving rotation | `NIGHTSHIFT_STATE_DIR` |
 | `state/.ledger-epoch.idx` | Cached per-(repo,dim) ledger aggregates the rotation reads (last service epoch, last shipped epoch) — derived, disposable, rebuilt from the ledger whenever it changes; safe to delete | `NIGHTSHIFT_STATE_DIR` |
+| `state/.ledger-gap.idx` | Cached per-repo service cadence the overdue ceiling reads (service count, median inter-service interval) — derived, disposable, rebuilt from the ledger whenever it changes; safe to delete | `NIGHTSHIFT_STATE_DIR` |
 | `state/codex-home/` | `CODEX_HOME` a codex stage runs under: a symlink to your `auth.json` plus codex's own caches, and deliberately no `AGENTS.md`/`config.toml` (derived, disposable) | `NIGHTSHIFT_CODEX_STAGE_HOME` |
 | `runs/<date>/` | Per-item working dirs (prompts, agent output) | `NIGHTSHIFT_RUNS_DIR` |
 | `digests/<date>.md` | The morning report | `NIGHTSHIFT_DIGEST_DIR` |

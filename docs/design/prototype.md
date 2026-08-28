@@ -123,6 +123,7 @@ finding, needs a night against a clean repo.
 | `lib/validate_explore.py` | validates Explore's tracked-file/flow/invariant coverage receipt |
 | `lib/recon_signals.sh` | collects the per-repo signals recon ranks dimensions on |
 | `lib/probe_findings.py` | finding freshness probe (ADR 0021), writes `state/findings-probe.json` |
+| `lib/ledger_epochs.py` | batch ISO→epoch (and per-repo cadence) for the runner's ledger indexes |
 | `prompts/{recon,explore,fix,review,verify,advise}.md` | provider-neutral stage prompts |
 | `prompts/dimensions/*.md` | one lens per review dimension, selected by recon |
 | `rulebook.example.yaml` | the governance template |

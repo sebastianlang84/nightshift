@@ -40,6 +40,12 @@ LEDGER_EPOCH_INDEX="$STATE_DIR/.ledger-epoch.idx"
 # override — so the format, not just the mtime, invalidates the cache. The lookups match a repo
 # path in $1, so this line can never be mistaken for a row.
 LEDGER_EPOCH_INDEX_VERSION="#nightshift-ledger-epoch-idx v2"
+# The same treatment for the one ledger aggregate the epoch index does not carry: the per-repo
+# service cadence median_gap measures. It is keyed by repo alone (not repo×dimension), and it reads
+# the ledger through a different filter (retraction-aware, all four work outcomes plus `empty`), so
+# it gets its own one-pass, mtime-invalidated file rather than a fifth column.
+LEDGER_GAP_INDEX="$STATE_DIR/.ledger-gap.idx"
+LEDGER_GAP_INDEX_VERSION="#nightshift-ledger-gap-idx v1"
 RUNSLOG="$STATE_DIR/runs.jsonl"
 RECON_DIR="$STATE_DIR/recon"   # per-repo recon caches (ADR 0010); derived, disposable, HEAD/TTL-invalidated
 SCAN_DIR="$STATE_DIR/dim-scans"  # per (repo,dim) explore markers so rotation advances even on an empty Explore
@@ -1227,7 +1233,12 @@ refresh_ledger_epoch_index() { # rebuild LEDGER_EPOCH_INDEX (repo\tdim\tservice_
   #   col 4  max epoch over shipped rows                     (evidence_override: ∃ts>gen ⟺ max>gen)
   # Col 4 reduces over PARSED epochs, not over raw strings: an unparsable ts scores 0, exactly as the
   # old per-row `date -d ... || echo 0` scored it, and a lexical max would let one such row mask a
-  # real shipped finding behind it.
+  # real shipped finding behind it. That is also why the `ship` rows arrive UNGROUPED — jq cannot
+  # take a max over epochs it has not parsed — so the conversion, not the row count, is what has to
+  # be cheap: lib/ledger_epochs.py converts the whole batch in ONE fork (it used to be one `date`
+  # fork per shipped row ever recorded, re-paid on every ledger append, since the mtime invalidates
+  # this index nightly). It rewrites col 4 in place, so the loop below still reads aligned rows and
+  # an empty ts stays empty (skipped) while an unparsable one still scores 0 for its row alone.
   if [ ! -f "$LEDGER" ]; then rm -f "$LEDGER_EPOCH_INDEX" 2>/dev/null || true; return 0; fi
   # Fresh index (exists, current format, ledger not newer) → reuse; nested cells cost a lookup, not
   # a scan. `read` is a builtin, so the version check costs no fork on that hot path.
@@ -1236,19 +1247,20 @@ refresh_ledger_epoch_index() { # rebuild LEDGER_EPOCH_INDEX (repo\tdim\tservice_
     IFS= read -r first < "$LEDGER_EPOCH_INDEX" || true
     [ "$first" = "$LEDGER_EPOCH_INDEX_VERSION" ] && return 0
   fi
-  local raw tmp kind repo dim iso e key
+  local raw tmp kind repo dim e key
   local -A svc=() ship=()
-  # On a jq failure keep any existing index and retry next call — never cache an empty index over a
-  # good one (matches the old per-call `|| true`, which fell back to epoch 0 only for that one call).
+  # On a jq/converter failure keep any existing index and retry next call — never cache an empty
+  # index over a good one (matches the old per-call `|| true`, which fell back to epoch 0 only for
+  # that one call). `pipefail` is what makes a jq failure reach this `||` through the pipe.
   raw=$(jq -rs '
     [.[]|select(.repo!=null and .dimension!=null)] as $rows
     | ( $rows | map(select(.outcome=="finding" or .outcome=="shipped" or .outcome=="abandoned"))
               | group_by([.repo,.dimension]) | map(max_by(.ts) | ["svc",.repo,.dimension,.ts]) )
     + ( $rows | map(select(.outcome=="shipped") | ["ship",.repo,.dimension,.ts]) )
-    | .[] | @tsv' "$LEDGER" 2>/dev/null) || return 0
-  while IFS=$'\t' read -r kind repo dim iso; do
-    [ -n "$iso" ] || continue      # a null/absent ts parses to nothing, as it scored 0 before
-    e=$(date -d "$iso" +%s 2>/dev/null || echo 0)
+    | .[] | @tsv' "$LEDGER" 2>/dev/null \
+        | python3 "$NIGHTSHIFT_HOME/lib/ledger_epochs.py" tsv-epochs --field 4 2>/dev/null) || return 0
+  while IFS=$'\t' read -r kind repo dim e; do
+    [ -n "$e" ] || continue        # a null/absent ts parses to nothing, as it scored 0 before
     key="$repo"$'\t'"$dim"
     if [ "$kind" = svc ]; then
       svc["$key"]=$e
@@ -1330,31 +1342,62 @@ evidence_override() { # repo dim -> 0 if a SHIPPED finding for (repo,dim) postda
   [ "$ship" -gt "$gen" ]
 }
 
-median_gap() { # repo D -> median inter-service interval (secs) across the repo's service rows; 60d bootstrap
-  # "Overdue" is judged RELATIVE to how often this repo actually gets attention, not absolute calendar
-  # age — else a slow-cadence repo would trip an absolute ceiling on every lens every run, neutralizing
-  # the weights. Until the repo has >= D recorded services, bootstrap with an absolute 60d.
-  local repo="$1" D="$2" boot=$((60*86400)) ts e n; local -a eps=()
-  [ -f "$LEDGER" ] || { echo "$boot"; return; }
-  while IFS= read -r ts; do
-    [ -n "$ts" ] || continue
-    e=$(date -d "$ts" +%s 2>/dev/null || echo 0); [ "$e" -gt 0 ] && eps+=("$e")
+refresh_ledger_gap_index() { # rebuild LEDGER_GAP_INDEX (repo\tservices\tmedian_gap) iff the ledger changed
+  # median_gap runs once per repo per pass (dim_ceiling, from select_dimension) and used to re-slurp
+  # the whole never-pruned ledger and fork a `date` per matching row to do it — the same unbounded
+  # per-row cost the epoch index above exists to remove, on the one aggregate that was left out of
+  # it. Derive every repo's cadence in ONE jq pass plus ONE converter fork, cached on the ledger's
+  # mtime and stored in a file (callers run inside command substitutions, so an in-memory
+  # associative array would not survive to the next cell).
+  if [ ! -f "$LEDGER" ]; then rm -f "$LEDGER_GAP_INDEX" 2>/dev/null || true; return 0; fi
+  local first=""
+  if [ -f "$LEDGER_GAP_INDEX" ] && [ ! "$LEDGER" -nt "$LEDGER_GAP_INDEX" ]; then
+    IFS= read -r first < "$LEDGER_GAP_INDEX" || true
+    [ "$first" = "$LEDGER_GAP_INDEX_VERSION" ] && return 0
+  fi
+  local rows tmp
   # `-s` (slurp) rather than the streaming form: a retracted row is identified by an entry that
   # appears LATER in the append-only ledger, so the whole file has to be in hand before any row can
   # be judged. A retracted `empty` never counted as a service — it is the record of a night that
   # claimed to have reviewed something without doing so (ADR 0023), and letting it shorten the
   # measured cadence would make every lens look more overdue than it is.
-  done < <(jq -rs --arg r "$repo" \
-            '[.[]|select(.outcome=="retracted")|.item] as $void
-             | .[]|select(.repo==$r and ([.item]|inside($void)|not)
-                          and (.outcome=="finding" or .outcome=="shipped" or .outcome=="abandoned" or .outcome=="empty"))
-             | .ts' \
-            "$LEDGER" 2>/dev/null || true)
-  n=${#eps[@]}
+  # On a jq/converter failure keep any existing index and retry next call, as above.
+  rows=$(jq -rs '
+            [.[]|select(.outcome=="retracted")|.item] as $void
+            | .[]|select(.repo!=null and ([.item]|inside($void)|not)
+                         and (.outcome=="finding" or .outcome=="shipped" or .outcome=="abandoned" or .outcome=="empty"))
+            | [.repo,.ts] | @tsv' \
+          "$LEDGER" 2>/dev/null \
+            | python3 "$NIGHTSHIFT_HOME/lib/ledger_epochs.py" median-gaps 2>/dev/null) || return 0
+  tmp="$(mktemp "$STATE_DIR/.ledger-gap.idx.XXXXXX")"
+  # A repo with no service rows simply gets no row; the lookup then reads 0 services and bootstraps,
+  # exactly as an empty epoch list did. A ledger with no service rows at all writes the marker alone
+  # — still a valid, cacheable index. The lookups match a repo PATH in $1, so the marker line (which
+  # starts with `#`) can never be mistaken for a row.
+  {
+    printf '%s\n' "$LEDGER_GAP_INDEX_VERSION"
+    if [ -n "$rows" ]; then printf '%s\n' "$rows"; fi
+  } > "$tmp"
+  mv -f "$tmp" "$LEDGER_GAP_INDEX"
+}
+
+median_gap() { # repo D -> median inter-service interval (secs) across the repo's service rows; 60d bootstrap
+  # "Overdue" is judged RELATIVE to how often this repo actually gets attention, not absolute calendar
+  # age — else a slow-cadence repo would trip an absolute ceiling on every lens every run, neutralizing
+  # the weights. Until the repo has >= D recorded services, bootstrap with an absolute 60d.
+  # The counting and the median itself come from the cached index; the two floors stay HERE, because
+  # D — the repo's dimension count — is a rulebook fact the ledger knows nothing about.
+  local repo="$1" D="$2" boot=$((60*86400)) row n m
+  [ -f "$LEDGER" ] || { echo "$boot"; return; }
+  refresh_ledger_gap_index
+  [ -f "$LEDGER_GAP_INDEX" ] || { echo "$boot"; return; }
+  row=$(awk -F'\t' -v r="$repo" '$1==r {print $2"\t"$3; exit}' "$LEDGER_GAP_INDEX")
+  n=${row%%$'\t'*}; m=${row##*$'\t'}
+  [ -n "$n" ] || { n=0; m=0; }
   [ "$n" -lt "$D" ] && { echo "$boot"; return; }
-  printf '%s\n' "${eps[@]}" | sort -n | awk 'NR>1{print $1-p} {p=$1}' | sort -n \
-    | awk -v boot="$boot" '{a[NR]=$1} END{ if(NR==0){print boot;exit}
-        m=(NR%2)?a[(NR+1)/2]:int((a[int(NR/2)]+a[int(NR/2)+1])/2); if(m<=0)m=boot; print m }'
+  # A degenerate median (no gaps at all, or every service in the same second) bootstraps too — a
+  # zero ceiling would mark every lens overdue forever.
+  [ "$m" -gt 0 ] && echo "$m" || echo "$boot"
 }
 
 dim_ceiling() { # repo D -> overdue threshold in secs = 2.5 * D * median_gap  (~2.5 realized rotations)
