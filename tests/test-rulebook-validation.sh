@@ -98,6 +98,15 @@ reject "an empty review agent"      'agent:
   review_agent:'                    "agent.review_agent is empty"
 reject "an empty pi model"          'agent:
   pi_model:'                        "agent.pi_model is empty"
+reject "an unknown primary agent"   'agent:
+  primary: gemini'                  "agent.primary: unknown adapter 'gemini'"
+reject "an empty primary agent"     'agent:
+  primary:'                         "agent.primary is empty"
+# `pi_allow_fix` hands the write-capable Fix stage to an adapter that cannot confine a write, so a
+# value it does not understand must abort rather than be read as either answer. `yes` and `1` are
+# the spellings a human reaches for, and both used to be falsy by accident.
+reject "a non-boolean pi_allow_fix" 'agent:
+  pi_allow_fix: yes'                "agent.pi_allow_fix must be true or false"
 
 # The same standard applies to EVERY mapping section, not just `agent:`. Each section's key set is
 # closed — the parser reads exactly those keys — so a key outside one is a typo, and the only other
@@ -154,9 +163,11 @@ cat > "$TMP/agent-ok.yaml" <<'EOF'
 agent:   # the model this host runs its nights on
   claude_model: "claude-opus-5"
   codex_model: 'gpt-5 #2'
+  primary: pi
   review_agent: pi
   pi_model: z-ai/glm-5.3-flash
   pi_provider: openrouter
+  pi_allow_fix: true
 repos:
   - path: /srv/example
     mode: findings-only
@@ -168,6 +179,22 @@ grep -qx "$(printf 'claude_model\tclaude-opus-5')" "$TMP/stdout" || {
 }
 grep -qx "$(printf 'codex_model\tgpt-5 #2')" "$TMP/stdout" || {
   echo "quoted codex_model with '#' mangled: $(grep codex_model "$TMP/stdout")" >&2
+  exit 1
+}
+grep -qx "$(printf 'primary_agent\tpi')" "$TMP/stdout" || {
+  echo "primary_agent not emitted: $(grep primary_agent "$TMP/stdout")" >&2
+  exit 1
+}
+grep -qx "$(printf 'pi_allow_fix\ttrue')" "$TMP/stdout" || {
+  echo "pi_allow_fix not emitted: $(grep pi_allow_fix "$TMP/stdout")" >&2
+  exit 1
+}
+# Omitted, the fix opt-in must read as OFF — a missing key can never mean "grant write access".
+# Its own output file: the checks below still read $TMP/stdout for the agent block above.
+printf 'repos:\n  - path: /srv/example\n    mode: findings-only\n' > "$TMP/no-agent.yaml"
+python3 "$ROOT/lib/parse_rulebook.py" "$TMP/no-agent.yaml" > "$TMP/stdout-no-agent"
+grep -qx "$(printf 'pi_allow_fix\tfalse')" "$TMP/stdout-no-agent" || {
+  echo "an omitted pi_allow_fix did not default to false" >&2
   exit 1
 }
 

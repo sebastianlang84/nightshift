@@ -90,6 +90,34 @@ node too old to run it (verified: pi requires >= 22.19, the system node is 18). 
 Runner's own PATH would put a `$HOME` directory ahead of the system dirs, which is the R10/N4 hole
 [risk-analysis.md](../design/risk-analysis.md) warns about.
 
+## Amendment, 2026-08-30 — the host may take the Fix risk deliberately
+
+Decision 2 above refuses the Fix stage outright. That refusal now has an explicit opt-in:
+`agent.pi_allow_fix: true` (env `NIGHTSHIFT_PI_ALLOW_FIX=1`), together with `agent.primary`, which
+lets the rulebook name the adapter for the whole night rather than only `$NIGHTSHIFT_AGENT`.
+
+The operator's reasoning, recorded because it is the part a future reader will want to weigh: the
+Fix stage writes into a throwaway worktree, its output reaches a human as a `nightshift/*` branch,
+and no branch is merged without that review. On that view the code the stage produces is already
+gated, and paying Opus prices for it buys little — this night cost 26,34 $, of which 23,52 $ were
+Explore and Fix, against 0,04 $ for six reviews on glm-5.3-flash.
+
+**What the opt-in trades away is not the branch content, and that distinction is the whole point.**
+The confinement bounds where the PROCESS may write, not what the diff contains. A write outside the
+worktree — into `~/partflow` rather than the worktree also named `partflow`, into `~/.claude`, into
+nightshift's own hooks — appears in no diff, so the morning branch review structurally cannot catch
+it. The realistic failure is a confused absolute path, not malice, and it is precisely the case
+Layer 2(b) was built and adversarially tested for on 2026-07-12.
+
+Bounded as far as it can be without a mechanism: `bash` is refused on every pi profile including the
+opted-in Fix one, so such a stage may edit files but never execute anything; the write tools are
+granted only on the Fix stage, never on a read-only one; the rulebook key takes only the literal
+`true`; and the run announces the adapter it uses. What remains unbounded is the write path itself.
+
+The proper fix is a mechanism rather than a policy: wrapping the agent process in the bwrap sandbox
+`build_test_sandbox` already provides for the ship gate (ADR 0026 / hook-spec.md, "when M2 wraps the
+agent process too"). Until that exists, `pi_allow_fix` is the host accepting a known, named risk.
+
 ## Consequences
 
 - A fix can now be judged by a model that did not write it, on the gate that decides shipping.

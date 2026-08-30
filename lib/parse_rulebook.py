@@ -27,11 +27,13 @@ LIMIT_KEYS = (
 )
 RECON_KEYS = ("enabled", "ttl_days")
 AGENT_KEYS = (
+    "primary",
     "claude_model",
     "codex_model",
     "pi_model",
     "pi_provider",
     "pi_extensions",
+    "pi_allow_fix",
     "review_agent",
 )
 # Adapters the Runner implements. `review_agent` names one of these; anything else is a typo, and
@@ -282,6 +284,26 @@ def main(path: str) -> None:
     # adapter, which is the pre-0031 behaviour. Validated against the implemented set for the same
     # reason `mode` is: an unrecognised value cannot be a feature request, and tolerating one would
     # leave the routing silently off.
+    # Which adapter runs the night. Omitted = whatever $NIGHTSHIFT_AGENT says, which is the
+    # pre-existing behaviour; the env var still wins when explicitly set, so a one-off hand run needs
+    # no rulebook edit. Declared here for the same reason the models are (ADR 0020): the host owns
+    # this file, and which agent ran the night is governance, not an invocation detail.
+    primary = agent.get("primary", "")
+    if "primary" in agent and not primary:
+        raise SystemExit("agent.primary is empty - name an adapter, or omit the key entirely")
+    if primary and primary not in REVIEW_AGENTS:
+        raise SystemExit(
+            f"agent.primary: unknown adapter {primary!r} - "
+            f"expected one of {', '.join(sorted(REVIEW_AGENTS))}"
+        )
+    print(f"primary_agent\t{primary}")
+    # Whether the read-only pi adapter may also serve the FIX stage, which it declines by default
+    # (ADR 0031). Only `true` turns it on; any other spelling is refused rather than interpreted, so
+    # a typo cannot decide this by accident.
+    allow_fix = agent.get("pi_allow_fix", "")
+    if allow_fix and allow_fix not in ("true", "false"):
+        raise SystemExit(f"agent.pi_allow_fix must be true or false, got {allow_fix!r}")
+    print(f"pi_allow_fix\t{allow_fix or 'false'}")
     review_agent = agent.get("review_agent", "")
     if "review_agent" in agent and not review_agent:
         raise SystemExit(

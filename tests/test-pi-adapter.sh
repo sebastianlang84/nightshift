@@ -165,6 +165,30 @@ grep -q 'review stage: pi' "$TMP/night.log" || { echo "route not announced" >&2;
   grep -q 'read-only' "$TMP/item/fix.err" || { echo "no refusal reason recorded" >&2; exit 1; }
 )
 
+# --- `agent.primary` picks the night's adapter from the rulebook, and an explicit env var still
+# wins over it — otherwise a one-off hand run could not deviate without editing host governance.
+(
+  export NIGHTSHIFT_STATE_DIR="$TMP/state4" NIGHTSHIFT_RUNS_DIR="$TMP/runs4"
+  export NIGHTSHIFT_DIGEST_DIR="$TMP/digests4" NIGHTSHIFT_WORKTREES="$TMP/worktrees4"
+  cat > "$TMP/primary.yaml" <<EOF
+branch_prefix: nightshift/
+agent:
+  primary: codex
+repos:
+  - path: $TMP/repo
+    mode: findings-only
+EOF
+  # No NIGHTSHIFT_AGENT in the environment at all: the rulebook decides.
+  out=$(env -u NIGHTSHIFT_AGENT NIGHTSHIFT_SOURCED=1 RULEBOOK="$TMP/primary.yaml" bash -c '
+    source "$0"; load_rulebook; printf "%s %s" "$NIGHTSHIFT_AGENT" "$RUN_PRIMARY_AGENT"' "$ROOT/bin/nightshift.sh")
+  [ "$out" = "codex codex" ] || { echo "agent.primary did not select the adapter (got '$out')" >&2; exit 1; }
+
+  # An explicitly set env var outranks it, and the digest's route label follows.
+  out=$(NIGHTSHIFT_AGENT=mock NIGHTSHIFT_SOURCED=1 RULEBOOK="$TMP/primary.yaml" bash -c '
+    source "$0"; load_rulebook; printf "%s %s" "$NIGHTSHIFT_AGENT" "$RUN_PRIMARY_AGENT"' "$ROOT/bin/nightshift.sh")
+  [ "$out" = "mock mock" ] || { echo "the env var lost to agent.primary (got '$out')" >&2; exit 1; }
+)
+
 # --- The daily catalog refresh. pi resolves a model against a cached catalog, so a stale one
 # refuses a model the provider already serves; the refresh runs once per DAY, not once per run, and
 # a failure must never take the night down with it.

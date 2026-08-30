@@ -66,6 +66,16 @@ limits:
 #   # every stage fails with a 403 that reads like a revoked credential and is not. Comma-separated;
 #   # omit it entirely on a host whose provider authenticates from the credential store alone.
 #   pi_extensions: /path/to/pi-ext-auth/src/auth.ts
+#   # Which adapter runs the WHOLE night (claude | codex | pi | mock). Omitted, $NIGHTSHIFT_AGENT
+#   # decides, as before; an explicitly set env var still outranks this key, so a one-off hand run
+#   # needs no edit here.
+#   primary: pi
+#   # Lets pi serve the FIX stage, which it otherwise declines. Read ADR 0031 before setting this:
+#   # the other adapters keep a Fix-stage write inside the worktree by a mechanism (claude's
+#   # PreToolUse guard, codex's OS sandbox) and pi has neither, so with this on the only thing
+#   # keeping a write inside the tree is the model using relative paths. Such a write appears in NO
+#   # diff, so the morning branch review cannot catch it. `bash` stays withheld either way.
+#   pi_allow_fix: true
 #   # Which adapter judges a fix (ADR 0031): claude | codex | pi | mock. Omitted, Review runs on the
 #   # night's own adapter — i.e. the model marks its own homework. Naming a DIFFERENT vendor here is
 #   # the point: a reviewer that did not write the fix cannot share the author's blind spot. A host

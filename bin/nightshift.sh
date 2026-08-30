@@ -9,6 +9,11 @@
 set -euo pipefail
 
 NIGHTSHIFT_HOME="${NIGHTSHIFT_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+# Was the adapter chosen by the CALLER, or is this the built-in default? The rulebook may name the
+# night's adapter (agent.primary), but an explicit env var has to keep winning — that is how a
+# one-off hand run picks a different adapter without editing host governance. Recording it before
+# the default is applied is the only way to tell the two apart afterwards.
+NIGHTSHIFT_AGENT_FROM_ENV="${NIGHTSHIFT_AGENT+1}"
 NIGHTSHIFT_AGENT="${NIGHTSHIFT_AGENT:-mock}"
 RUN_PRIMARY_AGENT="$NIGHTSHIFT_AGENT"
 RUN_AGENT_ROUTE="$NIGHTSHIFT_AGENT"
@@ -91,6 +96,9 @@ source "$NIGHTSHIFT_HOME/lib/base_resolution.sh"
 RB_CLAUDE_MODEL="" RB_CODEX_MODEL="" RB_PI_MODEL="" RB_PI_PROVIDER="" RB_PI_EXTENSIONS="" RB_MAX_VERIFY=""
 # Which adapter serves the Review stage (ADR 0031); empty = the night's own adapter, as before.
 RB_REVIEW_AGENT=""
+# The night's own adapter as declared by the rulebook (empty = the env/default decides), and whether
+# pi may serve the write-capable Fix stage (ADR 0031 refuses it unless the host says otherwise).
+RB_PRIMARY_AGENT="" RB_PI_ALLOW_FIX="false"
 # Announce which model the night will REQUEST, and where that choice came from (ADR 0020). Not which
 # model serves it: with no --model the CLI picks for itself, and even a given id may be an alias that
 # resolves elsewhere — that answer only exists afterwards, in `runs.jsonl` (`model_id`). Announcing
@@ -142,6 +150,8 @@ load_rulebook() {
       pi_provider)           RB_PI_PROVIDER="$a" ;;
       pi_extensions)         RB_PI_EXTENSIONS="$a" ;;
       review_agent)          RB_REVIEW_AGENT="$a" ;;
+      primary_agent)         RB_PRIMARY_AGENT="$a" ;;
+      pi_allow_fix)          RB_PI_ALLOW_FIX="$a" ;;
       dimension)             DIMENSIONS+=("$a") ;;
       repo)                  path="$(repo_id "${a#path=}")"; REPO_PATHS+=("$path"); REPO_MODES+=("${b#mode=}"); REPO_BASES+=("${c#base=}"); REPO_FINDINGS+=("${d#findings=}"); REPO_DIMS+=("${e#dimensions=}"); REPO_TEST_NETS+=("${f#test_net=}"); REPO_TEST_CMDS+=("${g#test_cmd=}") ;;
     esac
@@ -164,6 +174,14 @@ load_rulebook() {
   # Per-run safety ceiling: the rulebook wins; NIGHTSHIFT_MAX_RUN_BRANCHES stays as an
   # ops override for when it is not set there; 50 is the last-resort default.
   MAX_RUN_BRANCHES="${rb_run_branches:-${NIGHTSHIFT_MAX_RUN_BRANCHES:-50}}"
+  # Apply the rulebook's adapter only when the caller did not name one. Both RUN_PRIMARY_AGENT and
+  # RUN_AGENT_ROUTE were captured from the pre-rulebook value at load time and feed the digest's
+  # route line, so they have to move with it or the morning would read the wrong adapter.
+  if [ -z "${NIGHTSHIFT_AGENT_FROM_ENV:-}" ] && [ -n "$RB_PRIMARY_AGENT" ]; then
+    NIGHTSHIFT_AGENT="$RB_PRIMARY_AGENT"
+    RUN_PRIMARY_AGENT="$NIGHTSHIFT_AGENT"
+    RUN_AGENT_ROUTE="$NIGHTSHIFT_AGENT"
+  fi
   export NIGHTSHIFT_BRANCH_PREFIX="$BRANCH_PREFIX"
 }
 
@@ -1304,7 +1322,18 @@ repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
 # `fix` outright rather than shipping an unconfined writer.
 pi_run() { # stage workdir item_dir
   local stage="$1" wd="$2" id="$3" prompt model provider tools rc=0 parse_rc=0
-  if [ "$stage" = fix ]; then
+  # The Fix stage is refused unless the HOST explicitly takes the risk (`agent.pi_allow_fix: true`,
+  # env NIGHTSHIFT_PI_ALLOW_FIX=1). What is being traded away: the other two adapters confine a
+  # Fix-stage write to the worktree by a MECHANISM — claude's PreToolUse guard rejects a Write/Edit
+  # resolving outside it, codex's OS sandbox makes the write impossible — and pi has neither. With
+  # this on, the only thing keeping a write inside the worktree is the model using relative paths.
+  # The realistic failure is not malice but a confused absolute path: a worktree named `partflow`
+  # and a live repo at ~/partflow are one keystroke apart, and such a write appears in NO diff, so
+  # the morning branch review cannot catch it. `bash` stays withheld regardless (see the profile
+  # below), so a fix can still edit files but never execute anything.
+  local allow_fix="${NIGHTSHIFT_PI_ALLOW_FIX:-}"
+  [ -n "$allow_fix" ] || { [ "${RB_PI_ALLOW_FIX:-false}" = true ] && allow_fix=1; }
+  if [ "$stage" = fix ] && [ "${allow_fix:-0}" != 1 ]; then
     log "pi cannot serve the fix stage: no write confinement mechanism (see hook-spec.md Layer 2b)"
     printf 'nightshift: the pi adapter is read-only and refuses the fix stage\n' > "$id/$stage.err"
     return 2
@@ -1352,18 +1381,29 @@ pi_run() { # stage workdir item_dir
   # widen by accident: a tuning snippet adding `bash` "so the reviewer can run the tests" would hand
   # an unconfined shell to a stage on the Runner's host. The override may narrow the profile, never
   # widen it past read-only — a write or exec tool in it aborts the stage.
-  tools="${NIGHTSHIFT_PI_READONLY_TOOLS:-read,grep,find,ls}"
+  # The Fix stage needs edit/write, and gets them ONLY on the stage the host opted into above —
+  # never on a read-only stage, where a write tool has no purpose and only widens the blast radius.
+  # `bash` is in neither profile and is rejected below whatever the host declares: an executing
+  # stage could run git, gh, curl or rm on the Runner's host, which no allowlist can then bound.
+  local permitted
+  if [ "$stage" = fix ]; then
+    tools="${NIGHTSHIFT_PI_FIX_TOOLS:-read,grep,find,ls,edit,write}"
+    permitted='read|grep|find|ls|glob|edit|write'
+  else
+    tools="${NIGHTSHIFT_PI_READONLY_TOOLS:-read,grep,find,ls}"
+    permitted='read|grep|find|ls|glob'
+  fi
   local t
   local IFS_SAVE="$IFS"
   IFS=,
   for t in $tools; do
-    case "$(printf '%s' "$t" | tr -d '[:space:]')" in
-      ''|read|grep|find|ls|glob) ;;
-      *) IFS="$IFS_SAVE"
-         log "pi: refusing tool '$t' — the pi adapter is read-only and has no mechanism to confine a write or a shell"
-         printf 'nightshift: NIGHTSHIFT_PI_READONLY_TOOLS may not grant %s\n' "$t" > "$id/$stage.err"
-         return 2 ;;
-    esac
+    t="$(printf '%s' "$t" | tr -d '[:space:]')"
+    [ -n "$t" ] && ! printf '%s' "$t" | grep -qxE "$permitted" && {
+      IFS="$IFS_SAVE"
+      log "pi: refusing tool '$t' on stage $stage — pi has no mechanism to confine a shell, and a write only where the host opted in"
+      printf 'nightshift: the pi %s profile may not grant %s\n' "$stage" "$t" > "$id/$stage.err"
+      return 2
+    }
   done
   IFS="$IFS_SAVE"
   args+=(--tools "$tools")

@@ -87,7 +87,8 @@ Stages are invoked through `run_agent(stage, workdir, item_dir)`, which dispatch
   Claude adapter's no-Bash profile. The Runner still owns branch, commit, and push.
 - `NIGHTSHIFT_AGENT=pi` — calls `pi -p --mode json` with every discovery source off
   (`--no-extensions --no-skills --no-prompt-templates --no-session`). **Read-only stages only**: it
-  refuses `fix`, because it offers neither the `PreToolUse` guard nor the OS sandbox the other two
+  declines `fix` unless the host opts in with `agent.pi_allow_fix: true`, because it offers neither
+  the `PreToolUse` guard nor the OS sandbox the other two
   adapters confine a Fix-stage write with (ADR 0031). `NIGHTSHIFT_PI_MODEL` / `NIGHTSHIFT_PI_PROVIDER`
   are the host levers; name both, since pi resolves a bare model id against its default provider. On a
   gateway host `NIGHTSHIFT_PI_EXTENSIONS` (rulebook `agent.pi_extensions`) must also name the auth

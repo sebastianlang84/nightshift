@@ -63,6 +63,41 @@ rc=0; NIGHTSHIFT_PI_READONLY_TOOLS="read,write" pi_run review "$TMP/repo" "$TMP/
 rc=0; NIGHTSHIFT_PI_READONLY_TOOLS="read" pi_run review "$TMP/repo" "$TMP/item" || rc=$?
 [ "$rc" = 0 ] || { echo "a narrowed read-only profile was refused (rc=$rc)" >&2; exit 1; }
 
+# --- 1c-2. The Fix stage. Refused by default, because pi has no mechanism that keeps a write inside
+#           the worktree; served only where the host explicitly took that risk, and even then WITHOUT
+#           a shell — an executing stage could reach git, gh or rm on the Runner's host.
+cat > "$TMP/bin/pi" <<'EOF'
+#!/usr/bin/env bash
+# Records the tool profile it was handed, so the test can assert what the stage may actually do.
+tools=""
+while [ "$#" -gt 0 ]; do case "$1" in --tools|-t) tools="$2"; shift 2 ;; *) shift ;; esac; done
+printf '%s\n' "$tools" > "$TOOLS_SEEN"
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"fixed it"}],"model":"m","usage":{"input":1,"output":1},"stopReason":"stop"}}'
+EOF
+chmod +x "$TMP/bin/pi"
+export TOOLS_SEEN="$TMP/tools-seen"
+
+rc=0; pi_run fix "$TMP/repo" "$TMP/item" || rc=$?
+[ "$rc" = 2 ] || { echo "the fix stage was served without an opt-in (rc=$rc)" >&2; exit 1; }
+
+rc=0; NIGHTSHIFT_PI_ALLOW_FIX=1 pi_run fix "$TMP/repo" "$TMP/item" || rc=$?
+[ "$rc" = 0 ] || { echo "the opted-in fix stage was refused anyway (rc=$rc)" >&2; exit 1; }
+grep -q 'edit' "$TOOLS_SEEN" || { echo "the opted-in fix stage got no edit tool" >&2; exit 1; }
+grep -q 'write' "$TOOLS_SEEN" || { echo "the opted-in fix stage got no write tool" >&2; exit 1; }
+grep -q 'bash' "$TOOLS_SEEN" && { echo "the fix stage was handed a shell" >&2; exit 1; }
+# The rulebook key is the other way in, and only the exact word `true` opens it.
+rc=0; RB_PI_ALLOW_FIX=true pi_run fix "$TMP/repo" "$TMP/item" || rc=$?
+[ "$rc" = 0 ] || { echo "agent.pi_allow_fix: true did not open the fix stage (rc=$rc)" >&2; exit 1; }
+rc=0; RB_PI_ALLOW_FIX=false pi_run fix "$TMP/repo" "$TMP/item" || rc=$?
+[ "$rc" = 2 ] || { echo "agent.pi_allow_fix: false served the fix stage (rc=$rc)" >&2; exit 1; }
+# A shell stays refused even where writing is allowed — that opt-in is about writes, not execution.
+rc=0; NIGHTSHIFT_PI_ALLOW_FIX=1 NIGHTSHIFT_PI_FIX_TOOLS="read,edit,bash" pi_run fix "$TMP/repo" "$TMP/item" || rc=$?
+[ "$rc" = 2 ] || { echo "an opted-in fix stage was handed bash (rc=$rc)" >&2; exit 1; }
+# And a read-only stage gains nothing from the fix opt-in.
+rc=0; NIGHTSHIFT_PI_ALLOW_FIX=1 NIGHTSHIFT_PI_READONLY_TOOLS="read,write" pi_run review "$TMP/repo" "$TMP/item" || rc=$?
+[ "$rc" = 2 ] || { echo "the fix opt-in leaked a write tool into a read-only stage (rc=$rc)" >&2; exit 1; }
+unset TOOLS_SEEN
+
 # --- 1d. An explicitly EMPTY NIGHTSHIFT_REVIEW_AGENT means "no routing tonight", the same as an
 #         omitted key — not an unknown adapter that aborts the night before it starts.
 [ "$(NIGHTSHIFT_REVIEW_AGENT="" NIGHTSHIFT_AGENT=claude RB_REVIEW_AGENT=pi review_stage_agent)" = claude ] \

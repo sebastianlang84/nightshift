@@ -166,8 +166,19 @@ overrides it; empty reverts to the operator's own directory.
 Code `PreToolUse` hook, and codex's equivalent is its OS-level `workspace-write` sandbox. pi has
 neither: it can withhold `write`/`edit`/`bash` from a stage entirely — which is what makes its
 read-only profile safe, since no write primitive exists to confine — but nothing in it could bound an
-absolute path once `write` were granted. So `pi_run` refuses the `fix` stage rather than run an
-unconfined writer, and pi serves review/explore/recon/verify/advise only.
+absolute path once `write` were granted. So `pi_run` declines the `fix` stage rather than run an
+unconfined writer, and pi serves review/explore/recon/verify/advise by default.
+
+**The one hole in that, and it is deliberate:** `agent.pi_allow_fix: true` lets a host serve the Fix
+stage on pi anyway (ADR 0031, amendment). Understand what it does and does not cost before setting
+it. It does *not* weaken the review of the branch — that diff still reaches a human. It removes the
+bound on **where the process may write**, and a write outside the worktree appears in no diff at
+all, so no branch review can catch it; the realistic failure is a confused absolute path between a
+worktree named `partflow` and a live repo at `~/partflow`. `bash` stays refused on every pi profile
+including this one, so such a stage can edit files but never execute a command. The mechanism that
+would make this safe rather than merely accepted is wrapping the agent process in
+`build_test_sandbox` (ADR 0026) — the same "when M2 wraps the agent process too" noted at the end of
+this document.
 
 **Rejected alternatives.** `--bare` and `--safe-mode` both remove the personal config, but they also
 disable hooks — that is Layer 2, i.e. the confinement itself — and `--bare` additionally forces
