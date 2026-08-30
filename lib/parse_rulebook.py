@@ -26,7 +26,18 @@ LIMIT_KEYS = (
     "max_verifies_per_run",
 )
 RECON_KEYS = ("enabled", "ttl_days")
-AGENT_KEYS = ("claude_model", "codex_model")
+AGENT_KEYS = (
+    "claude_model",
+    "codex_model",
+    "pi_model",
+    "pi_provider",
+    "pi_extensions",
+    "review_agent",
+)
+# Adapters the Runner implements. `review_agent` names one of these; anything else is a typo, and
+# a typo here would silently leave Review on the night's primary adapter — the opposite of what the
+# host asked for, with no signal that the routing never took effect.
+REVIEW_AGENTS = ("claude", "codex", "pi", "mock")
 # `test_cmd` MUST stay last — see the emitter at the bottom of main(). A new field goes before it.
 REPO_KEYS = ("path", "mode", "base", "findings", "dimensions", "test_net", "test_cmd")
 # The modes the Runner actually implements. A repo whose mode is not in here is a typo, not a
@@ -258,15 +269,30 @@ def main(path: str) -> None:
     # "no model" would silently run the night on something else. Model ID *syntax* stays
     # unvalidated — it belongs to the CLI vendor and any pattern here would go stale — but a tab
     # would corrupt the TSV transport to bash.
-    for key in ("claude_model", "codex_model"):
+    for key in ("claude_model", "codex_model", "pi_model", "pi_provider", "pi_extensions"):
         model = agent.get(key, "")
         if key in agent and not model:
             raise SystemExit(
-                f"agent.{key} is empty — give it a model id, or omit the key entirely"
+                f"agent.{key} is empty — give it a value, or omit the key entirely"
             )
         if "\t" in model:
             raise SystemExit(f"agent.{key} must not contain a tab")
         print(f"{key}\t{model}")
+    # Which adapter serves the Review stage (ADR 0031). Omitted = Review runs on the night's own
+    # adapter, which is the pre-0031 behaviour. Validated against the implemented set for the same
+    # reason `mode` is: an unrecognised value cannot be a feature request, and tolerating one would
+    # leave the routing silently off.
+    review_agent = agent.get("review_agent", "")
+    if "review_agent" in agent and not review_agent:
+        raise SystemExit(
+            "agent.review_agent is empty — name an adapter, or omit the key entirely"
+        )
+    if review_agent and review_agent not in REVIEW_AGENTS:
+        raise SystemExit(
+            f"agent.review_agent: unknown adapter {review_agent!r} — "
+            f"expected one of {', '.join(sorted(REVIEW_AGENTS))}"
+        )
+    print(f"review_agent\t{review_agent}")
     # Global review-dimension set; ORDER is the cold-start / tie priority in the Runner.
     for d in dims:
         print(f"dimension\t{d}")

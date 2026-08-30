@@ -11,8 +11,10 @@ exercises the full loop end-to-end against a throwaway sandbox — see
 `RULEBOOK=… NIGHTSHIFT_STATE_DIR=… bash bin/nightshift.sh` command it prints (it no longer overwrites your
 live `rulebook.yaml`). First-party `claude -p` and `codex exec` adapters run the real
 Recon/Explore/Fix/Review stages plus the read-only Verify stage that closes out old findings
-([ADR 0021](docs/adr/0021-closing-open-findings.md)); adapter and model selection are environment
-configuration.
+([ADR 0021](docs/adr/0021-closing-open-findings.md)); a third adapter, `pi`, serves read-only stages
+only and can take the Review stage alone, so a fix is judged by a model that did not write it
+([ADR 0031](docs/adr/0031-the-reviewer-may-be-another-vendor.md)). Adapter and model selection are
+environment configuration.
 
 **v2 (dimension-rotating, multi-finding):** explore now emits several ranked findings per repo — each on
 its own branch — aimed by a rotating review *dimension* (correctness, security, infra, ui-ux,

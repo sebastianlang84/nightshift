@@ -89,6 +89,15 @@ reject "an agent key with no colon" 'agent:
   claude_model'                     'agent: expected `key: value`'
 reject "an unterminated quote"      'agent:
   claude_model: "m'                 "unterminated quoted value"
+# `review_agent` names an ADAPTER, not a model (ADR 0031), so it is validated against the set the
+# Runner implements. A typo here would leave Review on the night's own adapter with nothing said —
+# i.e. the fix judged by its own author, which is exactly what the key exists to prevent.
+reject "an unknown review agent"    'agent:
+  review_agent: gemini'             "unknown adapter 'gemini'"
+reject "an empty review agent"      'agent:
+  review_agent:'                    "agent.review_agent is empty"
+reject "an empty pi model"          'agent:
+  pi_model:'                        "agent.pi_model is empty"
 
 # The same standard applies to EVERY mapping section, not just `agent:`. Each section's key set is
 # closed — the parser reads exactly those keys — so a key outside one is a typo, and the only other
@@ -145,6 +154,9 @@ cat > "$TMP/agent-ok.yaml" <<'EOF'
 agent:   # the model this host runs its nights on
   claude_model: "claude-opus-5"
   codex_model: 'gpt-5 #2'
+  review_agent: pi
+  pi_model: z-ai/glm-5.3-flash
+  pi_provider: openrouter
 repos:
   - path: /srv/example
     mode: findings-only
@@ -156,6 +168,15 @@ grep -qx "$(printf 'claude_model\tclaude-opus-5')" "$TMP/stdout" || {
 }
 grep -qx "$(printf 'codex_model\tgpt-5 #2')" "$TMP/stdout" || {
   echo "quoted codex_model with '#' mangled: $(grep codex_model "$TMP/stdout")" >&2
+  exit 1
+}
+
+grep -qx "$(printf 'review_agent\tpi')" "$TMP/stdout" || {
+  echo "review_agent not emitted: $(grep review_agent "$TMP/stdout")" >&2
+  exit 1
+}
+grep -qx "$(printf 'pi_model\tz-ai/glm-5.3-flash')" "$TMP/stdout" || {
+  echo "pi_model not emitted: $(grep pi_model "$TMP/stdout")" >&2
   exit 1
 }
 

@@ -4,7 +4,8 @@
 # Outer loop: select a repo -> Explore -> Fix<->Review (capped) -> Finalize
 # (push a nightshift/* branch) -> record. Enforces the nightly branch cap and the
 # global open-branch backpressure. The agent invocation sits behind run_agent()
-# (ADR 0001 adapter seam): NIGHTSHIFT_AGENT=mock | claude | codex.
+# (ADR 0001 adapter seam): NIGHTSHIFT_AGENT=mock | claude | codex | pi. The Review stage may run
+# on a DIFFERENT adapter than the rest of the night (ADR 0031) — see review_stage_agent().
 set -euo pipefail
 
 NIGHTSHIFT_HOME="${NIGHTSHIFT_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -58,12 +59,27 @@ log() { echo "[nightshift] $*" >&2; }
 # --setting-sources cannot drop (verified 2026-08-02, claude 2.1.205). Worktrees default under
 # ${TMPDIR:-/tmp}, outside $HOME, where the isolation holds. Overriding NIGHTSHIFT_WORKTREES into
 # $HOME silently reopens the leak, so say so instead of failing the run (see docs/design/hook-spec.md).
-if [ "$NIGHTSHIFT_AGENT" = claude ] && [ -n "${HOME:-}" ]; then
-  case "$(cd "$WORKTREES_DIR" && pwd -P)/" in
-    "$(cd "$HOME" && pwd -P)"/*)
-      log "WARNING: worktrees live under \$HOME ($WORKTREES_DIR) — stages will inherit ~/.claude/CLAUDE.md" ;;
-  esac
-fi
+# pi collects the same chain (AGENTS.md/CLAUDE.md from cwd upwards), so the precondition is not
+# claude's alone. Called from main() rather than run at load time: the reviewer's adapter can come
+# from the rulebook, which is not parsed yet up here.
+warn_worktrees_in_home() {
+  local a
+  for a in "$NIGHTSHIFT_AGENT" "$(review_stage_agent)"; do
+    case "$a" in claude|pi) ;; *) continue ;; esac
+    [ -n "${HOME:-}" ] || continue
+    local home_p wt_p
+    home_p="$(cd "$HOME" 2>/dev/null && pwd -P)" || continue
+    # An unreachable $HOME resolves to the empty string, and the pattern would degenerate to `/*` —
+    # i.e. warn about every worktree on the machine, including the ones that are correctly placed.
+    [ -n "$home_p" ] || continue
+    wt_p="$(cd "$WORKTREES_DIR" 2>/dev/null && pwd -P)" || continue
+    case "$wt_p/" in
+      "$home_p"/*)
+        log "WARNING: worktrees live under \$HOME ($WORKTREES_DIR) — $a stages will inherit the operator's instruction files"
+        return 0 ;;
+    esac
+  done
+}
 
 # ---------------------------------------------------------------- rulebook ----
 declare -a REPO_PATHS=() REPO_MODES=() REPO_BASES=() REPO_FINDINGS=() REPO_DIMS=() REPO_TEST_NETS=() REPO_TEST_CMDS=() DIMENSIONS=()
@@ -72,7 +88,9 @@ BASE_RESOLUTION_WARN_MISSING=1
 source "$NIGHTSHIFT_HOME/lib/base_resolution.sh"
 # Rulebook-declared model per adapter (ADR 0020); empty = the rulebook declares none. Kept separate
 # from the NIGHTSHIFT_*_MODEL env vars so the precedence env > rulebook > CLI default stays legible.
-RB_CLAUDE_MODEL="" RB_CODEX_MODEL="" RB_MAX_VERIFY=""
+RB_CLAUDE_MODEL="" RB_CODEX_MODEL="" RB_PI_MODEL="" RB_PI_PROVIDER="" RB_PI_EXTENSIONS="" RB_MAX_VERIFY=""
+# Which adapter serves the Review stage (ADR 0031); empty = the night's own adapter, as before.
+RB_REVIEW_AGENT=""
 # Announce which model the night will REQUEST, and where that choice came from (ADR 0020). Not which
 # model serves it: with no --model the CLI picks for itself, and even a given id may be an alias that
 # resolves elsewhere — that answer only exists afterwards, in `runs.jsonl` (`model_id`). Announcing
@@ -120,6 +138,10 @@ load_rulebook() {
       max_lines)             MAX_LINES="$a" ;;
       claude_model)          RB_CLAUDE_MODEL="$a" ;;
       codex_model)           RB_CODEX_MODEL="$a" ;;
+      pi_model)              RB_PI_MODEL="$a" ;;
+      pi_provider)           RB_PI_PROVIDER="$a" ;;
+      pi_extensions)         RB_PI_EXTENSIONS="$a" ;;
+      review_agent)          RB_REVIEW_AGENT="$a" ;;
       dimension)             DIMENSIONS+=("$a") ;;
       repo)                  path="$(repo_id "${a#path=}")"; REPO_PATHS+=("$path"); REPO_MODES+=("${b#mode=}"); REPO_BASES+=("${c#base=}"); REPO_FINDINGS+=("${d#findings=}"); REPO_DIMS+=("${e#dimensions=}"); REPO_TEST_NETS+=("${f#test_net=}"); REPO_TEST_CMDS+=("${g#test_cmd=}") ;;
     esac
@@ -349,7 +371,10 @@ codex_stage_home() {
   [ -n "$stage" ] || { printf '%s' "$real"; return 0; }
   mkdir -p "$stage" || { log "codex stage home $stage not creatable"; return 1; }
   # Same path = the operator's own home; never relink credentials onto themselves.
+  # Reaching the operator's own directory is a supported escape hatch, but never a silent one: it
+  # reopens the AGENTS.md leak this function exists to close, and a stage worknote is pushed.
   [ "$(cd "$stage" && pwd -P)" != "$(cd "$real" 2>/dev/null && pwd -P || echo "$real")" ] || {
+    log "WARNING: pi stage home IS the operator's pi directory ($real) — stages inherit its AGENTS.md"
     printf '%s' "$stage"; return 0; }
   if [ -e "$real/auth.json" ]; then
     ln -sfn "$real/auth.json" "$stage/auth.json"
@@ -359,6 +384,42 @@ codex_stage_home() {
     # SILENTLY — as a leak nobody sees until it is in a commit body.
     log "codex: no auth.json under $real — stage home carries no credentials"
   fi
+  printf '%s' "$stage"
+}
+
+# The Runner-owned agent dir a pi stage runs under (ADR 0019 / ADR 0031) — echoes the path, empty on
+# failure. pi resolves ~/.pi/agent from $PI_CODING_AGENT_DIR, and that directory holds the operator's
+# global AGENTS.md, which pi injects into EVERY stage: verified 2026-08-30 against pi 0.84.2, a stage
+# launched with --no-extensions --no-skills --no-prompt-templates and a cwd outside $HOME still named
+# ~/.pi/agent/AGENTS.md as an injected instruction file. `--no-context-files` is the wrong lever — it
+# is all-or-nothing and would drop the TARGET repo's AGENTS.md too, which a stage legitimately needs.
+# So the same shape as codex_stage_home: a Runner-owned dir holding NOTHING but symlinks to the
+# credential store and the model catalogs — personal config out, repo AGENTS.md unaffected. Verified
+# with the same probe: the stage answered NONE.
+# NIGHTSHIFT_PI_STAGE_HOME overrides the location; set it EMPTY to run under the operator's real pi
+# dir instead (escape hatch — reopens the leak).
+pi_stage_home() {
+  local real stage f
+  real="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
+  stage="${NIGHTSHIFT_PI_STAGE_HOME-$STATE_DIR/pi-home}"
+  [ -n "$stage" ] || { printf '%s' "$real"; return 0; }
+  mkdir -p "$stage" || { log "pi stage home $stage not creatable"; return 1; }
+  # Reaching the operator's own directory is a supported escape hatch, but never a silent one: it
+  # reopens the AGENTS.md leak this function exists to close, and a stage worknote is pushed.
+  [ "$(cd "$stage" && pwd -P)" != "$(cd "$real" 2>/dev/null && pwd -P || echo "$real")" ] || {
+    log "WARNING: pi stage home IS the operator's pi directory ($real) — stages inherit its AGENTS.md"
+    printf '%s' "$stage"; return 0; }
+  # auth.json carries the credentials; the models*.json catalogs are what let pi RESOLVE a model id
+  # at all — without them a `--model` the operator declared is rejected as unknown before any
+  # request is made. Both are re-linked per stage, which self-heals a stale link after `pi auth`.
+  for f in auth.json models.json models-store.json; do
+    if [ -e "$real/$f" ]; then
+      ln -sfn "$real/$f" "$stage/$f"
+    else
+      rm -f "$stage/$f"
+      [ "$f" != auth.json ] || log "pi: no auth.json under $real — stage home carries no credentials"
+    fi
+  done
   printf '%s' "$stage"
 }
 
@@ -410,6 +471,17 @@ agent_diagnosis() { # raw_file -> what the CLI said about the run, on stdout
           "$f" 2>/dev/null
         return 0 ;;
     esac
+  fi
+  if [ "${NIGHTSHIFT_AGENT:-}" = pi ]; then
+    # Same hazard the claude branch above exists for: pi's event stream carries the user prompt and
+    # every tool result verbatim, i.e. the REPO's words, and matching credential prose against that
+    # is how a lens that merely READ about logging in aborted a healthy night. pi states its own
+    # verdict in one place — `errorMessage` on a message whose stopReason is "error" — so only that
+    # is offered for diagnosis. A stream with no such message has nothing the CLI said about itself.
+    jq -rs '[ .[] | select(type=="object" and .type=="message_end") | .message
+              | select(type=="object" and .stopReason=="error") | .errorMessage // "" ] | join("\n")' \
+      "$f" 2>/dev/null || true
+    return 0
   fi
   cat "$f"
 }
@@ -506,7 +578,8 @@ run_agent() { # stage workdir item_dir
     mock)   "mock_$stage" "$workdir" "$item_dir" || status=$? ;;
     claude) claude_run "$stage" "$workdir" "$item_dir" || status=$? ;;
     codex)  codex_run "$stage" "$workdir" "$item_dir" || status=$? ;;
-    *) log "unknown NIGHTSHIFT_AGENT=$NIGHTSHIFT_AGENT (expected mock, claude, or codex)"; status=2 ;;
+    pi)     pi_run    "$stage" "$workdir" "$item_dir" || status=$? ;;
+    *) log "unknown NIGHTSHIFT_AGENT=$NIGHTSHIFT_AGENT (expected mock, claude, codex, or pi)"; status=2 ;;
   esac
   # A non-zero stage is reported as a FAILURE, not absorbed into "found nothing". The exit code has
   # always been recorded in runs.jsonl, but nothing ever read it back out — so a stage that could not
@@ -564,6 +637,92 @@ run_agent() { # stage workdir item_dir
   end=$(date +%s)
   append_run "$stage" "$attempt_agent" "$start" "$((end - start))" "$status" "$(basename "$item_dir")" "$usage"
   return "$status"
+}
+
+# ------------------------------------------------------------ review route ----
+# Which adapter judges a fix (ADR 0031). Empty rulebook key and empty env = the night's own adapter,
+# which is the pre-0031 behaviour. A DIFFERENT adapter here is the point: Fix and Review are the same
+# model marking its own homework, and a reviewer from another vendor cannot share the author's blind
+# spot — the same reasoning that already gave advise_branches its NIGHTSHIFT_ADVISOR_AGENT.
+# Resolved in two steps rather than one nested default, so that an explicitly EMPTY
+# NIGHTSHIFT_REVIEW_AGENT means "no routing tonight" — the escape hatch every other adapter env var
+# has — while the function still never returns the empty string. Collapsing it into
+# `${NIGHTSHIFT_REVIEW_AGENT-${RB_REVIEW_AGENT:-$NIGHTSHIFT_AGENT}}` returns "" for that case, which
+# main()'s validation then rejects as an unknown adapter: the documented way to switch the routing
+# off for one hand-run would kill the night before it started. Using `:-` instead loses the escape
+# hatch altogether, because the rulebook key would win over the operator's explicit "off".
+review_stage_agent() {
+  local ra="${NIGHTSHIFT_REVIEW_AGENT-${RB_REVIEW_AGENT:-}}"
+  [ -n "$ra" ] || ra="$NIGHTSHIFT_AGENT"
+  printf '%s' "$ra"
+}
+
+# Run the Review stage on that adapter. Same dynamic-scope override advise_branches uses: run_agent
+# reads the global NIGHTSHIFT_AGENT, so a `local` rebinds it for this call alone and every helper it
+# reaches (agent_diagnosis, agent_quota_rejected, the telemetry adapter name) sees the adapter that
+# actually ran.
+run_review_stage() { # workdir item_dir
+  local ra; ra="$(review_stage_agent)"
+  [ -n "$ra" ] || ra="$NIGHTSHIFT_AGENT"
+  if [ "$ra" = "$NIGHTSHIFT_AGENT" ]; then
+    run_agent review "$1" "$2"
+    return $?
+  fi
+  # The quota fallback route is claude -> codex and belongs to the NIGHT's adapter. Carrying it into
+  # a deliberately-chosen reviewer would silently swap the reviewer for the very vendor the routing
+  # exists to differ from, so the reviewer keeps its own quota verdict instead.
+  local NIGHTSHIFT_AGENT="$ra" NIGHTSHIFT_QUOTA_FALLBACK_AGENT=""
+  run_agent review "$1" "$2"
+}
+
+# ---------------------------------------------------------------- pi update ----
+# What to put in FRONT of PATH for a pi subprocess (empty unless the launcher supplied it). pi is an
+# npm-global under nvm and its `#!/usr/bin/env node` shebang takes whatever node comes first — under
+# the unattended launcher's PATH that is /usr/bin/node v18, while pi requires >= 22.19. Prepending is
+# confined to the pi subprocess on purpose: the Runner's own PATH keeps the system dirs first so
+# nothing under $HOME can shadow its unqualified jq/git/python3 calls (risk-analysis.md R10/N4).
+pi_path_prefix() { # -> "dir:" or ""
+  local p="${NIGHTSHIFT_PI_PATH:-}"
+  [ -n "$p" ] || return 0
+  printf '%s:' "$p"
+}
+
+# pi resolves a `--model` against a CATALOG it caches on disk, and a stale catalog rejects a model
+# the provider already serves: verified 2026-08-30, where `z-ai/glm-5.3-flash` was refused as unknown
+# by a 13-day-old store and accepted immediately after a refresh. So a host that runs any stage on pi
+# refreshes it once a day, before the first stage of that day — `--all` (pi itself plus the installed
+# extensions, as the host asked for) followed by `--models`, which `--all` does NOT cover and which is
+# the half the model resolution actually depends on.
+#
+# Once a DAY, not once a run: the stamp holds the date the refresh last succeeded, so a second run
+# the same night costs nothing. Failure is logged and never fatal — an update that cannot reach the
+# network is not a reason to skip a night, and the previous catalog is still on disk. The whole thing
+# is skipped unless a pi stage is actually configured, and NIGHTSHIFT_PI_UPDATE=0 opts out entirely.
+#
+# Note for the operator: `pi update --all` hard-resets pi-managed git clones under ~/.pi/agent/git/
+# (`git reset --hard` + `git clean -fdx`). Nightshift runs it because the host asked it to; local
+# edits parked in those clones would not survive it.
+pi_daily_update() {
+  [ "${NIGHTSHIFT_PI_UPDATE:-1}" = 1 ] || return 0
+  [ "$NIGHTSHIFT_AGENT" = pi ] || [ "$(review_stage_agent)" = pi ] || return 0
+  PATH="$(pi_path_prefix)$PATH" command -v pi >/dev/null 2>&1 \
+    || { log "pi update skipped — no pi on PATH"; return 0; }
+  local stamp="$STATE_DIR/.pi-update-day" today
+  today="$(date +%F)"
+  [ "$(cat "$stamp" 2>/dev/null || true)" != "$today" ] || return 0
+  local out rc
+  log "pi update: refreshing pi, extensions and model catalogs (once per day)"
+  rc=0; out="$(PATH="$(pi_path_prefix)$PATH" timeout "${NIGHTSHIFT_PI_UPDATE_TIMEOUT:-900}" pi update --all 2>&1)" || rc=$?
+  [ "$rc" -eq 0 ] || log "pi update --all failed (exit $rc): $(printf '%s' "$out" | tail -n 1 | cut -c1-200)"
+  # The catalog refresh is the half that decides whether a declared model resolves at all, so its
+  # status ALONE is what the stamp records — each call gets its own status, or a failed `--all`
+  # would suppress tomorrow's catalog refresh too, which is the failure this exists to prevent.
+  rc=0; out="$(PATH="$(pi_path_prefix)$PATH" timeout "${NIGHTSHIFT_PI_UPDATE_TIMEOUT:-900}" pi update --models 2>&1)" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    printf '%s\n' "$today" > "$stamp"
+  else
+    log "pi update --models failed (exit $rc): $(printf '%s' "$out" | tail -n 1 | cut -c1-200)"
+  fi
 }
 
 # ----------------------------------------------------------- commit subject ----
@@ -1128,6 +1287,144 @@ repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
       cache_creation_tokens: null,
       context_window:        null,
       cost_usd:              null,
+      model_cost_usd:        null }' \
+    "$events" > "$id/.usage_$stage" 2>/dev/null || true
+  materialize_stage_output "$stage" "$id" || parse_rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
+  return "$parse_rc"
+}
+
+# ---- pi adapter (first-party CLI headless, ADR 0031) ----
+# READ-ONLY STAGES ONLY, and that is a safety boundary, not a convenience. The Fix stage's write
+# confinement (R8, hook-spec.md Layer 2b) is enforced per adapter: claude by a PreToolUse guard that
+# rejects Write/Edit outside the worktree, codex by an OS-level `--sandbox workspace-write`. pi has
+# NEITHER — its tool allowlist can withhold `edit`/`write`/`bash` entirely, but it offers no hook and
+# no sandbox that could bound an absolute path once `write` is granted. A read-only stage needs no
+# such bound (no write primitive exists to confine), so pi is admitted for exactly those and refuses
+# `fix` outright rather than shipping an unconfined writer.
+pi_run() { # stage workdir item_dir
+  local stage="$1" wd="$2" id="$3" prompt model provider tools rc=0 parse_rc=0
+  if [ "$stage" = fix ]; then
+    log "pi cannot serve the fix stage: no write confinement mechanism (see hook-spec.md Layer 2b)"
+    printf 'nightshift: the pi adapter is read-only and refuses the fix stage\n' > "$id/$stage.err"
+    return 2
+  fi
+  # `-ne` (no extension discovery) is not merely a context-hygiene flag here: on a host whose models
+  # are served through a gateway, AUTHENTICATION ITSELF is provided by a pi extension that stamps the
+  # caller's device header, and dropping it makes every call fail with a 403 naming a device
+  # mismatch — a message that reads like a revoked credential and is not. Verified 2026-08-30 against
+  # this host's proxy. So discovery stays off (the operator's memory/subagent/websearch extensions
+  # have no business in a stage) and the auth extension is loaded back BY PATH, which `-e` does even
+  # under `-ne`. A host whose provider needs no such extension declares none and loses nothing.
+  local -a args=(-p --mode json --no-session --no-extensions --no-skills --no-prompt-templates
+    --no-approve)
+  local exts ext
+  exts="${NIGHTSHIFT_PI_EXTENSIONS-${RB_PI_EXTENSIONS:-}}"
+  if [ -n "$exts" ]; then
+    local IFS=,
+    for ext in $exts; do
+      [ -n "$ext" ] || continue
+      # Absolute, because the check happens in the RUNNER's cwd while pi runs in the worktree: a
+      # relative path that exists here can be missing there, which produces exactly the 403 the log
+      # line below exists to prevent.
+      ext="$(realpath -m -- "$ext" 2>/dev/null || printf '%s' "$ext")"
+      if [ -e "$ext" ]; then
+        args+=(-e "$ext")
+      else
+        # Naming an extension that is not there is a config error, and the failure it causes without
+        # this line is a 403 the operator would read as an auth problem. Say it once, here.
+        log "pi: declared extension not found: $ext"
+      fi
+    done
+  fi
+  # Same precedence as the other adapters: env if SET (empty = pass no flag), else the rulebook's
+  # `agent.pi_model` / `agent.pi_provider` (ADR 0020), else whatever pi resolves by itself.
+  model="${NIGHTSHIFT_PI_MODEL-${RB_PI_MODEL:-}}"
+  [ -z "$model" ] || args+=(--model "$model")
+  provider="${NIGHTSHIFT_PI_PROVIDER-${RB_PI_PROVIDER:-}}"
+  [ -z "$provider" ] || args+=(--provider "$provider")
+  # Capability profile, same principle as the claude half: enforce the stage's rules by which tools
+  # EXIST. Verified 2026-08-30 that pi honours the allowlist — a stage granted read,grep,find,ls was
+  # told to write a file and answered that it had no tool to do it, and no file appeared.
+  #
+  # For the other two adapters the tool profile is one layer over a mechanism (the PreToolUse guard,
+  # the OS sandbox). For pi it is the WHOLE confinement, so it may not be a knob an operator can
+  # widen by accident: a tuning snippet adding `bash` "so the reviewer can run the tests" would hand
+  # an unconfined shell to a stage on the Runner's host. The override may narrow the profile, never
+  # widen it past read-only — a write or exec tool in it aborts the stage.
+  tools="${NIGHTSHIFT_PI_READONLY_TOOLS:-read,grep,find,ls}"
+  local t
+  local IFS_SAVE="$IFS"
+  IFS=,
+  for t in $tools; do
+    case "$(printf '%s' "$t" | tr -d '[:space:]')" in
+      ''|read|grep|find|ls|glob) ;;
+      *) IFS="$IFS_SAVE"
+         log "pi: refusing tool '$t' — the pi adapter is read-only and has no mechanism to confine a write or a shell"
+         printf 'nightshift: NIGHTSHIFT_PI_READONLY_TOOLS may not grant %s\n' "$t" > "$id/$stage.err"
+         return 2 ;;
+    esac
+  done
+  IFS="$IFS_SAVE"
+  args+=(--tools "$tools")
+  prompt="$(stage_prompt "$stage" "$wd" "$id")"
+  # Stage isolation (ADR 0019): a Runner-owned agent dir with no AGENTS.md in it. The discovery
+  # flags above cover extensions, skills and prompt templates — none of which cover that file.
+  local pi_home
+  pi_home="$(pi_stage_home)"
+  [ -n "$pi_home" ] || return 1
+  # Same capture contract as the other adapters: stderr to $stage.err, the unparsed event stream to
+  # .raw_$stage. GIT_CONFIG_* injects the pre-push confinement for consistency with the other
+  # adapters even though this profile grants no shell — the hook costs nothing and the profile is
+  # the only thing standing between a future `bash` grant and an unconfined push.
+  local events="$id/.raw_$stage"
+  (cd "$wd" && \
+    PATH="$(pi_path_prefix)$PATH" \
+    GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="$HOOKS_DIR" \
+    PI_CODING_AGENT_DIR="$pi_home" \
+    pi "${args[@]}" -- "$prompt" </dev/null) > "$events" 2>"$id/$stage.err" || rc=$?
+  # pi streams JSONL events and the ANSWER is the text content of the last assistant message that
+  # actually stopped. `.role=="assistant"` alone is not enough: the same stream carries thinking
+  # blocks and tool calls, and an aborted turn carries an empty content array.
+  jq -rs '[ .[] | select(type=="object" and .type=="message_end") | .message
+            | select(type=="object" and .role=="assistant" and .stopReason=="stop") ]
+          | last // {} | [(.content // [])[] | select(type=="object" and .type=="text") | .text]
+          | join("")' \
+    "$events" > "$id/$stage.out" 2>/dev/null || : > "$id/$stage.out"
+  # pi reports a provider/transport failure INSIDE the stream (stopReason "error" + errorMessage) and
+  # still exits 0 — verified 2026-08-30, where a 403 from the model gateway produced rc=0 and an
+  # empty answer. Left alone that is the exact failure ADR 0023 exists to prevent: a stage that never
+  # reached a model, recorded as one that ran and found nothing. So the stream's own verdict, not the
+  # exit code, decides whether the stage failed.
+  #
+  # An error event is not by itself a failed stage: pi retries a turn (its own stream says
+  # `willRetry`), so a transient rejection can be followed by a completed answer. Failing on the
+  # error alone would turn a provider hiccup into a lost review on the gate that decides shipping.
+  # What decides is whether an ANSWER survived — the error is recorded either way, because a stage
+  # that needed a retry is worth seeing in the morning.
+  local pi_err
+  pi_err="$(jq -rs '[ .[] | select(type=="object" and .type=="message_end") | .message
+                      | select(type=="object" and .role=="assistant" and .stopReason=="error")
+                      | .errorMessage // "unspecified error" ] | last // ""' \
+              "$events" 2>/dev/null || true)"
+  if [ -n "$pi_err" ]; then
+    printf 'pi: %s\n' "$pi_err" >> "$id/$stage.err"
+    [ "$rc" -ne 0 ] || [ -s "$id/$stage.out" ] || rc=1
+  fi
+  # Telemetry sidecar — same object contract as the other adapters. pi's usage rides on each
+  # assistant message and is PER MESSAGE, not cumulative, so the counters are summed across the
+  # stage's turns; the model id is taken from the last message that reports one. pi reports no
+  # context window, so that field degrades to null rather than being inferred.
+  jq -sc '[ .[] | select(type=="object" and .type=="message_end") | .message
+            | select(type=="object" and .role=="assistant") ] as $m |
+    [ $m[] | .usage | select(type=="object") ] as $u |
+    { model_id: ([ $m[] | .model | select(type=="string" and . != "") ] | last // null),
+      output_tokens:         ([ $u[] | .output    // 0 ] | add // null),
+      input_tokens:          ([ $u[] | .input     // 0 ] | add // null),
+      cache_read_tokens:     ([ $u[] | .cacheRead // 0 ] | add // null),
+      cache_creation_tokens: ([ $u[] | .cacheWrite // 0 ] | add // null),
+      context_window:        null,
+      cost_usd:              ([ $u[] | .cost.total // 0 ] | add // null),
       model_cost_usd:        null }' \
     "$events" > "$id/.usage_$stage" 2>/dev/null || true
   materialize_stage_output "$stage" "$id" || parse_rc=$?
@@ -2547,6 +2844,16 @@ main() {
       log "invalid NIGHTSHIFT_QUOTA_FALLBACK_AGENT=$NIGHTSHIFT_QUOTA_FALLBACK_AGENT (currently supported: codex)"
       return 2 ;;
   esac
+  # The rulebook's `agent.review_agent` is validated by the parser; NIGHTSHIFT_REVIEW_AGENT is not,
+  # and an unrecognised value there would fail EVERY review stage one at a time (run_agent's unknown-
+  # adapter branch) instead of saying so once, before the night spends anything.
+  case "$(review_stage_agent)" in
+    claude|codex|pi|mock) ;;
+    *) log "invalid review agent '$(review_stage_agent)' (expected claude, codex, pi, or mock)"
+       return 2 ;;
+  esac
+  warn_worktrees_in_home
+  pi_daily_update
   guard_state_remote_incoherence
   write_claude_settings
   write_codemap_mcp
@@ -2561,10 +2868,21 @@ main() {
   # fallback there changes NIGHTSHIFT_AGENT for the rest of the process, so logging afterwards
   # would mislabel the fallback as the primary.
   log "agent=$NIGHTSHIFT_AGENT prefix=$BRANCH_PREFIX · cap: max $MAX_OPEN undecided ${BRANCH_PREFIX} branches · run ceiling $MAX_RUN_BRANCHES · fix iters $MAX_FIX_ITER"
-  case "$NIGHTSHIFT_AGENT" in
-    claude) log_model_selection claude NIGHTSHIFT_CLAUDE_MODEL "$RB_CLAUDE_MODEL" ;;
-    codex)  log_model_selection codex  NIGHTSHIFT_CODEX_MODEL  "$RB_CODEX_MODEL"  ;;
-  esac
+  announce_agent_model() { # adapter
+    case "$1" in
+      claude) log_model_selection claude NIGHTSHIFT_CLAUDE_MODEL "$RB_CLAUDE_MODEL" ;;
+      codex)  log_model_selection codex  NIGHTSHIFT_CODEX_MODEL  "$RB_CODEX_MODEL"  ;;
+      pi)     log_model_selection pi     NIGHTSHIFT_PI_MODEL     "$RB_PI_MODEL"     ;;
+    esac
+  }
+  announce_agent_model "$NIGHTSHIFT_AGENT"
+  # A reviewer on another adapter is a governance fact the morning needs stated, not inferred from
+  # runs.jsonl: it is the difference between a fix judged by its own author and one judged by a
+  # different vendor (ADR 0031).
+  if [ "$(review_stage_agent)" != "$NIGHTSHIFT_AGENT" ]; then
+    log "review stage: $(review_stage_agent) (the rest of the night runs on $NIGHTSHIFT_AGENT)"
+    announce_agent_model "$(review_stage_agent)"
+  fi
   if [ -n "${NIGHTSHIFT_QUOTA_FALLBACK_AGENT:-}" ]; then
     log "quota fallback: $NIGHTSHIFT_QUOTA_FALLBACK_AGENT (activated only after a structured rejected quota event)"
     log_model_selection codex NIGHTSHIFT_CODEX_MODEL "$RB_CODEX_MODEL"
@@ -2828,7 +3146,7 @@ main() {
         git -C "$wt" add -A
         git -C "$wt" write-tree > "$fd/reviewed-tree" 2>/dev/null || rm -f "$fd/reviewed-tree"
         review_rc=0
-        run_agent review "$wt" "$fd" || review_rc=$?
+        run_review_stage "$wt" "$fd" || review_rc=$?
         if [ -n "$AGENT_FATAL" ]; then gate=agent-fatal; verdict=""; break; fi
         if ! review_artifact_usable "$fd"; then
           gate=stage-failed; verdict=""

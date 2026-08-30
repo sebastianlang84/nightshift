@@ -151,6 +151,24 @@ contains **only** a symlink to the operator's `auth.json` — credentials in, pe
 home. With no `auth.json` to link, the stage still runs isolated: an auth failure is loud, a reopened
 leak is not.
 
+**pi — mechanism (verified against pi 0.84.2, 2026-08-30).** Same shape as codex, for the same
+reason. `--no-extensions`, `--no-skills` and `--no-prompt-templates` switch off every discovery
+source pi documents, and none of them covers `~/.pi/agent/AGENTS.md`: a stage launched with all three,
+from a cwd outside `$HOME`, still named that file as an injected instruction file when asked.
+`--no-context-files` is all-or-nothing and would drop the *target repo's* `AGENTS.md` with it. pi
+resolves its agent directory from `$PI_CODING_AGENT_DIR`, so `pi_stage_home()` builds
+`state/pi-home` containing nothing but symlinks to `auth.json` and the model catalogs
+(`models.json`, `models-store.json` — without them a declared model id does not resolve at all).
+Verified with the same probe: the isolated stage answered `NONE`. `NIGHTSHIFT_PI_STAGE_HOME`
+overrides it; empty reverts to the operator's own directory.
+
+**pi is read-only, and that is a confinement decision (ADR 0031).** Layer 2(b) above is a Claude
+Code `PreToolUse` hook, and codex's equivalent is its OS-level `workspace-write` sandbox. pi has
+neither: it can withhold `write`/`edit`/`bash` from a stage entirely — which is what makes its
+read-only profile safe, since no write primitive exists to confine — but nothing in it could bound an
+absolute path once `write` were granted. So `pi_run` refuses the `fix` stage rather than run an
+unconfined writer, and pi serves review/explore/recon/verify/advise only.
+
 **Rejected alternatives.** `--bare` and `--safe-mode` both remove the personal config, but they also
 disable hooks — that is Layer 2, i.e. the confinement itself — and `--bare` additionally forces
 API-key auth. `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` would also drop the *target repo's* `CLAUDE.md`,

@@ -63,6 +63,17 @@ gate_toolchain_path() { # -> `:`-separated dirs the gates need bound and on PATH
 }
 export NIGHTSHIFT_TEST_PATH="${NIGHTSHIFT_TEST_PATH-$(gate_toolchain_path)}"
 
+# The `pi` adapter (ADR 0031) needs the nvm toolchain twice over: pi is an npm-global under nvm — NOT
+# in ~/.local/bin like claude and codex — and its `#!/usr/bin/env node` shebang resolves whatever
+# node is first on PATH, which here is /usr/bin/node v18 while pi requires >= 22.19 (verified: it
+# aborts on v18). Both failures land as a dead Review stage, one at a time, all night.
+#
+# It is exported as its OWN variable rather than merged into PATH, for the same reason
+# NIGHTSHIFT_TEST_PATH is: the Runner prepends it for the pi subprocess alone. Putting an nvm bin
+# ahead of the system dirs in the Runner's own PATH is precisely the R10/N4 hole the comment above
+# warns about, and appending it instead would leave /usr/bin/node v18 winning the shebang.
+export NIGHTSHIFT_PI_PATH="${NIGHTSHIFT_PI_PATH-$(nvm_toolchain_bin)}"
+
 # The sandbox has no $HOME, so a python package installed with `pip install --user` is invisible
 # inside a gate — the suite then fails on an import, which reads downstream as "the fix broke the
 # tests". Naming the user site-packages directory here binds it READ-ONLY; it is a directory under

@@ -20,6 +20,9 @@ export NIGHTSHIFT_DIGEST_DIR=$SB/digests NIGHTSHIFT_WORKTREES=$SB/wt
 NIGHTSHIFT_AGENT=mock bash bin/nightshift.sh     # one night, mock agent (the default agent)
 NIGHTSHIFT_AGENT=claude bash bin/nightshift.sh   # one night, real claude -p stages
 NIGHTSHIFT_AGENT=codex NIGHTSHIFT_CODEX_MODEL=<model> NIGHTSHIFT_CODEX_REASONING_EFFORT=high bash bin/nightshift.sh
+# night on claude, but every fix judged by a cheap model on another vendor (ADR 0031)
+NIGHTSHIFT_AGENT=claude NIGHTSHIFT_REVIEW_AGENT=pi NIGHTSHIFT_PI_PROVIDER=openrouter \
+  NIGHTSHIFT_PI_MODEL=z-ai/glm-5.3-flash bash bin/nightshift.sh
 ```
 
 `bin/schedule.sh dry-run` does all of the above in one command — sandbox, isolated dirs, launcher
@@ -82,6 +85,19 @@ Stages are invoked through `run_agent(stage, workdir, item_dir)`, which dispatch
   `NIGHTSHIFT_CODEX_MODEL` and `NIGHTSHIFT_CODEX_REASONING_EFFORT` are optional host configuration;
   no model is committed as the default. Codex can execute sandboxed commands during Fix, unlike the
   Claude adapter's no-Bash profile. The Runner still owns branch, commit, and push.
+- `NIGHTSHIFT_AGENT=pi` — calls `pi -p --mode json` with every discovery source off
+  (`--no-extensions --no-skills --no-prompt-templates --no-session`). **Read-only stages only**: it
+  refuses `fix`, because it offers neither the `PreToolUse` guard nor the OS sandbox the other two
+  adapters confine a Fix-stage write with (ADR 0031). `NIGHTSHIFT_PI_MODEL` / `NIGHTSHIFT_PI_PROVIDER`
+  are the host levers; name both, since pi resolves a bare model id against its default provider. On a
+  gateway host `NIGHTSHIFT_PI_EXTENSIONS` (rulebook `agent.pi_extensions`) must also name the auth
+  extension by path — pi authenticates through an extension, and a stage runs with discovery off. pi
+  exits 0 even when the provider rejected the request, so the adapter reads the stream's own
+  `stopReason`/`errorMessage` rather than the exit code.
+
+The Review stage can run on a different adapter than the rest of the night — `agent.review_agent` in
+the rulebook, `NIGHTSHIFT_REVIEW_AGENT` as the env override (ADR 0031). Omitted, it runs on the
+night's own adapter, as before.
 
 **Verification debt — real-model prompt behavior (partly closed).** The Runner logic (recon
 caching, yield-weighted dimension selection, the empty-scope ledger row and its digest suggestions

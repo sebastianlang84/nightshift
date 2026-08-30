@@ -53,6 +53,25 @@ limits:
 # agent:
 #   claude_model: claude-opus-5
 #   codex_model: gpt-5.6-sol
+#   # pi is a THIRD adapter, and a read-only one: it may serve recon/explore/review/verify/advise but
+#   # refuses `fix`, because it offers neither of the write-confinement mechanisms the other two do
+#   # (ADR 0031 / hook-spec.md). `pi_provider` is separate from `pi_model` because pi resolves a bare
+#   # model id against its default provider — name both, or a model the host means may resolve
+#   # elsewhere or not at all.
+#   pi_model: z-ai/glm-5.3-flash
+#   pi_provider: pidso-proxy
+#   # On a host whose models come through a gateway, AUTHENTICATION IS AN EXTENSION — it stamps the
+#   # caller's device header. A stage runs with extension discovery off (the operator's memory and
+#   # subagent extensions have no business in one), so the auth extension has to be named by path or
+#   # every stage fails with a 403 that reads like a revoked credential and is not. Comma-separated;
+#   # omit it entirely on a host whose provider authenticates from the credential store alone.
+#   pi_extensions: /path/to/pi-ext-auth/src/auth.ts
+#   # Which adapter judges a fix (ADR 0031): claude | codex | pi | mock. Omitted, Review runs on the
+#   # night's own adapter — i.e. the model marks its own homework. Naming a DIFFERENT vendor here is
+#   # the point: a reviewer that did not write the fix cannot share the author's blind spot. A host
+#   # that sets this and runs any stage on pi also gets a once-per-day `pi update` before the first
+#   # stage, because pi resolves a model against a catalog it caches on disk.
+#   review_agent: pi
 
 recon:                           # reconnaissance stage (ADR 0010): surveys each repo (docs/, compose,
   enabled: true                  # frontend, tests, CI …) and labels each dimension high/normal/low

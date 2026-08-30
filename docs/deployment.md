@@ -19,7 +19,8 @@ ledgers diverge silently: duplicate branches, broken caps and rotation). See
 1. **Clone** the Nightshift repo somewhere stable — this path becomes `NIGHTSHIFT_HOME`, and the
    installed systemd unit hard-codes it. Moving the checkout later requires re-running `install`.
 2. **Provide the binaries a run shells out to.** Nightly runs default to the `claude` adapter
-   (`NIGHTSHIFT_AGENT=claude`; `codex` also supported), but the agent CLI is only one of the tools the
+   (`NIGHTSHIFT_AGENT=claude`; `codex` and the read-only `pi` also supported), but the agent CLI is
+   only one of the tools the
    Runner invokes. All of these must be reachable from the launcher's `PATH`, which is
    `/usr/local/bin:/usr/bin:/bin:~/.local/bin` — systemd user services start with a minimal env, so
    the launcher sets that list explicitly (system dirs first, deliberately: see
@@ -29,6 +30,13 @@ ledgers diverge silently: duplicate branches, broken caps and rotation). See
    | Binary | Used for | Missing |
    |--------|----------|---------|
    | `claude` or `codex` | every stage that thinks | every stage fails; nothing ships |
+   | `pi` (only if `agent.review_agent: pi`, ADR 0031) | the Review stage, and its once-a-day `pi update` | every review fails, so nothing ships |
+
+   `pi` is the one binary the PATH above does **not** cover: it is an npm-global under nvm, and its
+   `#!/usr/bin/env node` shebang would resolve `/usr/bin/node` (too old to run it). The launcher
+   therefore exports `NIGHTSHIFT_PI_PATH` — the nvm bin directory — and the Runner prepends it for
+   the pi subprocess alone, the same shape as `NIGHTSHIFT_TEST_PATH` and for the same R10/N4 reason.
+   A run started by hand from an interactive shell already has nvm on PATH and needs nothing.
    | `git` | worktrees, commits, branch pushes | run aborts |
    | `jq` | every ledger and telemetry read/write | run aborts |
    | `python3` (stdlib only — nothing to install) | rulebook parsing, JSON extraction, finding probes | run aborts |
