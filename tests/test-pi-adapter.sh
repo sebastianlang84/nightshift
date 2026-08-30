@@ -189,6 +189,44 @@ EOF
   [ "$out" = "mock mock" ] || { echo "the env var lost to agent.primary (got '$out')" >&2; exit 1; }
 )
 
+# --- The unattended launcher must not overrule `agent.primary`. It exports a default adapter so a
+# nightly run never lands on the mock, and doing that unconditionally made the rulebook key dead in
+# the ONLY mode that matters: observed 2026-08-30, a rulebook declaring `primary: pi` ran the whole
+# night on claude because nightshift-cron.sh had already set NIGHTSHIFT_AGENT, which the Runner
+# treats as the caller's explicit choice.
+(
+  cat > "$TMP/cron-primary.yaml" <<EOF
+branch_prefix: nightshift/
+agent:
+  primary: pi
+repos:
+  - path: $TMP/repo
+    mode: findings-only
+EOF
+  printf 'repos:\n  - path: %s\n    mode: findings-only\n' "$TMP/repo" > "$TMP/cron-none.yaml"
+  # Run only the launcher's env preamble: everything up to the line that sets its PATH. Sourcing the
+  # whole script would start a night.
+  head_of_cron() { sed -n '1,/^# Make the tools nightshift invokes findable/p' "$ROOT/bin/nightshift-cron.sh"; }
+
+  out=$(env -u NIGHTSHIFT_AGENT NIGHTSHIFT_HOME="$ROOT" RULEBOOK="$TMP/cron-primary.yaml" \
+        bash -c "$(head_of_cron)
+printf '%s' \"\${NIGHTSHIFT_AGENT:-<unset>}\"")
+  [ "$out" = "<unset>" ] || {
+    echo "the launcher pinned an adapter although the rulebook named one (got '$out')" >&2; exit 1; }
+
+  # With no key in the rulebook the default must still apply — a nightly run may never fall to mock.
+  out=$(env -u NIGHTSHIFT_AGENT NIGHTSHIFT_HOME="$ROOT" RULEBOOK="$TMP/cron-none.yaml" \
+        bash -c "$(head_of_cron)
+printf '%s' \"\${NIGHTSHIFT_AGENT:-<unset>}\"")
+  [ "$out" = claude ] || { echo "the launcher lost its claude default (got '$out')" >&2; exit 1; }
+
+  # An operator-supplied value still wins over both.
+  out=$(env NIGHTSHIFT_AGENT=codex NIGHTSHIFT_HOME="$ROOT" RULEBOOK="$TMP/cron-primary.yaml" \
+        bash -c "$(head_of_cron)
+printf '%s' \"\$NIGHTSHIFT_AGENT\"")
+  [ "$out" = codex ] || { echo "an explicit NIGHTSHIFT_AGENT was overwritten (got '$out')" >&2; exit 1; }
+)
+
 # --- The daily catalog refresh. pi resolves a model against a cached catalog, so a stale one
 # refuses a model the provider already serves; the refresh runs once per DAY, not once per run, and
 # a failure must never take the night down with it.

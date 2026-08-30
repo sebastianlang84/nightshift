@@ -10,8 +10,24 @@ set -euo pipefail
 
 NIGHTSHIFT_HOME="${NIGHTSHIFT_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 export NIGHTSHIFT_HOME
-# Nightly runs are real work by default; the mock is only for --dry-run testing.
-export NIGHTSHIFT_AGENT="${NIGHTSHIFT_AGENT:-claude}"
+# Nightly runs are real work by default; the mock is only for --dry-run testing. But this default
+# must not overrule the rulebook's `agent.primary` (ADR 0031): the Runner treats a SET
+# NIGHTSHIFT_AGENT as the caller's explicit choice and lets it win, so exporting one here
+# unconditionally made that key dead in the only mode that matters — the unattended night. Observed
+# 2026-08-30: a rulebook declaring `primary: pi` ran the whole night on claude anyway.
+#
+# So the default is applied only when the rulebook names no adapter. Asking the parser is the one
+# way to know that without duplicating its rules here; a rulebook that does not parse leaves the
+# answer empty and falls back to `claude`, which is what a run would have done before this existed
+# (the Runner then aborts on the same parse error and says so).
+if [ -z "${NIGHTSHIFT_AGENT:-}" ]; then
+  _rb="${RULEBOOK:-$NIGHTSHIFT_HOME/rulebook.yaml}"
+  [ -f "$_rb" ] || _rb="$NIGHTSHIFT_HOME/rulebook.example.yaml"
+  _primary="$(python3 "$NIGHTSHIFT_HOME/lib/parse_rulebook.py" "$_rb" 2>/dev/null \
+              | awk -F'\t' '$1 == "primary_agent" { print $2 }')" || _primary=""
+  [ -n "$_primary" ] || export NIGHTSHIFT_AGENT=claude
+  unset _rb _primary
+fi
 # Make the tools nightshift invokes findable under systemd's minimal PATH.
 # System dirs come FIRST so a binary planted under ~/.local/bin (which a write
 # primitive could reach) cannot shadow the Runner's unqualified jq/git/gh/
@@ -103,7 +119,10 @@ if ! flock -n 9; then
   exit 0
 fi
 
-echo "=== nightshift start $(date -Iseconds) (agent=$NIGHTSHIFT_AGENT) ===" | tee -a "$LOG"
+# `${…:-}` and not a bare expansion: since the launcher stopped pinning an adapter when the rulebook
+# names one, this variable is legitimately unset — and under `set -u` a bare read aborts the run
+# before it starts. The Runner announces the adapter it resolved on its own line either way.
+echo "=== nightshift start $(date -Iseconds) (agent=${NIGHTSHIFT_AGENT:-from rulebook}) ===" | tee -a "$LOG"
 # Which Node the ship gates will see. Logged because the failure it prevents is silent: a gate that
 # exits 9 or 127 on a toolchain problem is reported as "the fix broke the suite".
 if [ -n "${NIGHTSHIFT_TEST_PATH:-}" ]; then
