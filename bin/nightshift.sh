@@ -2780,24 +2780,10 @@ write_digest() { # made open status [advice]
       done
       [ -n "$contra" ] && printf '\n## Rulebook/recon contradictions (ADR 0015)\n%s' "$contra"
     fi
-    # Per-dimension merge-rate (ADR 0010 Phase 4): the tuning signal — which lenses produce findings
-    # humans actually merge. Join the latest verdict per branch back to the shipped row's dimension.
-    [ -f "$LEDGER" ] && jq -rs '
-      ([.[]|select(.outcome=="verdict" and .branch!=null)] | group_by(.branch) | map(sort_by(.ts)|last)
-        | map(select(.verdict=="merged" or .verdict=="dropped")) | INDEX(.branch)) as $v
-      | [.[]|select(.outcome=="shipped" and .branch!=null)]
-      | group_by(.dimension // "—")
-      | map({dim:(.[0].dimension // "—"), br:(map(.branch)|unique)})
-      | map({dim:.dim, n:(.br|length),
-             m:(.br|map(select($v[.].verdict=="merged"))|length),
-             d:(.br|map(select($v[.].verdict=="dropped"))|length)})
-      | if length==0 then empty else
-          "\n## Merge-rate by dimension (all-time)\n"
-          + (map("- \(.dim): shipped \(.n) · merged \(.m) · dropped \(.d)"
-                 + (if (.m+.d)>0 then " · rate \((100*.m/(.m+.d))|floor)%" else "" end)) | join("\n"))
-        end' "$LEDGER" 2>/dev/null || true
-    # The same merge-rate signal sliced by verifiability, proof, and finding type — the tuning
-    # feedback for which KINDS of change humans actually merge. Empty slices are omitted.
+    # The merge-rate scoreboard: the tuning signal — which lenses (ADR 0010 Phase 4) and which KINDS
+    # of change humans actually merge. Join the latest verdict per branch back to the shipped row and
+    # slice it by dimension, verifiability, proof, and finding type. Empty slices are omitted.
+    # One parameterised `rate` for all four slices, so the four cannot drift apart.
     [ -f "$LEDGER" ] && jq -rs '
       def rate($key; $name):
         ([.[]|select(.outcome=="verdict" and .branch!=null)] | group_by(.branch) | map(sort_by(.ts)|last)
@@ -2813,7 +2799,8 @@ write_digest() { # made open status [advice]
             + (map("- \(.g): shipped \(.n) · merged \(.m) · dropped \(.d)"
                    + (if (.m+.d)>0 then " · rate \((100*.m/(.m+.d))|floor)%" else "" end)) | join("\n"))
           end ;
-      [ rate("verifiability";"verifiability"), rate("proof";"proof"), rate("type";"finding type") ] | .[]
+      [ rate("dimension";"dimension"), rate("verifiability";"verifiability"),
+        rate("proof";"proof"), rate("type";"finding type") ] | .[]
       ' "$LEDGER" 2>/dev/null || true
     echo
     # Backpressure ADDS a banner; it never REPLACES the body. Hitting the open-branch cap is the
