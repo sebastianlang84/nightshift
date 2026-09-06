@@ -593,6 +593,53 @@ verify_artifact_usable() { # item_dir -> a complete finding-verification result
          and ((.evidence | type) == "string")' "$1/verify.json" >/dev/null 2>&1
 }
 
+# The agent's channel for something about the ENVIRONMENT rather than the code: a tool that is
+# missing, a gate that cannot work, an instruction that contradicts what the repo actually does.
+# Until now such an observation had nowhere to go. The Fix stage's worknote becomes the commit
+# message, which is meant to describe the change — so a remark about the harness either distorted
+# that message or was dropped. On 2026-09-06 an agent could not delete a scratch file it had made
+# and said so in its worknote; that is the shape of note this exists for.
+#
+# The agent writes it INSIDE its worktree, which is the only place it may write (ADR 0032), and the
+# Runner moves it out. So this adds no write surface at all: nothing here relaxes the sandbox.
+#
+# Read back by a human, never by an agent. Feeding these notes into a later stage would turn model
+# output into model input, and an agent's note may quote a file from the repository it was reading —
+# so a line in some repo could address the next night as if it were the Runner. The same confusion
+# aborted a healthy night on 2026-08-24, when credential prose in a reviewed file was read as this
+# account being logged out. Repetition is handled mechanically instead: an identical note already in
+# the file is dropped rather than shown to anyone again.
+AGENT_NOTE_FILE="${NIGHTSHIFT_AGENT_NOTES:-$STATE_DIR/agent-notes.md}"
+AGENT_NOTE_MAX_BYTES="${NIGHTSHIFT_AGENT_NOTE_MAX_BYTES:-4000}"
+
+collect_agent_note() { # stage workdir repo -> move a stage's note into the notes file
+  local stage="$1" wd="$2" repo="${3:-}" src="" f body key
+  for f in "$wd/.nightshift-note" "$wd/.nightshift-note.md"; do
+    [ -f "$f" ] && { src="$f"; break; }
+  done
+  [ -n "$src" ] || return 0
+  # Removed FIRST and unconditionally: a note left behind would be committed into someone else's
+  # repository by the very next stage (ADR 0027 ships the reviewed tree, whatever is in it).
+  body="$(head -c "$AGENT_NOTE_MAX_BYTES" "$src" 2>/dev/null || true)"
+  rm -f "$wd/.nightshift-note" "$wd/.nightshift-note.md"
+  body="$(printf '%s' "$body" | sed 's/[[:space:]]*$//' | grep -v '^[[:space:]]*$' || true)"
+  [ -n "$body" ] || return 0
+  mkdir -p "$(dirname "$AGENT_NOTE_FILE")" 2>/dev/null || return 0
+  # Deduplicated on the note's own text, so the same standing annoyance reported every night appears
+  # once. The key is the body with whitespace collapsed — a model rarely repeats itself byte for
+  # byte, but it does repeat itself sentence for sentence.
+  key="$(printf '%s' "$body" | tr -s '[:space:]' ' ' | md5sum | cut -d' ' -f1)"
+  if [ -f "$AGENT_NOTE_FILE" ] && grep -qF "<!-- note:$key -->" "$AGENT_NOTE_FILE" 2>/dev/null; then
+    log "  stage $stage: note already recorded — not repeated"
+    return 0
+  fi
+  { printf '\n## %s · %s · %s\n<!-- note:%s -->\n\n' \
+      "$(date +%F)" "${repo:+$(basename "$repo") · }$stage" "$NIGHTSHIFT_AGENT" "$key"
+    printf '%s\n' "$body"
+  } >> "$AGENT_NOTE_FILE"
+  log "  stage $stage: agent note recorded in $AGENT_NOTE_FILE"
+}
+
 run_agent() { # stage workdir item_dir
   local stage="$1" workdir="$2" item_dir="$3" start end status=0 resets="" usage='{}'
   local attempt_agent="$NIGHTSHIFT_AGENT" fallback="${NIGHTSHIFT_QUOTA_FALLBACK_AGENT:-}"
@@ -605,6 +652,10 @@ run_agent() { # stage workdir item_dir
     pi)     pi_run    "$stage" "$workdir" "$item_dir" || status=$? ;;
     *) log "unknown NIGHTSHIFT_AGENT=$NIGHTSHIFT_AGENT (expected mock, claude, codex, or pi)"; status=2 ;;
   esac
+  # Before anything else looks at the worktree — including the failure paths below and the ship
+  # gate — so a note survives a stage that failed, which is when it is most likely to exist. The
+  # repo name comes from the item dir the Runner already writes, not from a global.
+  collect_agent_note "$stage" "$workdir" "$(cat "$item_dir/repo" 2>/dev/null || true)"
   # A non-zero stage is reported as a FAILURE, not absorbed into "found nothing". The exit code has
   # always been recorded in runs.jsonl, but nothing ever read it back out — so a stage that could not
   # run at all was indistinguishable, in the night log and in the digest, from one that ran and had
@@ -1001,6 +1052,13 @@ mock_explore() { # workdir item_dir — emits the v2 container {found, findings:
 mock_fix() { # workdir item_dir — applies the fix for THIS finding (dispatched on .file)
   local wd="$1" id="$2" file
   file=$(jq -r '.file' "$id/finding.json" 2>/dev/null || echo "")
+  # The Fix stage's honest way out: it looked, it could not stand behind any change, it left the
+  # tree alone. Reaching that path in a test needs a fix that deliberately changes nothing.
+  if [ "${NIGHTSHIFT_MOCK_FIX_NOOP:-0}" = 1 ]; then
+    printf '# Worknote\n\nThe finding does not hold up on reading the code; nothing changed.\n' \
+      > "$id/worknote.md"
+    return 0
+  fi
   case "$file" in
     README.md) sed -i 's/teh /the /g' "$wd/README.md"
       printf '# Worknote\n\nFixed typo "teh" -> "the" in README.md. Single file, reversible.\n' > "$id/worknote.md" ;;
@@ -2585,8 +2643,18 @@ finalize() { # repo worktree item_dir [seq] [base] -> echoes branch name
        commit -q -m "$(commit_subject "$type" "$(jq -r '.summary' "$id/finding.json")")
 
 $(cat "$id/worknote.md")"; then
-    log "  $(basename "$repo"): commit rejected (repo hook, or nothing to commit) — not shipped: $branch"
-    ledger_append "$(basename "$id")" "$repo" "$fp" "" "" "commit-failed" "$summary" "" "" "$verif" "$dim" "$type" "$csig"
+    # An EMPTY index is not the same event as a rejected commit, and recording it as one makes the
+    # Fix stage's honest way out look like a malfunction. A stage that tried, found no change it
+    # could stand behind, and left the tree alone has ABANDONED the item — a verdict the ledger
+    # already has, from the reviewer's `abandon`. Distinguishing them is what makes "stop rather
+    # than force something" a usable instruction instead of a statistic against the night.
+    if git -C "$wt" diff --cached --quiet 2>/dev/null; then
+      log "  $(basename "$repo"): the fix stage changed nothing — abandoned, not shipped: $branch"
+      ledger_append "$(basename "$id")" "$repo" "$fp" "" "" "abandoned" "$summary" "" "" "$verif" "$dim" "$type" "$csig"
+    else
+      log "  $(basename "$repo"): commit rejected by the repo's own hooks — not shipped: $branch"
+      ledger_append "$(basename "$id")" "$repo" "$fp" "" "" "commit-failed" "$summary" "" "" "$verif" "$dim" "$type" "$csig"
+    fi
     git -C "$wt" checkout -q --detach >/dev/null 2>&1 || true
     git -C "$repo" branch -q -D "$branch" >/dev/null 2>&1 \
       || log "  $(basename "$repo"): cleanup warning — local branch remains: $branch"
@@ -2951,6 +3019,21 @@ write_digest() { # made open status [advice]
       'select(.night==$n and (.outcome=="abandoned" or .outcome=="push-failed" or .outcome=="commit-failed" or .outcome=="tests-failed" or .outcome=="gate-blocked" or .outcome=="worktree-tampered" or .outcome=="stage-failed")) | "- " + .repo + " — " + .outcome + ": " + (.summary // .fingerprint)' \
       "$LEDGER" 2>/dev/null || true
     echo
+    # What the agents said about the HARNESS rather than about the code (collect_agent_note). Only
+    # tonight's notes; the file keeps every one. Shown to the human and to nobody else — these are
+    # never read back into a stage, for the reason collect_agent_note gives.
+    if [ -f "$AGENT_NOTE_FILE" ] && grep -q "^## $NIGHT · " "$AGENT_NOTE_FILE" 2>/dev/null; then
+      echo "## Notes from the agents (about the harness, not the code)"
+      # From the first heading of tonight to the last line before the next night's heading.
+      awk -v n="## $NIGHT · " '
+        index($0, n) == 1 { on = 1 }
+        on && /^## / && index($0, n) != 1 { on = 0 }
+        on && !/^<!-- note:/ { print }
+      ' "$AGENT_NOTE_FILE"
+      echo
+      echo "_Full history: \`$AGENT_NOTE_FILE\`._"
+      echo
+    fi
     # Carry-forward (ADR 0014): every surfaced finding whose latest lifecycle event leaves it open.
     # A new finding after resolved/dropped/merged is a reopened identity; wontfix remains permanent.
     echo "## Open findings (all nights — awaiting a human)"

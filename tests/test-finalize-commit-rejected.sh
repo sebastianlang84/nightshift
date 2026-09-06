@@ -83,4 +83,37 @@ digest=""; for d in "$TMP/digests"/*.md; do digest="$d"; done
 grep -qF "commit-failed" "$digest" \
   || { echo "digest hides the rejected commit" >&2; cat "$digest" >&2; exit 1; }
 
+# --- The OTHER exit from the same place: an empty index is not a rejected commit ----------------
+# A Fix stage that looked, found no change it could stand behind, and left the tree alone has
+# abandoned the item — the verdict the reviewer's own `abandon` already writes. Recording that as
+# `commit-failed` would make the stage's honest way out look like a malfunction, and an instruction
+# to stop rather than force something is only usable if stopping is not counted against the night.
+TMP2="$(mktemp -d)"
+trap 'rm -rf "$TMP" "$TMP2"' EXIT
+mkdir -p "$TMP2/state" "$TMP2/runs" "$TMP2/digests" "$TMP2/worktrees"
+git init -q --bare "$TMP2/remote.git"
+git init -q -b main "$TMP2/repo"
+git -C "$TMP2/repo" remote add origin "$TMP2/remote.git"
+printf '# Demo\n\nThis is teh demo.\n' > "$TMP2/repo/README.md"
+git -C "$TMP2/repo" -c user.name=test -c user.email=test@localhost add -A
+git -C "$TMP2/repo" -c user.name=test -c user.email=test@localhost commit -q -m init
+git -C "$TMP2/repo" push -q -u origin main
+sed "s|$TMP/repo|$TMP2/repo|" "$TMP/rulebook.yaml" > "$TMP2/rulebook.yaml"
+
+LEDGER2="$TMP2/state/ledger.jsonl"
+RULEBOOK="$TMP2/rulebook.yaml" NIGHTSHIFT_AGENT=mock NIGHTSHIFT_CODEMAP=0 NIGHTSHIFT_OPEN_PR=0 \
+NIGHTSHIFT_MOCK_FIX_NOOP=1 \
+NIGHTSHIFT_STATE_DIR="$TMP2/state" NIGHTSHIFT_RUNS_DIR="$TMP2/runs" \
+NIGHTSHIFT_DIGEST_DIR="$TMP2/digests" NIGHTSHIFT_WORKTREES="$TMP2/worktrees" \
+  "$ROOT/bin/nightshift.sh" >"$TMP2/out" 2>"$TMP2/err"
+
+jq -e 'select(.outcome=="abandoned")' "$LEDGER2" >/dev/null 2>&1 \
+  || { echo "a fix that changed nothing was not recorded as abandoned" >&2; jq -c . "$LEDGER2" >&2; exit 1; }
+if jq -e 'select(.outcome=="commit-failed")' "$LEDGER2" >/dev/null 2>&1; then
+  echo "a fix that changed nothing was recorded as a rejected commit" >&2; jq -c . "$LEDGER2" >&2; exit 1
+fi
+if jq -e 'select(.outcome=="shipped")' "$LEDGER2" >/dev/null 2>&1; then
+  echo "a fix that changed nothing was recorded as shipped" >&2; jq -c . "$LEDGER2" >&2; exit 1
+fi
+
 echo "test-finalize-commit-rejected: ok"
