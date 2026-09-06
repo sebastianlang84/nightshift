@@ -28,4 +28,18 @@ REPO_BASES=(develop)
 [ "$(base_for_repo "$REPO")" = origin/develop ] \
   || { echo "test-base-resolution: rulebook lookup disagrees with resolve_base" >&2; exit 1; }
 
+# A listed repo resolves the same way through the strict lookup.
+[ "$(base_for_repo_strict "$REPO")" = origin/develop ] \
+  || { echo "test-base-resolution: strict lookup disagrees for a listed repo" >&2; exit 1; }
+
+# An UNLISTED repo must not be guessed at. harvest reconciles the whole ledger, so it reaches
+# branches of repos the rulebook no longer lists; auto-detecting origin/main for a gitflow repo
+# whose base is develop rewrote sixteen settled `merged` verdicts to `open` on 2026-09-06.
+REPO_PATHS=("$TMP/other") REPO_BASES=(main)
+if out="$(base_for_repo_strict "$REPO" 2>/dev/null)"; then
+  echo "test-base-resolution: strict lookup guessed a base ('$out') for an unlisted repo" >&2; exit 1
+fi
+[ -z "${out:-}" ] \
+  || { echo "test-base-resolution: strict lookup printed '$out' for an unlisted repo" >&2; exit 1; }
+
 echo "test-base-resolution: ok"

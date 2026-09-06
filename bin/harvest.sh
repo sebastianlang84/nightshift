@@ -480,10 +480,16 @@ while IFS=$'\x1f' read -r item repo fp branch sha pr_url; do
     printf '%-28s %-46s %-8s -> %-8s %s\n' "$(basename "$repo")" "$branch" "—" "skip" "(repo unreachable — fail closed)"
     continue
   fi
-  base=$(base_for_repo "$repo")
-  now=$(reconcile "$repo" "$base" "$branch" "$sha" "$pr_url")
   verdict_key="$(repo_id "$repo")"$'\x1f'"$branch"
   IFS=$'\t' read -r was was_src <<< "${LAST_VERDICT[$verdict_key]:-}" || true
+  # Fail closed on a repo the rulebook no longer lists: its base is unknown, and deriving a
+  # verdict against a guessed one rewrites settled history (see base_for_repo_strict).
+  if ! base=$(base_for_repo_strict "$repo"); then
+    printf '%-28s %-46s %-8s -> %-8s %s\n' "$(basename "$repo")" "$branch" \
+      "${was:-—}" "skip" "(repo not in rulebook — base unknown)"
+    continue
+  fi
+  now=$(reconcile "$repo" "$base" "$branch" "$sha" "$pr_url")
   # A probe that could not decide (skip) leaves the recorded verdict untouched.
   if [ "$now" = skip ]; then
     printf '%-28s %-46s %-8s -> %-8s %s\n' "$(basename "$repo")" "$branch" "${was:-—}" "skip" "(probe failed — fail closed)"
