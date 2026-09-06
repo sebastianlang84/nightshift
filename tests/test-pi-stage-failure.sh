@@ -63,9 +63,16 @@ rc=0; NIGHTSHIFT_PI_READONLY_TOOLS="read,write" pi_run review "$TMP/repo" "$TMP/
 rc=0; NIGHTSHIFT_PI_READONLY_TOOLS="read" pi_run review "$TMP/repo" "$TMP/item" || rc=$?
 [ "$rc" = 0 ] || { echo "a narrowed read-only profile was refused (rc=$rc)" >&2; exit 1; }
 
-# --- 1c-2. The Fix stage. Refused by default, because pi has no mechanism that keeps a write inside
-#           the worktree; served only where the host explicitly took that risk, and even then WITHOUT
-#           a shell — an executing stage could reach git, gh or rm on the Runner's host.
+# --- 1c-2. The Fix stage. Refused by default, because writing is the host's risk to take; served
+#           only where it explicitly took it, and even then WITHOUT a shell — an executing stage
+#           could reach git, gh or rm on the Runner's host.
+#
+# What this section asserts is the TOOL PROFILE, and the stub below reports it through a file path
+# and an env var that a sandbox — correctly — does not carry across. So the wrapper is switched off
+# here: inside it the assertions would fail for a reason that has nothing to do with the profile.
+# The wrapper itself is pinned by tests/test-pi-fix-sandbox.sh, including that it is on by default
+# and that it fails closed; §1c-3 below asserts only that this section's opt-out is not the default.
+export NIGHTSHIFT_PI_SANDBOX=none
 cat > "$TMP/bin/pi" <<'EOF'
 #!/usr/bin/env bash
 # Records the tool profile it was handed, so the test can assert what the stage may actually do.
@@ -97,6 +104,19 @@ rc=0; NIGHTSHIFT_PI_ALLOW_FIX=1 NIGHTSHIFT_PI_FIX_TOOLS="read,edit,bash" pi_run 
 rc=0; NIGHTSHIFT_PI_ALLOW_FIX=1 NIGHTSHIFT_PI_READONLY_TOOLS="read,write" pi_run review "$TMP/repo" "$TMP/item" || rc=$?
 [ "$rc" = 2 ] || { echo "the fix opt-in leaked a write tool into a read-only stage (rc=$rc)" >&2; exit 1; }
 unset TOOLS_SEEN
+
+# --- 1c-3. …and the opt-out above is an opt-out, not the default. Without it the opted-in fix stage
+#           builds a wrapper; the wrapper's own behaviour is tests/test-pi-fix-sandbox.sh's subject.
+unset NIGHTSHIFT_PI_SANDBOX
+TEST_SANDBOX_ARGV=()
+if command -v bwrap >/dev/null 2>&1; then
+  pi_sandbox_argv "$TMP/repo" "$TMP/pi-home" "$TMP/item" >/dev/null 2>&1 || true
+  [ "${#TEST_SANDBOX_ARGV[@]}" -gt 0 ] \
+    || { echo "the fix stage built no sandbox without an explicit opt-out" >&2; exit 1; }
+  [ "${TEST_SANDBOX_ARGV[0]}" = bwrap ] \
+    || { echo "the fix stage's launcher is not bwrap (${TEST_SANDBOX_ARGV[0]})" >&2; exit 1; }
+fi
+export NIGHTSHIFT_PI_SANDBOX=none
 
 # --- 1d. An explicitly EMPTY NIGHTSHIFT_REVIEW_AGENT means "no routing tonight", the same as an
 #         omitted key — not an unknown adapter that aborts the night before it starts.

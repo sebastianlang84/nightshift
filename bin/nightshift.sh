@@ -1326,6 +1326,96 @@ repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
 # no sandbox that could bound an absolute path once `write` is granted. A read-only stage needs no
 # such bound (no write primitive exists to confine), so pi is admitted for exactly those and refuses
 # `fix` outright rather than shipping an unconfined writer.
+# The write confinement pi itself cannot provide (hook-spec.md Layer 2b): the same bwrap hull the
+# ship gate runs in (ADR 0026), wrapped around the AGENT process instead of the test command. It is
+# what turns `pi_allow_fix` from an accepted risk into a bounded one — the worktree and the stage's
+# own agent dir are the only writable paths, so a confused absolute path to `~/partflow` or `/tmp`
+# is refused by the kernel rather than landing invisibly outside every diff.
+#
+# `host` networking, deliberately: the model gateway is a LAN address and the ADR 0028 vetting proxy
+# forwards to public addresses only, so an isolated namespace would not narrow this stage, it would
+# stop it working. The stage's network reach is therefore unchanged from before this existed; only
+# its filesystem reach is narrowed. Tracked in OPEN-QUESTIONS.md.
+#
+# Fails CLOSED: no bwrap means no confinement, and an unconfined writer is what pi_allow_fix was
+# supposed to stop being. `NIGHTSHIFT_PI_SANDBOX=none` is the documented opt-out and restores the
+# pre-2026-09-06 behaviour, i.e. an agent that may write anywhere this account may.
+pi_sandbox_argv() { # worktree pi_home item_dir -> fills TEST_SANDBOX_ARGV (empty when opted out)
+  local wd="$1" pi_home="$2" id="$3" f real p
+  TEST_SANDBOX_ARGV=()
+  if [ "${NIGHTSHIFT_PI_SANDBOX:-bwrap}" = none ]; then
+    log "  pi fix stage: sandbox disabled by NIGHTSHIFT_PI_SANDBOX=none — writes are NOT confined"
+    return 0
+  fi
+  if ! command -v bwrap >/dev/null 2>&1; then
+    log "pi cannot serve the fix stage: bwrap is missing, so the write confinement has no mechanism"
+    printf 'nightshift: the pi fix stage needs bwrap for its write confinement (see hook-spec.md Layer 2b)\n' \
+      > "$id/fix.err"
+    return 1
+  fi
+  build_test_sandbox "$wd" "$pi_home" host "$id"
+  # The stage home holds SYMLINKS into the operator's pi directory (pi_stage_home), and $HOME is not
+  # bound — so each link target is bound read-only on its own path or it dangles and pi starts
+  # without credentials or catalogs. Read-only: a stage has no business rewriting auth.json.
+  for f in auth.json models.json models-store.json; do
+    [ -e "$pi_home/$f" ] || continue
+    real="$(realpath -e "$pi_home/$f" 2>/dev/null || true)"
+    [ -n "$real" ] && [ "$real" != "$pi_home/$f" ] && _test_robind "$real"
+  done
+  # pi and node live under nvm, i.e. under $HOME, which is not bound. Two directories are bound and
+  # put on PATH: NIGHTSHIFT_PI_PATH, the host's declared pi location, and the directory `pi` ACTUALLY
+  # resolves from — they are the same in production, and binding only the former would leave the
+  # sandbox without the binary on any host that installs pi somewhere else entirely. Resolved with
+  # the same PATH prefix pi_run launches under, so the two can never disagree.
+  local pidir
+  p="${NIGHTSHIFT_PI_PATH:-}"
+  pidir="$(PATH="$(pi_path_prefix)$PATH" command -v pi 2>/dev/null || true)"
+  [ -n "$pidir" ] && pidir="$(dirname -- "$(realpath -e "$pidir" 2>/dev/null || printf '%s' "$pidir")")"
+  for f in "$p" "$pidir"; do
+    [ -n "$f" ] && [ -d "$f" ] || continue
+    # node resolves its own lib/ relative to `..`, so an nvm bin dir needs its prefix bound too.
+    [ -x "$f/node" ] && [ -d "$(dirname -- "$f")/lib/node_modules" ] && _test_robind "$(dirname -- "$f")"
+    _test_robind "$f"
+  done
+  # Extensions loaded BY PATH (`-e`, pi_run below) — on this host the auth extension that stamps the
+  # device header, i.e. the difference between a working call and a 403 that reads like a revoked
+  # credential. They live under the operator's pi directory, which is not bound, so each one's
+  # PACKAGE ROOT is bound read-only: the entry file alone is not enough, a TypeScript entry resolves
+  # imports and its package.json relative to that root.
+  local exts ext root
+  exts="${NIGHTSHIFT_PI_EXTENSIONS-${RB_PI_EXTENSIONS:-}}"
+  if [ -n "$exts" ]; then
+    local IFS=,
+    for ext in $exts; do
+      ext="$(printf '%s' "$ext" | tr -d '[:space:]')"
+      [ -n "$ext" ] && [ -e "$ext" ] || continue
+      root="$(dirname -- "$ext")"
+      while [ "$root" != / ] && [ ! -e "$root/package.json" ]; do root="$(dirname -- "$root")"; done
+      [ "$root" != / ] || root="$(dirname -- "$ext")"
+      _test_robind "$root"
+    done
+    unset IFS
+  fi
+  # A resolver, unlike the gate's sandbox. There the deliberate absence of /etc/resolv.conf is what
+  # forces every name through the vetting proxy, which resolves it on the host and checks the answer
+  # against the address policy. This stage has the host's own namespace and no such proxy, so
+  # withholding the resolver would not add a check — it would only break a provider addressed by
+  # name (this host's gateway is an IP literal; another host's need not be).
+  TEST_SANDBOX_ARGV+=( --ro-bind-try /etc/resolv.conf /etc/resolv.conf )
+  # --clearenv dropped the caller's environment, so what pi needs is re-declared here. GIT_CONFIG_*
+  # carries the Layer 1 pre-push hook, which is why HOOKS_DIR is bound read-only too.
+  _test_robind "$HOOKS_DIR"
+  TEST_SANDBOX_ARGV+=(
+    --setenv PATH "${p:+$p:}${pidir:+$pidir:}${NIGHTSHIFT_TEST_PATH:+$NIGHTSHIFT_TEST_PATH:}/usr/local/bin:/usr/bin:/bin"
+    --setenv PI_CODING_AGENT_DIR "$pi_home"
+    --setenv GIT_CONFIG_COUNT 1
+    --setenv GIT_CONFIG_KEY_0 core.hooksPath
+    --setenv GIT_CONFIG_VALUE_0 "$HOOKS_DIR"
+    --setenv NIGHTSHIFT_PI_SANDBOX_ACTIVE 1
+  )
+  return 0
+}
+
 pi_run() { # stage workdir item_dir
   local stage="$1" wd="$2" id="$3" prompt model provider tools rc=0 parse_rc=0
   # The Fix stage is refused unless the HOST explicitly takes the risk (`agent.pi_allow_fix: true`,
@@ -1424,10 +1514,18 @@ pi_run() { # stage workdir item_dir
   # adapters even though this profile grants no shell — the hook costs nothing and the profile is
   # the only thing standing between a future `bash` grant and an unconfined push.
   local events="$id/.raw_$stage"
+  # The Fix stage runs inside the filesystem sandbox; every read-only stage runs as before (it has
+  # no write primitive to confine, so a sandbox would buy nothing and could only break a read).
+  local -a launch=()
+  if [ "$stage" = fix ]; then
+    pi_sandbox_argv "$wd" "$pi_home" "$id" || return 2
+    launch=( "${TEST_SANDBOX_ARGV[@]}" )
+  fi
   (cd "$wd" && \
     PATH="$(pi_path_prefix)$PATH" \
     GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="$HOOKS_DIR" \
     PI_CODING_AGENT_DIR="$pi_home" \
+    ${launch[@]+"${launch[@]}"} \
     pi "${args[@]}" -- "$prompt" </dev/null) > "$events" 2>"$id/$stage.err" || rc=$?
   # pi streams JSONL events and the ANSWER is the text content of the last assistant message that
   # actually stopped. `.role=="assistant"` alone is not enough: the same stream carries thinking
@@ -1981,7 +2079,15 @@ _test_robind() { # path -> append a read-only bind, refusing anything that would
   TEST_SANDBOX_ARGV+=( --ro-bind "$rp" "$rp" )
 }
 
-build_test_sandbox() { # worktree sandbox_home net(0|1) item_dir -> fills TEST_SANDBOX_ARGV
+# `net` is 0 (isolated) or 1 (isolated + egress through the ADR 0028 vetting proxy). A third value,
+# `host`, keeps the CALLER's network namespace and exists for one caller only: the pi Fix stage
+# (pi_sandbox_argv). Its model gateway is a LAN address, and the vetting proxy forwards to PUBLIC
+# addresses only — so an isolated namespace does not narrow that stage's reach, it removes the one
+# connection it exists to make. That stage is wrapped for the FILESYSTEM bound it never had (R8);
+# its network reach stays exactly as wide as it already is today, and narrowing it is tracked
+# separately in OPEN-QUESTIONS.md. The ship gate never passes `host`, and a caller that does gets
+# no egress proxy — the two are alternatives, not layers.
+build_test_sandbox() { # worktree sandbox_home net(0|1|host) item_dir -> fills TEST_SANDBOX_ARGV
   local wt="$1" sbhome="$2" net="$3" id="$4" p
   local -a extra=()
   TEST_SANDBOX_ARGV=(
@@ -2000,7 +2106,11 @@ build_test_sandbox() { # worktree sandbox_home net(0|1) item_dir -> fills TEST_S
   # the HOST's namespace, which is loopback and the LAN — every other service on this machine — and
   # not merely "the internet" (ADR 0028). Egress now leaves through a vetting proxy on a unix
   # socket, which crosses the namespace because it is a filesystem object, not a route.
-  TEST_SANDBOX_ARGV+=( --unshare-net )
+  if [ "$net" = host ]; then
+    TEST_SANDBOX_ARGV+=( --share-net )
+  else
+    TEST_SANDBOX_ARGV+=( --unshare-net )
+  fi
   if [ "$net" = 1 ] && [ -n "${TEST_EGRESS_DIR:-}" ]; then
     TEST_SANDBOX_ARGV+=(
       --ro-bind "$TEST_EGRESS_DIR" /nightshift-egress

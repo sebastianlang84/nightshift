@@ -169,16 +169,25 @@ read-only profile safe, since no write primitive exists to confine — but nothi
 absolute path once `write` were granted. So `pi_run` declines the `fix` stage rather than run an
 unconfined writer, and pi serves review/explore/recon/verify/advise by default.
 
-**The one hole in that, and it is deliberate:** `agent.pi_allow_fix: true` lets a host serve the Fix
-stage on pi anyway (ADR 0031, amendment). Understand what it does and does not cost before setting
-it. It does *not* weaken the review of the branch — that diff still reaches a human. It removes the
-bound on **where the process may write**, and a write outside the worktree appears in no diff at
-all, so no branch review can catch it; the realistic failure is a confused absolute path between a
-worktree named `partflow` and a live repo at `~/partflow`. `bash` stays refused on every pi profile
-including this one, so such a stage can edit files but never execute a command. The mechanism that
-would make this safe rather than merely accepted is wrapping the agent process in
-`build_test_sandbox` (ADR 0026) — the same "when M2 wraps the agent process too" noted at the end of
-this document.
+**`agent.pi_allow_fix: true` lets a host serve the Fix stage on pi anyway** (ADR 0031, amendment),
+and since 2026-09-06 that stage is confined by a mechanism rather than by hope: `pi_sandbox_argv`
+wraps the agent process in the same `bwrap` hull the ship gate runs in (ADR 0026, ADR 0032). The
+worktree and the stage's own agent dir are the only writable paths, so the realistic failure — a
+confused absolute path between a worktree named `partflow` and a live repo at `~/partflow` — is
+refused by the kernel. It fails closed: no bwrap, no Fix stage. `NIGHTSHIFT_PI_SANDBOX=none` is the
+documented opt-out and restores the unconfined writer, out loud in the log.
+
+That confinement was not theoretical. The night of 2026-09-06 shipped a correct partflow fix that
+*also* wrote `/tmp/nightshift-install-marker.txt`, outside its worktree — invisible to the gate and
+to the branch review, found only because the agent mentioned it in its own worknote.
+
+**What it still does not bound: the network.** The pi Fix hull keeps the host's namespace
+(`--share-net`), because the ADR 0028 vetting proxy forwards to public addresses only and this
+host's model gateway is a LAN address — isolating the namespace would not narrow the stage, it would
+remove the one connection it exists to make. So this stage's network reach is exactly what it was
+before the hull existed; only its filesystem reach is narrowed. Tracked in `OPEN-QUESTIONS.md`.
+`bash` stays refused on every pi profile including this one, so such a stage can edit files but
+never execute a command.
 
 **Rejected alternatives.** `--bare` and `--safe-mode` both remove the personal config, but they also
 disable hooks — that is Layer 2, i.e. the confinement itself — and `--bare` additionally forces
