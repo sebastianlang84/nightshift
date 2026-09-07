@@ -21,6 +21,10 @@ its own branch — aimed by a rotating review *dimension* (correctness, security
 dead-code/code-bloat, …) chosen per repo from a reconnaissance survey and least-recently-serviced coverage. See
 [`docs/design/nightshift-v2.md`](docs/design/nightshift-v2.md) and ADRs 0008–0011.
 
+**Free search (opt-in):** `dimensions: general` searches across categories and moves to another
+area when one is quiet. Recent scans and decisions help avoid repeated work. See the
+[operator guide](docs/deployment.md#free-search-pilot) and [ADR 0033](docs/adr/0033-free-search-is-an-opt-in-dimension.md).
+
 **Deep-review contract:** a lens counts as serviced only after Explore proves breadth with tracked
 files, a traced flow, concrete checks, and five lens-specific invariant classes. The opt-in
 `knowledge` lens also receives a deterministic, read-only OKF-v0.2/Markdown structure report. Invalid

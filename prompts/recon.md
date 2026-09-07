@@ -33,6 +33,7 @@ FILES exist; use them to anchor `yield`, then read just enough to place the
 - deps — outdated/unpinned/vulnerable dependencies, lockfile drift.
 - bloat — dead code, redundant paths, speculative abstractions, needless indirection.
 - knowledge — wiki/knowledge-base coherence, canonical claims, provenance, freshness, routing.
+- general — unrestricted improvement search; suggest promising areas across categories (opt-in).
 - craft — poor naming, local readability, control-flow clarity, in-repo inconsistency.
 
 ## How to judge `yield` (high | normal | low)
@@ -56,6 +57,7 @@ signal, but STILL rotated in occasionally (never dropped):
   usage docs ⇒ `low`. The lens is opt-in per repo even though Recon knows how to orient it.
 - security is `high`/`normal` wherever code handles input, secrets, auth, or network/IO;
   `low` only when there is plausibly no such surface.
+- general is normally `normal`; use concrete cross-category signals for its hint.
 - perf is `high` only with a plausible hot path or data-volume concern; otherwise `low`.
 
 Rate a weak dimension `low` with a one-line hint saying WHY (e.g. "no frontend — no
@@ -92,5 +94,6 @@ shape, where attention pays off) to orient explore.
    "deps":{"yield":"normal","hint":"<one line>"},
    "bloat":{"yield":"normal","hint":"<one line>"},
    "knowledge":{"yield":"low","hint":"<one line>"},
+   "general":{"yield":"normal","hint":"<promising areas across categories>"},
    "craft":{"yield":"normal","hint":"<one line>"}
  },"notes":"<one short paragraph orienting explore>"}

@@ -389,3 +389,23 @@ bin/schedule.sh uninstall   # stop the timer, remove the units AND any drop-in o
 
 State under `NIGHTSHIFT_HOME` (ledger, runs, digests) is left in place — remove it by hand if you
 want a clean slate.
+
+
+## Free-search pilot
+
+Set a repo's `dimensions: general` to search freely across improvement categories. For the
+whole fleet, replace the global dimension list with just `general`; per-repo overrides still
+win. The example defaults remain unchanged. General search tries at least three distinct
+areas before an empty verdict, or all available areas in a smaller repo. A missing surface
+is a reason to look elsewhere. The normal evidence, review, sandbox, test, and time gates apply.
+
+Explore receives bounded history: the five latest validated scans and twenty recent terminal
+decisions, alongside open work. Treat earlier checks and decisions as navigation hints, not
+proof about current code; changed code may justify a fresh investigation. General scans count
+as general coverage, not as completed security or UI reviews.
+
+The initial pilot uses Luna with `high` effort and caps both open branches and new branches per
+run at ten. GPT-6 reviews the collected branches before merge. Ten is a ceiling: an empty fleet
+pass may end the run before it fills. Evaluate how many proposed branches are accepted, with
+rejection reasons; also record elapsed time and available cost data. No quality improvement has
+yet been measured. [ADR 0033](adr/0033-free-search-is-an-opt-in-dimension.md) records the decision.

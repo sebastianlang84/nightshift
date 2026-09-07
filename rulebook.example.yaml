@@ -94,6 +94,7 @@ recon:                           # reconnaissance stage (ADR 0010): surveys each
 # first. The Runner rotates — each repo/pass gets the lens with the highest staleness × recon yield
 # weight, so coverage spreads over nights and even a `low` lens still comes round.
 # Trim this list, or override per repo with a repo-level `dimensions:` (comma-separated) key.
+# Use only general for unrestricted search: categories become hints; the default list stays below.
 dimensions:
   - correctness                  # live/latent bugs, wrong results, unhandled edges
   - security                     # secrets, injection, authz gaps, unsafe defaults (never quotes a secret)
@@ -115,6 +116,7 @@ repos:
   #                              # main/master). Set to `develop` for gitflow repos so fixes branch
   #                              # off the integration branch, not production `main`.
   #   findings: 5                # OPTIONAL per-repo override of max_findings_per_item
+  #   # dimensions: general       # opt-in free search across categories instead of rotating lenses
   #   dimensions: security,infra,docs  # OPTIONAL per-repo lens set (comma-separated); beats the global list
   #   test_net: false            # OPTIONAL (ADR 0026): network egress for THIS repo's gate sandbox.
   #                              # Off by default, and off is what you want unless the suite installs

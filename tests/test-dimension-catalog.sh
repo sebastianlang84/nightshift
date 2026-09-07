@@ -9,7 +9,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-builtins=(correctness security infra docs tests perf ui-ux deps bloat knowledge craft)
+builtins=(correctness security infra docs tests perf ui-ux deps bloat knowledge general craft)
 defaults=(correctness security infra docs tests perf ui-ux deps bloat craft)
 mapfile -t configured < <(
   python3 "$ROOT/lib/parse_rulebook.py" "$ROOT/rulebook.example.yaml" |
@@ -89,5 +89,16 @@ grep -q '^## Lens: KNOWLEDGE$' "$TMP/knowledge.prompt" || {
 grep -q '^## knowledge_probe ' "$TMP/knowledge.prompt" || {
   echo "explore prompt did not inject deterministic knowledge evidence" >&2; exit 1;
 }
+
+NIGHTSHIFT_DIMENSION=general stage_prompt explore "$TMP/repo" "$TMP/item" > "$TMP/general.prompt"
+grep -q '^## Free search$' "$TMP/general.prompt" || {
+  echo "explore prompt did not select free search" >&2; exit 1;
+}
+grep -q '^## General improvement search$' "$TMP/general.prompt" || {
+  echo "explore prompt did not inject general search" >&2; exit 1;
+}
+if grep -q 'Rank findings WITHIN it' "$TMP/general.prompt"; then
+  echo "free search retained the restrictive lens wrapper" >&2; exit 1
+fi
 
 echo "test-dimension-catalog: ok"
