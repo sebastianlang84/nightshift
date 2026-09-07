@@ -76,6 +76,9 @@ def main(repo_arg: str, verdict_arg: str, dimension: str = "") -> None:
     ):
         fail("an empty verdict needs a valid scope")
 
+    if dimension == "general" and verdict.get("scope") == "out_of_scope":
+        fail("free search cannot declare a repository out_of_scope")
+
     coverage = verdict.get("coverage")
     if not isinstance(coverage, dict):
         fail("coverage must be an object")
