@@ -30,7 +30,7 @@ jobs:
   suite:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # The deep-review regression corpus points at frozen historical commits. A shallow
           # checkout makes those fixtures disappear and turns a sound suite into a CI-only failure.
