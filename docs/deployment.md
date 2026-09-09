@@ -357,6 +357,13 @@ never push outside `nightshift/*` (see [`docs/design/hook-spec.md`](design/hook-
   `NIGHTSHIFT_ADVISOR_AGENT` (e.g. `codex` when the night runs on `claude`) for a different vendor's
   eyes. It never merges or pushes. Costs extra tokens, so it is off by default.
 - **Logs:** `bin/schedule.sh logs [N]` or `journalctl --user -u nightshift.service`.
+- **Time limits:** keep `limits.max_run_minutes` below the scheduler's hard timeout (the shipped
+  unit uses five hours). The application checks its budget between work items, so an in-flight
+  stage can overrun it. For example, 270 minutes leaves 30 minutes for completion. SIGTERM/SIGINT
+  write an `ABORTED` digest from recorded ledger outcomes and exit with 143/130; this records
+  partial progress without claiming the interrupted stage completed. SIGKILL cannot be handled.
+  Keep dependency-install errors visible in `test_cmd`: use `npm ci --no-audit --no-fund`, without
+  `--silent`, so a failed install leaves a useful `tests.log` for the next Fix iteration.
 - **An aborted night (exit 3):** the night stopped because the agent CLI could not authenticate
   ([ADR 0023](adr/0023-an-unusable-agent-aborts-the-night.md)). The digest says `ABORTED` instead of
   reporting a clean fleet, the day's log carries a `FATAL:` line naming the stage, and the systemd

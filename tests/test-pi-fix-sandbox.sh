@@ -19,9 +19,17 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
 # The "outside" directory must NOT live under /tmp: the sandbox mounts its own tmpfs there, so a
 # write to /tmp/... fails to reach the host for a reason that has nothing to do with the confinement
-# — the assertion would pass even with the bind rules removed. /var/tmp is an ordinary host
-# directory the sandbox binds nowhere, which is what makes the case meaningful.
-OUTSIDE="$(mktemp -d -p /var/tmp nightshift-pi-sandbox.XXXXXX)"
+# — the assertion would pass even with the bind rules removed. The ship gate has no /var/tmp;
+# there, use its writable checkout, outside the nested pi worktree and agent home.
+OUTSIDE_PARENT=/var/tmp
+if [ ! -w "$OUTSIDE_PARENT" ]; then OUTSIDE_PARENT="$ROOT"; fi
+case "$OUTSIDE_PARENT" in
+  /tmp|/tmp/*)
+    rm -rf "$TMP"
+    echo 'test-pi-fix-sandbox: SKIP — no writable fixture path outside /tmp'
+    exit 0 ;;
+esac
+OUTSIDE="$(mktemp -d "$OUTSIDE_PARENT/.nightshift-pi-sandbox.XXXXXX")"
 trap 'rm -rf "$TMP" "$OUTSIDE"' EXIT
 
 fail() { echo "test-pi-fix-sandbox: $*" >&2; exit 1; }

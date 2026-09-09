@@ -3092,6 +3092,43 @@ write_digest() { # made open status [advice]
   log "digest -> $f"
 }
 
+# systemd terminates the whole control group at its hard deadline. Do not start advice,
+# fetches, worktree cleanup, or the normal coverage calculations while shutting down. Preserve
+# the recorded results in a short atomic report; the ledger read has a five-second ceiling.
+# An in-flight stage may have no runs.jsonl row yet, so explicitly call its outcome unknown.
+interrupted_digest() { # signal exit-code; main's counters are dynamically scoped in Bash
+  [ "$BASHPID" = "${runner_pid:-}" ] || return 0
+  trap '' TERM INT
+  set +e  # Reporting failure must not replace the signal's nonzero exit status.
+  local signal="$1" rc="$2" tmp
+  log "night ABORTED: interrupted by SIG$signal — preserving recorded results"
+  tmp=$(mktemp "$DIGEST_DIR/.interrupted.XXXXXX") || exit "$rc"
+  {
+    echo "# nightshift digest — $NIGHT"
+    echo
+    echo "- **ABORTED: interrupted by SIG$signal** — the run did not complete."
+    echo "- agent: \`$RUN_AGENT_ROUTE\` · shipped this run: ${made:-0} · last observed open: ${open:-unknown}/${MAX_OPEN} (cap)"
+    echo "- The in-flight operation has no final verdict. Only persisted results are listed; worktrees are retained for inspection."
+    echo
+    if [ -f "$LEDGER" ]; then
+      timeout --kill-after=1s 5s jq -rs --arg n "$NIGHT" '
+        [.[] | select(.night==$n)] as $rows
+        | "## Shipped", ($rows[] | select(.outcome=="shipped")
+            | "- " + .repo + " → `" + (.branch // "") + "` — " + (.summary // .fingerprint // "")),
+          "", "## Findings (surfaced — reported, not touched)",
+          ($rows[] | select(.outcome=="finding")
+            | "- " + .repo + " — " + (.summary // .fingerprint // "")),
+          "", "## Considered but not shipped",
+          ($rows[] | select(.outcome=="abandoned" or .outcome=="push-failed" or .outcome=="commit-failed"
+              or .outcome=="tests-failed" or .outcome=="gate-blocked" or .outcome=="worktree-tampered" or .outcome=="stage-failed")
+            | "- " + .repo + " — " + .outcome + ": " + (.summary // .fingerprint // ""))
+      ' "$LEDGER" || echo "Ledger summary unavailable or interrupted; inspect the persisted ledger and run artifacts."
+    fi
+  } > "$tmp"
+  mv -f "$tmp" "$DIGEST_DIR/$NIGHT.md"
+  exit "$rc"
+}
+
 # --------------------------------------------------------------- spend budget ----
 # Wall-clock is the one budget signal that works identically for both first-party CLIs without a
 # metered API (ADR 0013). Enforced for the whole night: checked before each pass and before each
@@ -3200,6 +3237,10 @@ main() {
     log "quota fallback: $NIGHTSHIFT_QUOTA_FALLBACK_AGENT (activated only after a structured rejected quota event)"
     log_model_selection codex NIGHTSHIFT_CODEX_MODEL "$RB_CODEX_MODEL"
   fi
+  local made=0 considered=0 findings=0 repo mode cfgbase id fp fnj iter verdict wt base b summary open="" pass=0 progress ship_progress stop_reason=ok disp rfind farr n_find k fd dim explore_rc n_partial fix_rc review_rc
+  local runner_pid="$BASHPID"
+  trap 'interrupted_digest TERM 143' TERM
+  trap 'interrupted_digest INT 130' INT
   # Harvest first: reconcile prior shipped branches against git reality (merged/
   # dropped) so the morning digest scoreboard is current. Non-fatal — a harvest
   # hiccup must never block the night's work.
@@ -3215,7 +3256,6 @@ main() {
   # night's work so a finding cleared here also drops out of tonight's known_work injection.
   verify_findings
 
-  local made=0 considered=0 findings=0 repo mode cfgbase id fp fnj iter verdict wt base b summary open="" pass=0 progress ship_progress stop_reason=ok disp rfind farr n_find k fd dim explore_rc n_partial fix_rc review_rc
   # verify_findings above is the night's first agent call of all. If the credentials are already
   # dead there, every later stage is too — skip straight to the digest so the abort is on record.
   if [ -n "$AGENT_FATAL" ]; then stop_reason=agent_unavailable; fi
@@ -3546,6 +3586,7 @@ main() {
   # systemd unit surfaces it as a failed service — the two places an operator finds out something
   # broke without reading a digest. The old unconditional rc=0 meant a credential outage looked, to
   # every layer above, exactly like a night that simply found nothing.
+  trap - TERM INT
   if [ -n "$AGENT_FATAL" ]; then
     log "night ABORTED: $AGENT_FATAL — $considered repos considered, nothing recorded."
     return 3

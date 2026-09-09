@@ -28,6 +28,8 @@ limits:
                                  # before each pass and each fix: a read-only stage in flight finishes
                                  # but no new branch starts once spent; the digest shows the stop.
                                  # Omit = no time cap. Env override (seconds): NIGHTSHIFT_MAX_RUN_SECONDS.
+                                 # Leave headroom below the scheduler's hard timeout (default 5h).
+                                 # SIGTERM/SIGINT produce an interrupted digest, not a clean finish.
   test_timeout_seconds: 600      # HARD ceiling for ONE repo's `test_cmd` ship gate (ADR 0022), so a
                                  # hanging suite cannot eat the night. Env override: NIGHTSHIFT_TEST_TIMEOUT.
                                  # Doubles as the gate's per-process CPU-seconds cap (ADR 0026).
