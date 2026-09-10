@@ -40,6 +40,9 @@ AGENT_KEYS = (
 # a typo here would silently leave Review on the night's primary adapter — the opposite of what the
 # host asked for, with no signal that the routing never took effect.
 REVIEW_AGENTS = ("claude", "codex", "pi", "mock")
+# The emitter below reads only these top-level sections. A typo here would otherwise be ignored and
+# every setting beneath it would silently revert to its default.
+TOP_LEVEL_KEYS = ("branch_prefix", "limits", "recon", "agent", "dimensions", "repos")
 # `test_cmd` MUST stay last — see the emitter at the bottom of main(). A new field goes before it.
 REPO_KEYS = ("path", "mode", "base", "findings", "dimensions", "test_net", "test_cmd")
 # The modes the Runner actually implements. A repo whose mode is not in here is a typo, not a
@@ -126,6 +129,12 @@ def main(path: str) -> None:
             )
             if indent == 0 and not same_indent_item:
                 section = None
+                top_level_key = s.split(":", 1)[0].strip()
+                if top_level_key not in TOP_LEVEL_KEYS:
+                    raise SystemExit(
+                        f"unknown top-level key '{top_level_key}' "
+                        f"(expected one of: {', '.join(TOP_LEVEL_KEYS)})"
+                    )
                 if s.startswith("branch_prefix:"):
                     prefix = quoted_val(s.split(":", 1)[1])
                 elif head == "limits:":

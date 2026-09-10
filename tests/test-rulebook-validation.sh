@@ -132,6 +132,11 @@ reject "an unknown recon key"       'recon:
 reject "a non-boolean recon switch" 'recon:
   enabled: no'                      'recon.enabled must be true or false'
 
+# A misspelled top-level section used to be ignored, reverting every setting beneath it to the
+# parser's defaults. Top-level keys are closed just like nested mapping keys.
+reject "an unknown top-level section" 'limts:
+  max_open_branches: 99'             "unknown top-level key 'limts'"
+
 # A repo entry's keys are closed too, and this is the misconfig with the widest blast radius:
 # `test-cmd:` parsed clean and left `test_cmd` empty, so the repo shipped UNGATED past its
 # ADR 0022 ship gate — the human had written a gate and never got one. (ADR 0026 now refuses an
