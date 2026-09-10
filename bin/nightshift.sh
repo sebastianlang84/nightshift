@@ -2862,8 +2862,8 @@ advise_branches() {
       [ -n "$ref" ] || continue
       name="${ref#origin/}"
       id="$RUNS_DIR/advise-$(date +%s%N)"; mkdir -p "$id"
-      # Best-effort finding context from the ledger's shipped row for this branch.
-      jq -sc --arg b "$name" '([.[]|select(.outcome=="shipped" and .branch==$b)]|last) // {}
+      # Best-effort finding context from the ledger's shipped row for this repo and branch.
+      jq -sc --arg r "$path" --arg b "$name" '([.[]|select(.outcome=="shipped" and .repo==$r and .branch==$b)]|last) // {}
         | {summary:(.summary//""),fingerprint:(.fingerprint//""),type:(.type//""),dimension:(.dimension//"")}' \
         "$LEDGER" 2>/dev/null > "$id/finding.json" || echo '{}' > "$id/finding.json"
       wt="$WORKTREES_DIR/$(basename "$id")"
@@ -2948,12 +2948,12 @@ write_digest() { # made open status [advice]
     # Harvest scoreboard (all-time, from bin/harvest verdict events): the human
     # feedback loop made visible. A branch with no terminal verdict counts as open.
     [ -f "$LEDGER" ] && jq -rs '
-      ([.[]|select(.outcome=="verdict" and .branch!=null)]
-        | group_by(.branch) | map(sort_by(.ts)|last) | map(select(.verdict=="merged" or .verdict=="dropped"))
-        | INDEX(.branch)) as $v
-      | [.[]|select(.outcome=="shipped" and .branch!=null)|.branch] | unique as $ship
-      | ($ship|map(select($v[.].verdict=="merged"))|length) as $m
-      | ($ship|map(select($v[.].verdict=="dropped"))|length) as $d
+      ([.[]|select(.outcome=="verdict" and .repo!=null and .branch!=null)]
+        | group_by([.repo,.branch]) | map(sort_by(.ts)|last) | map(select(.verdict=="merged" or .verdict=="dropped"))
+        | INDEX([.repo,.branch] | tojson)) as $v
+      | [.[]|select(.outcome=="shipped" and .repo!=null and .branch!=null)|{repo:.repo,branch:.branch}] | unique as $ship
+      | ($ship|map(select($v[([.repo,.branch] | tojson)].verdict=="merged"))|length) as $m
+      | ($ship|map(select($v[([.repo,.branch] | tojson)].verdict=="dropped"))|length) as $d
       | ($ship|length) as $n
       | ($n-$m-$d) as $open
       | if $n==0 then empty else
@@ -3009,19 +3009,19 @@ write_digest() { # made open status [advice]
       [ -n "$contra" ] && printf '\n## Rulebook/recon contradictions (ADR 0015)\n%s' "$contra"
     fi
     # The merge-rate scoreboard: the tuning signal — which lenses (ADR 0010 Phase 4) and which KINDS
-    # of change humans actually merge. Join the latest verdict per branch back to the shipped row and
+    # of change humans actually merge. Join the latest verdict per repo+branch back to the shipped row and
     # slice it by dimension, verifiability, proof, and finding type. Empty slices are omitted.
     # One parameterised `rate` for all four slices, so the four cannot drift apart.
     [ -f "$LEDGER" ] && jq -rs '
       def rate($key; $name):
-        ([.[]|select(.outcome=="verdict" and .branch!=null)] | group_by(.branch) | map(sort_by(.ts)|last)
-          | map(select(.verdict=="merged" or .verdict=="dropped")) | INDEX(.branch)) as $v
-        | [.[]|select(.outcome=="shipped" and .branch!=null)]
+        ([.[]|select(.outcome=="verdict" and .repo!=null and .branch!=null)] | group_by([.repo,.branch]) | map(sort_by(.ts)|last)
+          | map(select(.verdict=="merged" or .verdict=="dropped")) | INDEX([.repo,.branch] | tojson)) as $v
+        | [.[]|select(.outcome=="shipped" and .repo!=null and .branch!=null)]
         | group_by(.[$key] // "—")
-        | map({g:(.[0][$key] // "—"), br:(map(.branch)|unique)})
+        | map({g:(.[0][$key] // "—"), br:(map({repo:.repo,branch:.branch})|unique)})
         | map({g:.g, n:(.br|length),
-               m:(.br|map(select($v[.].verdict=="merged"))|length),
-               d:(.br|map(select($v[.].verdict=="dropped"))|length)})
+               m:(.br|map(select($v[([.repo,.branch] | tojson)].verdict=="merged"))|length),
+               d:(.br|map(select($v[([.repo,.branch] | tojson)].verdict=="dropped"))|length)})
         | if length==0 then empty else
             "\n## Merge-rate by \($name) (all-time)\n"
             + (map("- \(.g): shipped \(.n) · merged \(.m) · dropped \(.d)"
