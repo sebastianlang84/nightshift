@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # Iterations reuse one item directory. A failed stage must not leave the caller reading the previous
 # iteration's valid-looking artifact — especially a stale review.md with verdict:ship.

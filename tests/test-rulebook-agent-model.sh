@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # The rulebook's `agent:` block declares which model a stage runs on (ADR 0020). It exists because
 # stage isolation (ADR 0019) drops the CLI's `user` settings scope, so a machine-wide pin in

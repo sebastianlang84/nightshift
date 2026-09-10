@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # harvest reconcile correctness (ADR 0016):
 #  A) a squash/rebase merge (branch's patch replayed as a NEW commit on base, branch then

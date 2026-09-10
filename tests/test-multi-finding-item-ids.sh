@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # L1 regression: two findings shipped from ONE explore pass must get DISTINCT, globally
 # unique work-item IDs in the ledger (and telemetry). They used to both record as "f0"/"f1"

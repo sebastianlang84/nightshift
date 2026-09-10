@@ -77,7 +77,13 @@ jobs:
         run: python3 lib/check_docs.py .
 
       # There is no test runner — the suite IS tests/*.sh, and every one must pass.
+      # The env below is what a Fix stage inherits (the Layer 1 pre-push hook via GIT_CONFIG_*). Each
+      # test unsets it; a new test that forgets to is red here instead of unrunnable in a Fix stage.
       - name: Test suite
+        env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: core.hooksPath
+          GIT_CONFIG_VALUE_0: ${{ github.workspace }}/hooks
         run: |
           rc=0
           for t in tests/*.sh; do

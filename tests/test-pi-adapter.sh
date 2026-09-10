@@ -3,6 +3,7 @@
 # the flags it passes, the stage isolation it sets up, the telemetry it mines from pi's event
 # stream, and its refusal to serve the Fix stage.
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # Verify phase (ADR 0021) — the model half of finding closure, exercised through the mock adapter:
 #  - a finding whose target code changed AND whose defect is gone gets a `resolved` verdict,

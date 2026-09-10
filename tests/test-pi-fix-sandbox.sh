@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # The pi adapter's Fix stage may write, and pi has no hook and no sandbox of its own to bound where
 # (hook-spec.md Layer 2b). Until 2026-09-06 `agent.pi_allow_fix: true` therefore bought a writer

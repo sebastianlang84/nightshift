@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # Independent branch review (opt-in): a fresh read-only advisor gives a merge/do-not-merge
 # recommendation on each open nightshift/* branch, into the digest. Off by default. Never pushes.

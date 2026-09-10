@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # harvest orphan sweep (ADR 0016): a <prefix>* branch on origin with no ledger row is reported
 # (it can never receive a verdict yet holds an open-branch cap slot). A branch the ledger knows

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # Stage isolation, codex half (ADR 0019). `--ignore-user-config` and `--ignore-rules` do NOT cover
 # $CODEX_HOME/AGENTS.md, so the operator's global instructions reach the stage. The only lever that

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # An explicitly configured second adapter takes over after Claude reports a rejected quota event.
 # The rejected attempt remains telemetry/evidence, the same stage is retried once, and later stages

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # ADR 0015 integration test: an empty Explore pass logs a {dimension, scope} ledger row, and three
 # consecutive out-of-scope passes for a (repo,dim) make the digest SUGGEST a human rulebook exclusion

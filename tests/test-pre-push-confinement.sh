@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # Layer 1 operates on resolved refs and object ids. Owning `nightshift/*` permits creating and
 # advancing those branches, never rewriting their published history.

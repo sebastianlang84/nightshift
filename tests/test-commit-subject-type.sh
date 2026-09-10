@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # The runner's commit subject is a CLAIM a host repo's `commit-msg` gate checks. git-workflow's
 # changelog-check.sh demands a CHANGELOG entry for `feat|fix|perf`, exempts the internal types, and

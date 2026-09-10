@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # schedule.sh must surface systemd drop-in overrides (which can silently change the effective
 # cadence) in `status`, and `uninstall` must remove the drop-in directory rather than leaving a

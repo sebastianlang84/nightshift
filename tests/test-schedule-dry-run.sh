@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # `schedule.sh dry-run` advertises "no cost, proves wiring". It used to set NIGHTSHIFT_AGENT=mock and
 # nothing else, which bought no isolation at all: state/runs/digests and the rulebook default under

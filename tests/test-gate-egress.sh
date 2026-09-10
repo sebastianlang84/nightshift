@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # ADR 0028 — `test_net: true` used to mean `--share-net`, which hands the suite the HOST's network
 # namespace. That is not "the internet": it is loopback and the LAN, so a suite in a test_net repo

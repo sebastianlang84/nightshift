@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # Recon cache hardening: a good recon writes a valid cache atomically (no leftover temp files,
 # no recon_failed marker), and a fresh cache (same HEAD, within ttl) is reused — recon does NOT

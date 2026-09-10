@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # ADR 0015 unit test: recon reprioritizes via yield weights and never excludes. Exercises the pure
 # selection functions by sourcing the runner (NIGHTSHIFT_SOURCED=1) so the weighting is deterministic

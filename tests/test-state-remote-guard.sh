@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # ADR 0017 unit test: guard_state_remote_incoherence ABORTS (exit 1) only when the ledger is
 # non-canonical ($STATE_DIR != $NIGHTSHIFT_HOME/state) AND origin is a network remote — with an

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # A model response that contains no JSON is not a clean `found:false` review. The adapter must
 # fail the stage so the Runner leaves coverage, rotation, and the ledger untouched.

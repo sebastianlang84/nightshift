@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # R8 regression: the Fix stage grants Write/Edit but no Bash. Those tools take absolute
 # paths, so the PreToolUse guard MUST deny any write resolving outside the worktree —

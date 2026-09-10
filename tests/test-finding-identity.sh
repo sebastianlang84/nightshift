@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # ADR 0014 — finding identity & lifecycle. Covers the four dimensions the design calls for:
 # identity stability, starvation (known-work feed), carry-forward, and clearing (+ invalidation).

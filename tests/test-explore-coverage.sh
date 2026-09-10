@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # A clean verdict is evidence only when the model names enough of the repository and the checks it
 # performed. The validator uses the tracked-file count to stay fair to tiny repositories.

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # An ADOPTED orphan (ADR 0018) must reconcile to a correct verdict on the next harvest.
 # adopt_orphan writes `fingerprint: null` by design — the branch name is the only surviving

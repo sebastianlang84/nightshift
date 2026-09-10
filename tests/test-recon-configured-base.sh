@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # Recon must inspect the same configured base that Explore branches from. Auto-detecting main while
 # a repo declares develop gives the expensive stage a different codebase and caches that mismatch.

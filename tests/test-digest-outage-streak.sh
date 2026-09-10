@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # An outage must stay visible in the digest until a night actually completes — and the night that
 # completes must report the gap once, on its way out.

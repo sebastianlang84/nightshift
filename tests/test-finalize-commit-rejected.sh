@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # A target repo's OWN hooks run for the nightshift commit — deliberately, so nightshift never
 # manufactures a commit its host repo would reject. A rejected commit must therefore END the item:

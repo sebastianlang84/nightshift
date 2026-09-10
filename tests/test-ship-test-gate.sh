@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # ADR 0022 — the Review stage proves the FINDING is fixed; it never proves nothing ELSE broke.
 # Until the gate existed, a regression only surfaced if the host repo happened to have CI, and one

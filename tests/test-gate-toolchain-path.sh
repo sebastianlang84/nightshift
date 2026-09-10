@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # The ship gate (ADR 0022) runs the repo's OWN suite, so it needs the developer toolchain — under nvm
 # that is node/npm/pnpm, none of which a systemd user service has on PATH. bin/nightshift-cron.sh

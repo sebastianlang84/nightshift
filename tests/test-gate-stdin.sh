@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # The outer fleet loop feeds select_order through stdin. A repo test that reads stdin must see EOF,
 # not consume the next repo row and silently truncate the night.

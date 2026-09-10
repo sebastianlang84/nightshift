@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # A night that ships and then fills the open-branch cap is the NORMAL end of a productive night
 # (the cap is only reached BY shipping). The digest for such a night must carry the FULL STOP

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # An Explore that could not run to COMPLETION is not evidence about the repo, and must not leave the
 # three artifacts that say otherwise: the `empty` ledger row (which ADR 0023 lets the fleet trust as

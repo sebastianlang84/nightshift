@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # Harvest visibility: shipped ledger rows carry the finding `type`, and the digest renders
 # merge-rate broken down by verifiability / proof / finding type once verdicts exist.

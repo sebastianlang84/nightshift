@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # The Fix stage cannot commit, so it never sees a repo hook fire: an unmet convention shows up only
 # as `commit-failed` after the model is gone, and the whole change is discarded. The fix prompt

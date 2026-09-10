@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # An agent CLI that is out of quota must ABORT the night, exactly like one that cannot authenticate
 # (ADR 0023). It is the same class of event — the agent could not run, so nothing it returned is

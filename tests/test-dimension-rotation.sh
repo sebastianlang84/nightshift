@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # L3 regression: dimension rotation must advance even when Explore finds NOTHING.
 # Before the fix, last_dim_epoch counted only work-item ledger rows, so an empty-

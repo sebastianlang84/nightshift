@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # Findings-only work must not keep the multi-pass loop alive. Findings surface once (they
 # dedup/latch) and consume no branch slot, so a nondeterministic findings-only repo could

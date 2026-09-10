@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # ADR 0026 — the ship gate EXECUTES candidate-controlled repository content. `npm ci` alone runs
 # preinstall/prepare/pretest out of a package.json the Fix stage may just have written, and until

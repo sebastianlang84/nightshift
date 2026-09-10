@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # An agent that notices something about its own working conditions — a missing tool, an instruction
 # that contradicts the repository, a check it could not run — had nowhere to put it. The Fix stage's

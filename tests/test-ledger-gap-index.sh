@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # The two ledger aggregates that used to fork `date -d` once per row now convert their whole batch
 # in one lib/ledger_epochs.py pass, and median_gap reads a cached per-repo index instead of

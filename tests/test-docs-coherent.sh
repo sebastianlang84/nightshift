@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # Docs rot in one mechanical way: they name a thing — a file, an ADR, a line — and that thing moves
 # or disappears. Nightshift has shipped exactly that as findings twice (risk-analysis.md citing

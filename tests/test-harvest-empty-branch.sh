@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # A branch that never received a nightshift commit still points at the base commit it was cut from.
 # That sha is trivially an ancestor of base, so the ancestor test called it `merged` — a merge that

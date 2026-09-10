@@ -295,7 +295,7 @@ these flags, is what confines the agent (see [`docs/design/risk-analysis.md`](de
 | `runs/<date>/` | Per-item working dirs (prompts, agent output) | `NIGHTSHIFT_RUNS_DIR` |
 | `digests/<date>.md` | The morning report | `NIGHTSHIFT_DIGEST_DIR` |
 | `~/.local/state/nightshift/logs/<date>.log` | Launcher log (also in journald) | `NIGHTSHIFT_LOG_DIR` |
-| `${TMPDIR:-/tmp}/nightshift-worktrees/` | Throwaway per-item worktrees | `NIGHTSHIFT_WORKTREES` |
+| `${TMPDIR:-/tmp}/nightshift-worktrees/` | Throwaway per-item worktrees. Where `/tmp` is a RAM-backed tmpfs (the Debian 13 default), a Fix stage's dependency install can exhaust it — point this at disk outside `$HOME`, e.g. `/var/tmp/nightshift-worktrees` | `NIGHTSHIFT_WORKTREES` |
 | `${TMPDIR:-/tmp}/nightshift.lock` | Single-instance flock | `NIGHTSHIFT_LOCK` |
 
 The ledger IS the installation. Back it up / move it with the installation; losing it loses dedup,

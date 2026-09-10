@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # H1 regression: a malformed rulebook must ABORT the run, not silently truncate the
 # fleet. Before the fix, parse_rulebook.py died mid-stream on the bad repo and the

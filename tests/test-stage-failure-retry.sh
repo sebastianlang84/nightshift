@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # A stage transport/parser failure is not the reviewer's judgment. It must stay visible and
 # retryable, never become the durable `abandoned` verdict that suppresses the finding until its
