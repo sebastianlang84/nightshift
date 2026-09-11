@@ -119,6 +119,7 @@ agent:
 | `NIGHTSHIFT_CODEX_MODEL` | codex | the rulebook's `agent.codex_model`, else no `--model` |
 | `NIGHTSHIFT_CODEX_REASONING_EFFORT` | codex | the CLI default effort applies |
 | `NIGHTSHIFT_CODEX_STAGE_HOME` | codex | `state/codex-home` (stage isolation); empty = your own `CODEX_HOME` |
+| `NIGHTSHIFT_EMPTY_ANSWER_RETRIES` | all | `1` — a stage whose model returned nothing is retried once (ADR 0034); `0` disables it |
 | `NIGHTSHIFT_TEST_TIMEOUT` | all | the rulebook's `limits.test_timeout_seconds`, else 600s per `test_cmd` |
 | `NIGHTSHIFT_TEST_PATH` | all | nothing is prepended, so a `test_cmd` sees only `/usr/local/bin:/usr/bin:/bin` |
 | `NIGHTSHIFT_TEST_SANDBOX` | all | `bwrap` — the gate is sandboxed (ADR 0026); `none` disables it, loudly, per gate |
@@ -135,6 +136,14 @@ the retry are separate `runs.jsonl` rows, and the raw quota event is retained in
 Credentials and ordinary stage failures do not trigger the fallback. Configure its model and effort
 through the normal Codex settings, for example `agent.codex_model: gpt-5.6-sol` plus
 `NIGHTSHIFT_CODEX_REASONING_EFFORT=medium`.
+
+A provider sometimes accepts a turn, bills it, and returns an empty answer. That is not a verdict
+about the repository, so `run_agent` calls the stage again — once, and only when the answer file is
+empty, the stage failed with status 1, and no credential or quota verdict already stands
+([ADR 0034](adr/0034-an-empty-answer-is-not-a-verdict.md)). An answer that arrived and merely did
+not parse is left alone, as is an adapter that refused to run (status 2). Both attempts become
+`runs.jsonl` rows and the empty attempt's stream is kept in the item directory as
+`.raw_<stage>.empty-answer-1`.
 
 ### The ship gate runs in a sandbox — and refuses to run without one
 

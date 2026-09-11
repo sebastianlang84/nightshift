@@ -598,6 +598,15 @@ agent_quota_rejected() { # raw_file -> 0 if THIS adapter's own output says the a
   esac
 }
 
+# How many EXTRA attempts a stage gets after the model returns nothing at all (ADR 0034). One, so a
+# single blip costs a second call and a night's budget is not lost to it, while a provider returning
+# nothing repeatedly still stops after two. 0 disables the retry. A non-numeric value falls back to
+# the default rather than aborting the night on a typo in an env var.
+EMPTY_ANSWER_RETRIES="${NIGHTSHIFT_EMPTY_ANSWER_RETRIES:-1}"
+case "$EMPTY_ANSWER_RETRIES" in
+  ''|*[!0-9]*) EMPTY_ANSWER_RETRIES=1 ;;
+esac
+
 clear_stage_artifacts() { # stage item_dir — an iteration may never read the previous one's result
   local stage="$1" id="$2" artifact=""
   case "$stage" in
@@ -611,11 +620,24 @@ clear_stage_artifacts() { # stage item_dir — an iteration may never read the p
   rm -f "$id/$stage.out" "$id/.raw_$stage" "$id/$stage.err" "$id/.usage_$stage" ${artifact:+"$artifact"}
 }
 
-preserve_quota_attempt() { # stage item_dir adapter — keep the rejected provider evidence
-  local stage="$1" id="$2" adapter="$3" f
+preserve_stage_attempt() { # stage item_dir label — keep one attempt's evidence past the next one
+  local stage="$1" id="$2" label="$3" f
   for f in "$id/.raw_$stage" "$id/$stage.err" "$id/.usage_$stage"; do
-    [ ! -e "$f" ] || mv "$f" "$f.$adapter-quota"
+    [ ! -e "$f" ] || mv "$f" "$f.$label"
   done
+}
+
+preserve_quota_attempt() { # stage item_dir adapter — keep the rejected provider evidence
+  preserve_stage_attempt "$1" "$2" "$3-quota"
+}
+
+# An EMPTY answer: the file exists and holds no non-whitespace text. Existence is half the test —
+# every real adapter writes this file unconditionally (an empty one when the model said nothing),
+# while the mock agent writes none at all, so an absent file means "this adapter does not report an
+# answer here" and must not be read as one.
+stage_answer_empty() { # answer_file
+  [ -f "$1" ] || return 1
+  ! grep -q '[^[:space:]]' "$1" 2>/dev/null
 }
 
 review_artifact_usable() { # item_dir -> a reviewer actually chose one documented verdict
@@ -677,8 +699,8 @@ collect_agent_note() { # stage workdir repo -> move a stage's note into the note
   log "  stage $stage: agent note recorded in $AGENT_NOTE_FILE"
 }
 
-run_agent() { # stage workdir item_dir
-  local stage="$1" workdir="$2" item_dir="$3" start end status=0 resets="" usage='{}'
+run_agent() { # stage workdir item_dir [attempt]
+  local stage="$1" workdir="$2" item_dir="$3" attempt="${4:-1}" start end status=0 resets="" usage='{}'
   local attempt_agent="$NIGHTSHIFT_AGENT" fallback="${NIGHTSHIFT_QUOTA_FALLBACK_AGENT:-}"
   clear_stage_artifacts "$stage" "$item_dir"
   start=$(date +%s)
@@ -737,6 +759,31 @@ run_agent() { # stage workdir item_dir
       AGENT_FATAL_AGENT="$attempt_agent"
       log "FATAL: $AGENT_FATAL — aborting the night rather than spending every remaining lens on the same wall."
       log "FATAL: re-run bin/nightshift.sh after $resets."
+    fi
+    # An EMPTY answer is not a verdict (ADR 0034). The provider accepted the turn, billed it, and
+    # returned no text — observed 2026-09-11, when partflow's first explore lens came back with a
+    # stopped assistant message carrying an empty content array. The parser then said "no parseable
+    # JSON from stage", the item recorded no verdict, and the Runner saw a pass with no new work and
+    # ended a night whose findings budget was untouched. One empty response ended the night.
+    #
+    # Retried only when the stage failed with status 1 — the parse/answer failure every adapter
+    # reports. Status 2 is an adapter REFUSING to run (an unpermitted tool, a missing sandbox): a
+    # deterministic configuration verdict that a second identical call can only repeat.
+    if [ -z "$AGENT_FATAL" ] && [ "$status" -eq 1 ] \
+       && [ "$attempt" -le "$EMPTY_ANSWER_RETRIES" ] \
+       && stage_answer_empty "$item_dir/$stage.out"; then
+      if [ "$attempt_agent" != mock ] && [ -s "$item_dir/.usage_$stage" ]; then
+        usage=$(jq -c 'if type=="object" then . else {} end' "$item_dir/.usage_$stage" 2>/dev/null || true)
+        [ -n "$usage" ] || usage='{}'
+      fi
+      end=$(date +%s)
+      # Both attempts reach runs.jsonl, so the telemetry still shows what the empty turn cost.
+      append_run "$stage" "$attempt_agent" "$start" "$((end - start))" "$status" \
+        "$(basename "$item_dir")" "$usage"
+      preserve_stage_attempt "$stage" "$item_dir" "empty-answer-$attempt"
+      log "  stage $stage: the model returned an empty answer — retrying (attempt $((attempt + 1)) of $((EMPTY_ANSWER_RETRIES + 1)))"
+      run_agent "$stage" "$workdir" "$item_dir" "$((attempt + 1))"
+      return $?
     fi
   fi
   # Each real adapter drops ONE compact JSON object per stage (model_id + token/cost counters).
