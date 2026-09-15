@@ -37,6 +37,42 @@ yield-weighting / never-exclude with the empty-scope feedback loop (ADR 0015).
 
 - **Add an `ideas` lens fed by a per-repo `ideas_cmd`.** Today the steward only self-selects findings; CONTEXT.md lists "general task runner" as a non-goal, and this stays true: the lens must not know any repo's schema or tooling. Contract, modelled on `test_cmd` and on the read-only structure report of the `knowledge` lens: the rulebook gains an optional per-repo `ideas_cmd`; the runner executes it outside the sandbox before Explore, expects JSONL on stdout (one object per idea: `id`, `title`, `text`, `source`), and passes the file to Explore as lens input. Repos without the key are not applicable for the lens and recon skips it. Explore needs a lens-specific prompt (`prompts/dimensions/`): an idea is a feature request, not a falsifiable defect, so the finding contract changes to "one idea → one bounded, reversible change proposal with a verify recipe", and ideas the model judges out of scope are reported as such, never silently dropped. Record the decision as an ADR before implementing. First consumer: partflow (feedback rows of type `IDEA`, exporter lives in that repo).
 
+## Session reflection — the PDCA job
+
+Design and rationale: [ADR 0035](docs/adr/0035-a-reflection-finding-is-verified-before-it-becomes-a-rule.md).
+That ADR is the authority on the pipeline and the reviewer policy; this section lists what has to be
+built and what has to be settled first.
+
+**Prerequisites — the job stays disabled until both are answered.**
+
+- **Where the payload may be sent.** The prototype sent transcripts, rulebooks and skills to a
+  proxied third-party model. For a standing nightly job that is an operator decision, not a per-run
+  one.
+- **The execution identity.** Which account the job runs as, what it may write, which credentials it
+  can reach. Until this is specified and verified, the separation from the night loop is an intention
+  rather than a boundary.
+
+**Deliverables.**
+
+- **Extractor.** Compacts a Claude Code or Codex transcript to human turns, agent prose and tool
+  names, assigning a stable turn identifier per turn so a citation survives a change in compaction.
+- **Generate prompt** for the cheap model, requiring a resolvable citation per quote.
+- **Citation checker.** Verifies each quote against its cited turn and any ordering the report
+  asserts between two cited turns. No model. Establishes quotation fidelity only.
+- **Judge stage** over the survivors, receiving each cited turn with its surrounding turns plus the
+  inventory of sessions that went into generation, so an ignored session can still be raised.
+
+**Open decisions inside the design.**
+
+- **The severity taxonomy.** ADR 0035 assigns severity from the finding's type rather than asking the
+  model. The types, the mapping, and who classifies do not exist yet; until they do the pipeline
+  reports findings unranked.
+- **What the extractor keeps of tool results.** Dropping them all makes any finding about what a
+  command returned unsupportable, which both prototype reviewers flagged. Keeping them all
+  reintroduces the size and the secrets problem.
+- **The citation format's details.** Multi-line quotes, permitted elision, normalisation, and whether
+  a failed check rejects the quote, the finding, or the run.
+
 ## Conditional / deferred
 
 - **Wake from suspend:** only if catch-up-on-wake is operationally insufficient.
