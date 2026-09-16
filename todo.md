@@ -52,6 +52,28 @@ built and what has to be settled first.
   can reach. Until this is specified and verified, the separation from the night loop is an intention
   rather than a boundary.
 
+**Order of work.** The two prerequisites block *enabling* the job, not building it. The first two
+deliverables run no model and send nothing anywhere, so they are built and tested first.
+
+1. **Extractor, then citation checker, as one piece of work.** They share the citation format, so
+   deciding it in one and discovering it in the other is how the two drift apart. The checker is
+   also the stage the whole design rests on, and it is the cheapest to get wrong unnoticed: it must
+   reject a quote that does not resolve, and it must not reject a quote that does. Build both
+   against a small fixture set of hand-written transcripts with known-good and known-bad citations,
+   the way the rest of the suite works — a live session is not a test fixture.
+2. **Settle the citation format while building them,** and record what was decided here: multi-line
+   quotes, permitted elision, normalisation, and the unit a failed check rejects. This is the one
+   open design decision that cannot wait, because both deliverables encode it.
+3. **Draft the execution identity** alongside, as research rather than a decision: what the night
+   loop's own unit runs as today, which of that this job does not need, and what a narrower identity
+   would look like. The operator approves or rejects the draft; nothing is deployed from it.
+4. **Generate prompt and judge stage last.** Both call a model with the day's material, so neither
+   can run before the payload destination is settled.
+
+The severity taxonomy and the tool-result question stay open through all of this. Neither blocks
+step 1: findings come out unranked, and the extractor's first version drops tool results exactly as
+the prototype did.
+
 **Deliverables.**
 
 - **Extractor.** Compacts a Claude Code or Codex transcript to human turns, agent prose and tool
