@@ -64,9 +64,11 @@ deliverables run no model and send nothing anywhere, so they are built and teste
    typography-normalised substring match with case significant; elision is allowed, must keep its
    fragments in order, and is flagged for the judge; an ordering claim resolves on recorded order
    within a session and on timestamps across sessions; one unresolved quote drops its finding.
-3. **Draft the execution identity** as research rather than a decision: what the night loop's own
-   unit runs as today, which of that this job does not need, and what a narrower identity would look
-   like. The operator approves or rejects the draft; nothing is deployed from it.
+3. ~~Draft the execution identity.~~ Done:
+   [`docs/design/reflection-confinement.md`](docs/design/reflection-confinement.md). It ends in three
+   questions for the operator, and nothing is deployed until they are answered. Short version: a
+   dedicated account is not reachable from this side, so the draft proposes the `build_test_sandbox`
+   hull instead, failing closed without bwrap.
 4. **Generate prompt and judge stage last.** Both call a model with the day's material, so neither
    can run before the payload destination is settled.
 
