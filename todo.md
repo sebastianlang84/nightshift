@@ -43,14 +43,14 @@ Design and rationale: [ADR 0035](docs/adr/0035-a-reflection-finding-is-verified-
 That ADR is the authority on the pipeline and the reviewer policy; this section lists what has to be
 built and what has to be settled first.
 
-**Prerequisites — the job stays disabled until both are answered.**
+**Prerequisites — both answered 2026-09-16, so building can continue to the model stages.**
 
-- **Where the payload may be sent.** The prototype sent transcripts, rulebooks and skills to a
-  proxied third-party model. For a standing nightly job that is an operator decision, not a per-run
-  one.
-- **The execution identity.** Which account the job runs as, what it may write, which credentials it
-  can reach. Until this is specified and verified, the separation from the night loop is an intention
-  rather than a boundary.
+- ~~Where the payload may be sent.~~ The day's material may go to the proxied third-party models,
+  GLM included — the same path the prototype used. This is what keeps a nightly run affordable, and
+  it means a third vendor sees material that only Anthropic and OpenAI saw before.
+- ~~The execution identity.~~ The `build_test_sandbox` hull rather than a dedicated account, which is
+  not reachable without IT, and no request opened with IT for one. Specified in
+  [`docs/design/reflection-confinement.md`](docs/design/reflection-confinement.md).
 
 **Order of work.** The two prerequisites block *enabling* the job, not building it. The first two
 deliverables run no model and send nothing anywhere, so they are built and tested first.
@@ -69,8 +69,10 @@ deliverables run no model and send nothing anywhere, so they are built and teste
    questions for the operator, and nothing is deployed until they are answered. Short version: a
    dedicated account is not reachable from this side, so the draft proposes the `build_test_sandbox`
    hull instead, failing closed without bwrap.
-4. **Generate prompt and judge stage last.** Both call a model with the day's material, so neither
-   can run before the payload destination is settled.
+4. ~~Generate prompt and judge stage.~~ Done, now that the payload destination is settled.
+5. **The runner and its unit.** What remains. It wires the five steps together, applies the hull, and
+   is the first piece that runs unattended — so it is also where the fail-closed rule lives: no
+   bwrap, no run.
 
 The severity taxonomy and the tool-result question stay open through all of this. Neither blocks
 step 1: findings come out unranked, and the extractor's first version drops tool results exactly as
@@ -80,11 +82,12 @@ the prototype did.
 
 - ~~Extractor~~ — `lib/extract_session.py`.
 - ~~Citation checker~~ — `lib/check_citations.py`.
-- **Generate prompt** for the cheap model, requiring a resolvable citation per quote.
-- **Judge stage** over the survivors, receiving each cited turn with its surrounding turns plus the
-  inventory of sessions that went into generation, so an ignored session can still be raised.
-- **Entry point and unit.** Neither exists yet; nothing runs on a schedule until the two
-  prerequisites above are answered.
+- ~~Generate prompt~~ — `prompts/reflection/generate.md`.
+- ~~Judge stage input~~ — `lib/build_judge_input.py` plus `prompts/reflection/judge.md`.
+- **Entry point and unit.** The one piece still missing: a runner that walks a day's transcripts
+  through extract, generate, check, build and judge, inside the hull
+  ([`docs/design/reflection-confinement.md`](docs/design/reflection-confinement.md)), and writes the
+  report. Nothing runs on a schedule until it exists.
 
 **Open decisions inside the design.**
 

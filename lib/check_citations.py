@@ -100,10 +100,15 @@ def check_quote(quote, turns):
     turn = turns.get(tid)
     if turn is None:
         return False, f"cited turn {tid} does not exist", False
-    fragments = [normalise(f) for f in ELLIPSIS.split(text) if normalise(f)]
+    parts = ELLIPSIS.split(text)
+    fragments = [normalise(f) for f in parts if normalise(f)]
     if not fragments:
         return False, "quote is empty after normalisation", False
-    elided = len(fragments) > 1
+    # The flag is set by the PRESENCE of an omission marker, not by the fragment count. A trailing
+    # elision — "Mit [ref] adressiert ..." — leaves exactly one fragment, and that is the shape the
+    # prototype's worst finding had: the dropped clause was the one saying the recommendation does
+    # not work. Counting fragments would have called that quote unelided and waved it through.
+    elided = len(parts) > len(fragments) or len(fragments) > 1
     pos = 0
     for frag in fragments:
         found = turn["body"].find(frag, pos)
@@ -134,12 +139,26 @@ def check_ordering(claim, turns):
     return False, f"{a} does not precede {b} by timestamp"
 
 
-def check_finding(finding, turns):
+# The fields the generate prompt requires. Checking them here rather than trusting the prompt is
+# the difference between a contract and a request: a finding missing its recommendation is not a
+# finding a human can act on, and it would otherwise travel all the way to the operator as one.
+REQUIRED = ("id", "title", "observation", "diagnosis", "recommendation")
+
+
+def check_finding(finding, turns, seen_ids=None):
     """-> (kept_finding_or_None, reasons). A finding stands or falls with its evidence."""
     reasons = []
+    missing = [k for k in REQUIRED if not str(finding.get(k) or "").strip()]
+    if missing:
+        reasons.append(f"finding is missing required field(s): {', '.join(missing)}")
+    fid = str(finding.get("id") or "").strip()
+    if seen_ids is not None and fid:
+        if fid in seen_ids:
+            reasons.append(f"duplicate finding id {fid!r} — ids must be unique within a run")
+        seen_ids.add(fid)
     quotes = finding.get("quotes") or []
     if not quotes:
-        return None, ["finding cites no evidence"]
+        return None, reasons + ["finding cites no evidence"]
     elided = False
     for q in quotes:
         ok, reason, was_elided = check_quote(q, turns)
@@ -183,12 +202,12 @@ def main(argv=None):
         print("check_citations: no turns loaded — nothing could resolve", file=sys.stderr)
         return 2
 
-    kept, dropped = [], []
+    kept, dropped, seen_ids = [], [], set()
     for f in findings:
         if not isinstance(f, dict):
             dropped.append({"finding": f, "reasons": ["finding is not an object"]})
             continue
-        k, reasons = check_finding(f, turns)
+        k, reasons = check_finding(f, turns, seen_ids)
         if k is None:
             dropped.append({"finding": f, "reasons": reasons})
         else:

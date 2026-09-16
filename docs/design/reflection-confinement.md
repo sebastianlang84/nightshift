@@ -1,10 +1,12 @@
-# What the reflection job may reach — a draft for the operator
+# What the reflection job may reach
 
 [ADR 0035](../adr/0035-a-reflection-finding-is-verified-before-it-becomes-a-rule.md) keeps the
 reflection job out of the night loop and says its separation "has to be a property of the deployment,
-not of the code's intentions". This is the draft that turns that sentence into a specification. It is
-research, not a decision: the operator approves, amends or rejects it, and nothing is deployed from
-it until then.
+not of the code's intentions". This is the specification that turns that sentence into a mechanism.
+
+It was written as a draft with three open questions. The operator answered all three on 2026-09-16,
+and the answers are recorded at the end; the body below now describes what is decided rather than
+what is proposed.
 
 ## What the job would inherit by default
 
@@ -32,8 +34,8 @@ account into a second timer.
 
 The obvious answer is a second, unprivileged system account. It is not reachable from this side:
 creating one needs `sudo`, `sudo` prompts for a password here, and the machine's administration is
-IT's. So this draft does not propose one. It proposes the confinement that **is** reachable, and
-records the account as the better answer if IT ever supplies it.
+IT's. So this job does not get one. It gets the confinement that **is** reachable, and the operator
+decided against opening a request with IT for the better answer — see the decisions at the end.
 
 ## What is reachable: the hull that already exists
 
@@ -64,7 +66,7 @@ Writable: one output directory for the report, and nothing else. No repository i
 the job has no reason to see a working tree, and a report is not a commit.
 
 Network: the reflection calls a model, so it needs egress. The same question ADR 0032 left open for
-the pi Fix stage applies unchanged here, and this draft does not reopen it: the vetting proxy of
+the pi Fix stage applies unchanged here, and this file does not reopen it: the vetting proxy of
 [ADR 0028](../adr/0028-gate-egress-goes-through-a-vetting-proxy.md) forwards to public addresses
 only, while the host's model gateway is a LAN address. Whichever way that is settled, it is settled
 once for both.
@@ -81,16 +83,23 @@ job's whole output is text a human will act on:
   to rulebooks. A recommendation to weaken a rule arrives through the operator, who has every
   permission the job was denied. That is why ADR 0035 makes the citation the thing a human checks,
   and why the report is not treated as an authority.
-- Sending the payload to a model discloses it, whatever the filesystem allows. The destination is a
-  separate operator decision, tracked in [`todo.md`](../../todo.md), and no confinement substitutes
-  for it.
+- Sending the payload to a model discloses it, whatever the filesystem allows. That was a separate
+  operator decision, settled the same day in favour of the proxied third-party models, and no
+  confinement substitutes for it.
 - The transcripts stay readable by the account that owns them. This bounds the job, not the machine.
 
-## What the operator is being asked to decide
+## What the operator decided, 2026-09-16
 
-1. Is the bwrap hull an acceptable substitute for a dedicated account, given that the account is not
-   reachable without IT?
-2. Should a dedicated account be requested from IT anyway, as the better answer, with the hull as the
-   interim?
-3. Is one named model credential inside the hull acceptable, or should the reflection call go through
-   something that holds the credential outside it?
+1. **The hull stands in for the account.** Accepted as the confinement, because a dedicated account
+   is not reachable without IT and the hull removes the capabilities that make the account dangerous
+   here.
+2. **No account requested from IT.** The hull is the answer, not an interim. If that changes, this
+   file is where the change belongs.
+3. **The model credential is bound read-only inside the hull,** one named credential and no other.
+   Holding it outside would mean a broker process this repository does not have, and the same
+   decision was already made for the pi Fix stage.
+
+One thing follows from the payload destination the operator settled the same day — the day's
+material may go to the proxied third-party models, GLM included. That widens what a disclosure costs
+and changes nothing about what this hull does: confinement never bounded what the job may send, only
+what it may read.
