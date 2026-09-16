@@ -55,18 +55,18 @@ built and what has to be settled first.
 **Order of work.** The two prerequisites block *enabling* the job, not building it. The first two
 deliverables run no model and send nothing anywhere, so they are built and tested first.
 
-1. **Extractor, then citation checker, as one piece of work.** They share the citation format, so
-   deciding it in one and discovering it in the other is how the two drift apart. The checker is
-   also the stage the whole design rests on, and it is the cheapest to get wrong unnoticed: it must
-   reject a quote that does not resolve, and it must not reject a quote that does. Build both
-   against a small fixture set of hand-written transcripts with known-good and known-bad citations,
-   the way the rest of the suite works — a live session is not a test fixture.
-2. **Settle the citation format while building them,** and record what was decided here: multi-line
-   quotes, permitted elision, normalisation, and the unit a failed check rejects. This is the one
-   open design decision that cannot wait, because both deliverables encode it.
-3. **Draft the execution identity** alongside, as research rather than a decision: what the night
-   loop's own unit runs as today, which of that this job does not need, and what a narrower identity
-   would look like. The operator approves or rejects the draft; nothing is deployed from it.
+1. ~~Extractor and citation checker.~~ Done: `lib/extract_session.py` and
+   `lib/check_citations.py`, covered by `tests/test-session-extract.sh` and
+   `tests/test-citation-check.sh`. Both tests were mutation-checked — breaking the origin filter,
+   the id derivation or the quote matcher turns them red.
+2. ~~Settle the citation format.~~ Done, and recorded in the two modules' docstrings: a turn id is
+   `<session>:<native>` derived from the source; a quote resolves on whitespace- and
+   typography-normalised substring match with case significant; elision is allowed, must keep its
+   fragments in order, and is flagged for the judge; an ordering claim resolves on recorded order
+   within a session and on timestamps across sessions; one unresolved quote drops its finding.
+3. **Draft the execution identity** as research rather than a decision: what the night loop's own
+   unit runs as today, which of that this job does not need, and what a narrower identity would look
+   like. The operator approves or rejects the draft; nothing is deployed from it.
 4. **Generate prompt and judge stage last.** Both call a model with the day's material, so neither
    can run before the payload destination is settled.
 
@@ -76,13 +76,13 @@ the prototype did.
 
 **Deliverables.**
 
-- **Extractor.** Compacts a Claude Code or Codex transcript to human turns, agent prose and tool
-  names, assigning a stable turn identifier per turn so a citation survives a change in compaction.
+- ~~Extractor~~ — `lib/extract_session.py`.
+- ~~Citation checker~~ — `lib/check_citations.py`.
 - **Generate prompt** for the cheap model, requiring a resolvable citation per quote.
-- **Citation checker.** Verifies each quote against its cited turn and any ordering the report
-  asserts between two cited turns. No model. Establishes quotation fidelity only.
 - **Judge stage** over the survivors, receiving each cited turn with its surrounding turns plus the
   inventory of sessions that went into generation, so an ignored session can still be raised.
+- **Entry point and unit.** Neither exists yet; nothing runs on a schedule until the two
+  prerequisites above are answered.
 
 **Open decisions inside the design.**
 
@@ -92,8 +92,9 @@ the prototype did.
 - **What the extractor keeps of tool results.** Dropping them all makes any finding about what a
   command returned unsupportable, which both prototype reviewers flagged. Keeping them all
   reintroduces the size and the secrets problem.
-- **The citation format's details.** Multi-line quotes, permitted elision, normalisation, and whether
-  a failed check rejects the quote, the finding, or the run.
+- **Whether the elided flag is enough.** The checker allows an elided quote and flags it, because an
+  exact quote can still reverse its source by dropping a clause — the prototype did exactly that.
+  Whether the judge stage acts on that flag reliably is unmeasured.
 
 ## Conditional / deferred
 
