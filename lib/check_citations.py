@@ -48,6 +48,7 @@ import argparse
 import json
 import re
 import sys
+from datetime import datetime
 
 TURN_RE = re.compile(r"^\[turn (\S+) (human|agent) (\S*)\]$")
 ELLIPSIS = re.compile(r"\s*(?:\.\.\.|…)\s*")
@@ -134,7 +135,18 @@ def check_ordering(claim, turns):
         return False, f"{a} does not precede {b} — the transcript has it the other way round"
     if not ta["ts"] or not tb["ts"]:
         return False, f"{a} and {b} are in different sessions and carry no timestamps to order them"
-    if ta["ts"] < tb["ts"]:
+    timestamps = []
+    for ts in (ta["ts"], tb["ts"]):
+        try:
+            value = ts[:-1] + "+00:00" if ts[-1:] in ("Z", "z") else ts
+            timestamps.append(datetime.fromisoformat(value))
+        except (TypeError, ValueError):
+            return False, f"{a} and {b} are in different sessions and carry invalid timestamps"
+    try:
+        precedes = timestamps[0] < timestamps[1]
+    except TypeError:
+        return False, f"{a} and {b} carry incomparable timestamps"
+    if precedes:
         return True, ""
     return False, f"{a} does not precede {b} by timestamp"
 
