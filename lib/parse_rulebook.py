@@ -102,6 +102,7 @@ def main(path: str) -> None:
     dims: list[str] = []
     cur: dict[str, str] | None = None
     section: str | None = None
+    seen_top_level: set[str] = set()
 
     with open(path, encoding="utf-8") as fh:
         for raw in fh:
@@ -135,6 +136,9 @@ def main(path: str) -> None:
                         f"unknown top-level key '{top_level_key}' "
                         f"(expected one of: {', '.join(TOP_LEVEL_KEYS)})"
                     )
+                if top_level_key in seen_top_level:
+                    raise SystemExit(f"duplicate top-level key '{top_level_key}'")
+                seen_top_level.add(top_level_key)
                 if s.startswith("branch_prefix:"):
                     prefix = quoted_val(s.split(":", 1)[1])
                 elif head == "limits:":
