@@ -107,7 +107,7 @@ e.g. a smaller/cheaper model for one night.
 ```yaml
 agent:
   claude_model: claude-opus-5
-  codex_model: gpt-5.6-sol
+  codex_model: gpt-6-sol
   codex_effort: high
 ```
 
@@ -135,7 +135,7 @@ agent:
 once through the Codex adapter, then keeps the rest of the night on Codex. The rejected attempt and
 the retry are separate `runs.jsonl` rows, and the raw quota event is retained in the item directory.
 Credentials and ordinary stage failures do not trigger the fallback. Configure its model and effort
-through the normal Codex settings, for example `agent.codex_model: gpt-5.6-sol` plus
+through the normal Codex settings, for example `agent.codex_model: gpt-6-sol` plus
 `agent.codex_effort: medium` (or `NIGHTSHIFT_CODEX_REASONING_EFFORT=medium` for a one-off run).
 
 A provider sometimes accepts a turn, bills it, and returns an empty answer. That is not a verdict
