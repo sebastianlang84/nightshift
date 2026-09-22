@@ -84,6 +84,23 @@ the experiment found a defect and still graded it as unremarkable. The taxonomy 
 implementable does not exist yet and is tracked in `todo.md`; until it does, the pipeline reports
 findings unranked rather than ranked by a model.
 
+**A turn body may not look like a turn header.** The whole scheme rests on a turn having an address,
+and the address is a line at column 0 that `check_citations.py` and `build_judge_input.py` both match
+on. A human turn is copied out verbatim, deliberately, and what it contains is whatever a repository
+put in front of an agent — so a file somewhere can carry a line shaped like a turn header, and once
+quoted into a session that line arrives in the extract. Written out unchanged it starts a turn with
+an id the text chose, and choosing an existing id replaces the real turn: a quote then "resolves"
+against text the same untrusted source supplied, which is precisely what stage 2 exists to prevent.
+`extract_session.py` therefore indents any body line that would parse as structure. The parsers
+anchor at column 0, and the checker collapses whitespace before matching, so a quote of such a line
+still resolves.
+
+**"Read and held nothing" is not "could not be read".** The session inventory only means something
+if those two states stay apart, so `extract_session.py` exits 3 for the first and leaves every other
+non-zero exit to mean the second. The runner records a 3 as an examined session and stops the run on
+anything else. A crashed extraction recorded as an empty session would put a session in the
+inventory whose evidence nobody ever read — the judge would then be told the generator saw it.
+
 **The job is not a stage of the night loop.** It gets its own entry point in `bin/`, and the
 operator starts it — no timer, no unit. Running it is a decision, not a schedule: its output is a
 proposal that only a human can act on, so a report nobody asked for is a report nobody reads. Its input is text quoted out of repositories the agents were reading, and the night

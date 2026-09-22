@@ -60,14 +60,19 @@ usage() {
   sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
+# `set -u` turns a missing option value into "unbound variable", which names the shell's problem
+# rather than the caller's. Check the arity first so `--day` with nothing after it says what it
+# wanted.
+need() { [ $# -ge 2 ] || { echo "reflect: $1 needs a value" >&2; exit 2; }; }
+
 while [ $# -gt 0 ]; do
   case "$1" in
-    --day)          DAY="$2"; shift 2 ;;
-    --out)          OUT="$2"; shift 2 ;;
-    --model)        GEN_MODEL="$2"; shift 2 ;;
-    --judge-model)  JUDGE_MODEL="$2"; shift 2 ;;
-    --session-glob) SESSION_GLOB="$2"; shift 2 ;;
-    --max-sessions) MAX_SESSIONS="$2"; shift 2 ;;
+    --day)          need "$@"; DAY="$2"; shift 2 ;;
+    --out)          need "$@"; OUT="$2"; shift 2 ;;
+    --model)        need "$@"; GEN_MODEL="$2"; shift 2 ;;
+    --judge-model)  need "$@"; JUDGE_MODEL="$2"; shift 2 ;;
+    --session-glob) need "$@"; SESSION_GLOB="$2"; shift 2 ;;
+    --max-sessions) need "$@"; MAX_SESSIONS="$2"; shift 2 ;;
     --keep)         KEEP=1; shift ;;
     --dry-run)      DRY=1; shift ;;
     -h|--help)      usage; exit 0 ;;
@@ -82,6 +87,9 @@ esac
 case "$MAX_SESSIONS" in
   ''|*[!0-9]*) echo "reflect: --max-sessions must be a number" >&2; exit 2 ;;
 esac
+# The cap is checked after a session is appended, so 0 would still select one. Refusing is the
+# honest reading: nobody asks for a reflection over no sessions.
+[ "$MAX_SESSIONS" -ge 1 ] || { echo "reflect: --max-sessions must be at least 1" >&2; exit 2; }
 
 log() { printf '%s reflect: %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
 die() { printf 'reflect: %s\n' "$*" >&2; exit 1; }
@@ -99,60 +107,124 @@ trap cleanup EXIT
 mkdir -p "$WORK/turns"
 
 # --- 1. the day's sessions ----------------------------------------------------
-# Modified-on-that-day, which is when the conversation happened. A session spanning midnight is
-# picked up by the day it was last written to, and the judge is told the day it was given.
-find_sessions() {
-  local day_start day_end
-  day_start="$(date -d "$DAY 00:00:00" +%s)"
-  day_end="$(date -d "$DAY 23:59:59" +%s)"
-  {
-    [ -d "$CLAUDE_PROJECTS" ] && find "$CLAUDE_PROJECTS" -maxdepth 2 -name '*.jsonl' \
-      -newermt "@$day_start" ! -newermt "@$day_end" -printf '%T@ %p\n' 2>/dev/null
-    [ -d "$CODEX_SESSIONS" ] && find "$CODEX_SESSIONS" -name '*.jsonl' \
-      -newermt "@$day_start" ! -newermt "@$day_end" -printf '%T@ %p\n' 2>/dev/null
-  } | sort -rn | cut -d' ' -f2-
-}
+# Selection is by FILE MODIFICATION TIME, which is when the conversation was last written, not
+# necessarily when it happened: copying an old transcript today puts it in today's material, and a
+# session spanning midnight lands whole in the day it was last written to. The report says so, so a
+# reader can tell what the day in its title covers.
+#
+# Three things here are deliberate, and each one closes a way to lose evidence silently:
+#
+#   -type f          a symlink named `*.jsonl` would otherwise pull in a file from anywhere;
+#   -printf …\0      a path may contain a newline, which a line-oriented reader splits in two;
+#   no 2>/dev/null   an unreadable subtree makes `find` exit non-zero, and that has to stop the run
+#                    rather than quietly shorten the day.
+#
+# The window itself is half-open, [00:00:00 of the day, 00:00:00 of the next), and it is compared in
+# Python against the float timestamp. `find -newermt` is strictly-greater-than, so the pair
+# `-newermt @start ! -newermt @end` silently drops a file stamped exactly at midnight and one
+# stamped in the last fractional second of the day.
+: > "$WORK/candidates"
+if [ -d "$CLAUDE_PROJECTS" ]; then
+  find "$CLAUDE_PROJECTS" -maxdepth 2 -type f -name '*.jsonl' -printf '%T@\t%p\0' \
+    >> "$WORK/candidates" || die "could not list $CLAUDE_PROJECTS"
+fi
+if [ -d "$CODEX_SESSIONS" ]; then
+  find "$CODEX_SESSIONS" -type f -name '*.jsonl' -printf '%T@\t%p\0' \
+    >> "$WORK/candidates" || die "could not list $CODEX_SESSIONS"
+fi
 
-mapfile -t SESSIONS < <(find_sessions)
+# `python3 -` reads its PROGRAM from stdin, so the candidate list travels as a path, not on stdin.
+python3 - "$DAY" "$WORK/candidates" > "$WORK/selected" <<'PY' || die "could not select the day"
+import datetime, sys
+start = datetime.datetime.strptime(sys.argv[1], "%Y-%m-%d")
+lo = start.timestamp()
+hi = (start + datetime.timedelta(days=1)).timestamp()
+rows = []
+for rec in open(sys.argv[2], errors="replace").read().split("\0"):
+    if not rec:
+        continue
+    ts, _, path = rec.partition("\t")
+    try:
+        t = float(ts)
+    except ValueError:
+        continue
+    if lo <= t < hi:
+        rows.append((t, path))
+rows.sort(key=lambda r: -r[0])
+sys.stdout.write("".join(p + "\0" for _, p in rows))
+PY
+
+mapfile -d '' -t SESSIONS < "$WORK/selected"
 if [ "${#SESSIONS[@]}" -eq 0 ]; then
   die "no sessions modified on $DAY under $CLAUDE_PROJECTS or $CODEX_SESSIONS"
 fi
 
 # Subagent transcripts live one level below their parent and repeat its material; the parent's turns
 # carry the conversation the operator actually had.
-FILTERED=()
+# Filter first, cap second, and keep both counts. A cap applied while filtering would spend slots
+# on transcripts that are never eligible, and "12 of 20" would then be counting different things on
+# either side of the "of".
+ELIGIBLE_LIST=()
 for s in "${SESSIONS[@]}"; do
   case "$s" in */subagents/*) continue ;; esac
   if [ -n "$SESSION_GLOB" ]; then
     case "$s" in $SESSION_GLOB) ;; *) continue ;; esac
   fi
+  ELIGIBLE_LIST+=("$s")
+done
+[ "${#ELIGIBLE_LIST[@]}" -gt 0 ] || die "every session on $DAY was filtered out"
+
+FILTERED=()
+for s in "${ELIGIBLE_LIST[@]}"; do
   FILTERED+=("$s")
   [ "${#FILTERED[@]}" -ge "$MAX_SESSIONS" ] && break
 done
-[ "${#FILTERED[@]}" -gt 0 ] || die "every session on $DAY was filtered out"
 
-log "day $DAY: ${#FILTERED[@]} session(s)"
+ELIGIBLE="${#ELIGIBLE_LIST[@]}"
+SELECTED="${#FILTERED[@]}"
+log "day $DAY: $SELECTED of $ELIGIBLE eligible session(s)"
 
 MANIFEST="$WORK/manifest.json"
-printf '{"day": "%s", "sessions": [' "$DAY" > "$MANIFEST"
-first=1
+SIDS=()
+EMPTY_SIDS=()
 TURN_FILES=()
 for s in "${FILTERED[@]}"; do
-  sid="$(python3 "$LIB/extract_session.py" --print-session-id "$s" 2>/dev/null || true)"
-  [ -n "$sid" ] || sid="$(basename "$s" .jsonl | cut -c1-8)"
+  sid="$(python3 "$LIB/extract_session.py" --print-session-id "$s")" \
+    || die "could not derive a session id for $s"
+  [ -n "$sid" ] || die "empty session id for $s"
+  # Two transcripts whose ids collide would share one turn file: the second extraction overwrites
+  # the first, the manifest names the id twice, and one session's evidence is gone with nothing
+  # saying so. Refusing is the only honest answer — a reflection that silently read 11 of 12
+  # sessions is worse than one that did not run.
+  for prev in ${SIDS[@]+"${SIDS[@]}"}; do
+    [ "$prev" = "$sid" ] && die "session id '$sid' is used by two transcripts; one of them is $s"
+  done
+  SIDS+=("$sid")
+
   # A session that yields no turns still belongs in the manifest: "the generator saw nothing here"
   # and "the generator was never given this" are different facts, and only the manifest keeps them
-  # apart once the turn files are the only evidence left.
-  if python3 "$LIB/extract_session.py" "$s" > "$WORK/turns/$sid.turns" 2>"$WORK/turns/$sid.err"; then
-    TURN_FILES+=("$WORK/turns/$sid.turns")
-  else
-    log "  $sid: no turns extracted ($(tail -1 "$WORK/turns/$sid.err" 2>/dev/null || echo 'unknown'))"
-    rm -f "$WORK/turns/$sid.turns"
-  fi
-  [ "$first" -eq 1 ] && first=0 || printf ', ' >> "$MANIFEST"
-  printf '"%s"' "$sid" >> "$MANIFEST"
+  # apart once the turn files are the only evidence left. Exit 3 is that first fact and nothing
+  # else — any other failure means the transcript was not read, which is not something to record as
+  # an empty session and walk past.
+  rc=0
+  python3 "$LIB/extract_session.py" "$s" > "$WORK/turns/$sid.turns" 2>"$WORK/turns/$sid.err" || rc=$?
+  case "$rc" in
+    0) TURN_FILES+=("$WORK/turns/$sid.turns") ;;
+    3) log "  $sid: read, no turns in it"
+       EMPTY_SIDS+=("$sid")
+       rm -f "$WORK/turns/$sid.turns" ;;
+    *) sed 's/^/  /' "$WORK/turns/$sid.err" >&2 || true
+       die "extracting $s failed (exit $rc) — the day would be missing that session's evidence" ;;
+  esac
 done
-printf ']}\n' >> "$MANIFEST"
+
+python3 - "$DAY" "$ELIGIBLE" "$MANIFEST" "${SIDS[@]}" <<'PY' || die "could not write the manifest"
+import json, sys
+day, eligible, out = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+sids = sys.argv[4:]
+assert len(sids) == len(set(sids)), "duplicate session id reached the manifest"
+json.dump({"day": day, "eligible": eligible, "sessions": sids}, open(out, "w"))
+PY
 [ "${#TURN_FILES[@]}" -gt 0 ] || die "no session on $DAY produced any turns"
 
 RULEBOOKS=()
@@ -160,8 +232,8 @@ for f in "${RULEBOOKS_DEFAULT[@]}"; do [ -f "$f" ] && RULEBOOKS+=("$f"); done
 log "${#TURN_FILES[@]} transcript(s) extracted, ${#RULEBOOKS[@]} rulebook(s)"
 
 if [ "$DRY" -eq 1 ]; then
-  echo "would reflect on $DAY:"
-  printf '  %s\n' "${FILTERED[@]}"
+  echo "would reflect on $DAY ($SELECTED of $ELIGIBLE eligible session(s)):"
+  for i in "${!FILTERED[@]}"; do printf '  %s  %s\n' "${SIDS[$i]}" "${FILTERED[$i]}"; done
   echo "generate: $GEN_PROVIDER/$GEN_MODEL · judge: $JUDGE_PROVIDER/$JUDGE_MODEL"
   exit 0
 fi
@@ -226,10 +298,31 @@ mkdir -p "$REPORT_DIR"
     "$GEN_PROVIDER" "$GEN_MODEL" "$JUDGE_PROVIDER" "$JUDGE_MODEL"
   printf -- '- %s finding(s) proposed · %s carried their evidence · %s dropped by the citation check\n' \
     "$FOUND" "$KEPT" "$DROPPED"
-  printf -- '- sessions read: %s\n\n' "${#TURN_FILES[@]}"
+  printf -- '- %s of %s eligible session(s) read — %s yielded turns, %s were read and held none\n\n' \
+    "$SELECTED" "$ELIGIBLE" "${#TURN_FILES[@]}" "${#EMPTY_SIDS[@]}"
+
   printf 'Every finding below cites a turn that was checked against the transcript. That makes the\n'
   printf 'quote real, not the conclusion right — read the judge on each one before changing a rule.\n\n'
-  printf -- '---\n\n'
+
+  # Naming the sessions is what makes the day's coverage checkable. A bare count cannot be checked
+  # against anything: a reader cannot tell which conversations the reflection saw, nor that the cap
+  # left some out. Sessions are chosen by file modification time, so that is stated too — it is not
+  # the same thing as the day a conversation happened.
+  printf '## Sessions read\n\n'
+  printf 'Selected by file modification time on %s — a transcript last written that day, which for a\n' "$DAY"
+  printf 'session spanning midnight is not the same as a conversation held that day.\n\n'
+  for i in "${!FILTERED[@]}"; do
+    note=""
+    for e in ${EMPTY_SIDS[@]+"${EMPTY_SIDS[@]}"}; do
+      [ "$e" = "${SIDS[$i]}" ] && note=" — read, no turns in it"
+    done
+    printf -- '- `%s` (%s)%s\n' "${SIDS[$i]}" "$(basename "${FILTERED[$i]}")" "$note"
+  done
+  if [ "$SELECTED" -lt "$ELIGIBLE" ]; then
+    printf -- '\n%s further session(s) were modified on %s and NOT read — the `--max-sessions` cap is %s.\n' \
+      "$((ELIGIBLE - SELECTED))" "$DAY" "$MAX_SESSIONS"
+  fi
+  printf -- '\n---\n\n'
   cat "$WORK/judge.md"
   printf '\n\n---\n\n## Findings as proposed\n\n```json\n'
   python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); json.dump({"kept": d["kept"]}, sys.stdout, indent=2, ensure_ascii=False)' \
