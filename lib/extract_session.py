@@ -214,7 +214,16 @@ def main(argv=None):
                     help=f"truncate agent prose at N characters (default {PROSE_MAX})")
     ap.add_argument("--session-id", default=None,
                     help="override the session handle that prefixes every turn id")
+    ap.add_argument("--print-session-id", action="store_true",
+                    help="print the session handle this transcript would get, and exit")
     args = ap.parse_args(argv)
+
+    # The runner needs the handle BEFORE it has any turns — a transcript that yields nothing still
+    # belongs in the session manifest, and it can only be named there if the name is derivable
+    # without reading a turn. Deriving it here keeps one definition of that name.
+    if args.print_session_id:
+        print(args.session_id or default_session_id(args.transcript))
+        return 0
 
     if not os.path.exists(args.transcript):
         print(f"extract_session: no such transcript: {args.transcript}", file=sys.stderr)

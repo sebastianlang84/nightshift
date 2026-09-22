@@ -74,8 +74,8 @@ citation that resolves is therefore a precondition for a finding, never evidence
 whether the evidence supports the claim is stage 3's job, and an authentic quote attached to an
 unrelated diagnosis has to fail there.
 
-Stage 3 runs the cheap model nightly and a cross-vendor reviewer on a cadence the operator sets, at
-minimum whenever the procedure itself changes. Neither reviewer has been measured on stage 3's
+Stage 3 runs the cheap model on every run and a cross-vendor reviewer on a cadence the operator
+sets, at minimum whenever the procedure itself changes. Neither reviewer has been measured on stage 3's
 restricted input — both prototype runs saw the whole day — so that cadence is a starting point to
 revise once the pipeline has run.
 
@@ -84,8 +84,9 @@ the experiment found a defect and still graded it as unremarkable. The taxonomy 
 implementable does not exist yet and is tracked in `todo.md`; until it does, the pipeline reports
 findings unranked rather than ranked by a model.
 
-**The job is not a stage of the night loop.** It gets its own entry point in `bin/` and its own
-systemd unit. Its input is text quoted out of repositories the agents were reading, and the night
+**The job is not a stage of the night loop.** It gets its own entry point in `bin/`, and the
+operator starts it — no timer, no unit. Running it is a decision, not a schedule: its output is a
+proposal that only a human can act on, so a report nobody asked for is a report nobody reads. Its input is text quoted out of repositories the agents were reading, and the night
 loop's stages may commit and push, so the two are kept apart. That separation has to be a property
 of the deployment, not of the code's intentions: before the job is enabled, its execution identity,
 its writable paths, and which credentials it can reach are specified and verified, the same way

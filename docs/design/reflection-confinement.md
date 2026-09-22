@@ -10,8 +10,8 @@ what is proposed.
 
 ## What the job would inherit by default
 
-The night loop runs as a systemd **user** unit, so it runs as the operator's own account. A
-reflection job installed the same way inherits that account whole. On this host (2026-09-16) that
+The night loop runs as a systemd **user** unit and the reflection job is started by hand, so both
+run as the operator's own account. Either way the job inherits that account whole. On this host (2026-09-16) that
 account is `llmadmin`, and `id` reports it in three groups that matter:
 
 - **`docker`.** Membership is root-equivalent on the host: anyone who can talk to the daemon socket
@@ -27,8 +27,8 @@ and the credentials of every model CLI on the machine.
 
 The job reads session transcripts, and a transcript is text that other people's repositories put
 there. Handing that material an account with these capabilities is the thing the separation is
-supposed to prevent, and installing a second unit does not prevent it — it only moves the same
-account into a second timer.
+supposed to prevent, and keeping the job off the timer does not prevent it — a manual start runs
+under the same account as a scheduled one.
 
 ## Why a dedicated account is not available here
 

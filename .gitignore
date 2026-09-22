@@ -15,3 +15,7 @@ rulebook.yaml
 # teaches the demo repo this; the control repo has to hold to it too.
 __pycache__/
 *.py[cod]
+
+# Reflection reports. They quote the day's session transcripts verbatim, so they are working
+# material for a human decision, not repository content. `bin/reflect.sh --out` writes elsewhere.
+/reflections/

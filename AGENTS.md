@@ -7,7 +7,7 @@ it does not repeat architecture (CONTEXT.md/ADRs) or global rules (git, secrets,
 ## Where things are (router)
 
 - **Orchestrator:** [`bin/nightshift.sh`](bin/nightshift.sh) — the night loop: harvest → verify (close open findings) → recon → explore → fix↔review↔`test_cmd` gate (a red suite loops back into Fix, ADR 0022) → finalize (push `nightshift/*`).
-- **Peers:** `harvest.sh` (reconcile branches, probe findings, `todos`/`close`) · `review-branch.sh` (mechanical branch review) · `schedule.sh` (systemd timer) · `nightshift-cron.sh` (unattended launcher).
+- **Peers:** `harvest.sh` (reconcile branches, probe findings, `todos`/`close`) · `review-branch.sh` (mechanical branch review) · `schedule.sh` (systemd timer) · `nightshift-cron.sh` (unattended launcher) · `reflect.sh` (the reflection job, ADR 0035 — started by hand, never on a timer).
 - **lib/:** `parse_rulebook.py` · `extract_json.py` · `validate_explore.py` (ADR 0029 depth receipt) · `recon_signals.sh` · `probe_findings.py` (finding freshness, ADR 0021) · `ledger_epochs.py` (batch ISO→epoch behind the ledger indexes) · `extract_session.py` + `check_citations.py` + `build_judge_input.py` (the reflection job, ADR 0035 — not part of the night loop). **prompts/** one per stage, plus `prompts/reflection/` for the job that is not one. **hooks/** `pre-push` + `pretooluse-guard.sh` (the confinement).
 - **Decisions → [`docs/adr/`](docs/adr/) · Design → [`docs/design/`](docs/design/) · Open questions → [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) · Backlog → [`todo.md`](todo.md) · Operations → [`docs/deployment.md`](docs/deployment.md).**
 
