@@ -41,6 +41,24 @@ JUDGE_MODEL="${NIGHTSHIFT_REFLECT_JUDGE_MODEL:-$GEN_MODEL}"
 
 # Rulebooks and skills the reflection reads to judge whether a proposed rule already exists. A
 # missing one is skipped, not fatal: this list spans machines.
+# Transcript trees that hold automated runs rather than conversations. The reflection asks how a
+# working DAY went, and only a session with a person in it can answer that — so what belongs here is
+# whatever produces transcripts nobody had a conversation in:
+#
+#   subagents/      a subagent repeats its parent's material under a second id;
+#   peer-debates/   two models arguing with each other on a fixed brief. On 2026-09-21 these were 21
+#                   of the day's 32 transcripts, so reading them does not merely add noise — it
+#                   crowds real sessions out past `--max-sessions` while the report still counts
+#                   them as sessions read.
+#
+# Override with NIGHTSHIFT_REFLECT_EXCLUDE, a space-separated list of shell patterns matched against
+# the whole path. An empty value reads everything.
+#
+# `*peer-debates*` carries no slashes on purpose: Claude Code names a project directory after the
+# working directory with every slash turned into a dash, so `~/peer-debates/<topic>` arrives as
+# `-home-llmadmin-peer-debates-<topic>` and a slash-anchored pattern matches nothing.
+read -r -a EXCLUDE <<< "${NIGHTSHIFT_REFLECT_EXCLUDE-*/subagents/* *peer-debates*}"
+
 RULEBOOKS_DEFAULT=(
   "$HOME/.claude/CLAUDE.md"
   "$HOME/nightshift/AGENTS.md"
@@ -159,14 +177,16 @@ if [ "${#SESSIONS[@]}" -eq 0 ]; then
   die "no sessions modified on $DAY under $CLAUDE_PROJECTS or $CODEX_SESSIONS"
 fi
 
-# Subagent transcripts live one level below their parent and repeat its material; the parent's turns
-# carry the conversation the operator actually had.
 # Filter first, cap second, and keep both counts. A cap applied while filtering would spend slots
 # on transcripts that are never eligible, and "12 of 20" would then be counting different things on
 # either side of the "of".
 ELIGIBLE_LIST=()
 for s in "${SESSIONS[@]}"; do
-  case "$s" in */subagents/*) continue ;; esac
+  skip=0
+  for pat in "${EXCLUDE[@]}"; do
+    case "$s" in $pat) skip=1; break ;; esac
+  done
+  [ "$skip" -eq 1 ] && continue
   if [ -n "$SESSION_GLOB" ]; then
     case "$s" in $SESSION_GLOB) ;; *) continue ;; esac
   fi

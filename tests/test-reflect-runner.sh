@@ -13,8 +13,10 @@ unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this
 #   1. the day window is half-open and exact at BOTH ends. Midnight of the day belongs to the day;
 #      the last fractional second belongs to the day; midnight of the next day does not. A
 #      `find -newermt` pair gets all three wrong, which is why they are fixtures and not a comment.
-#   2. a subagent transcript is excluded, because it repeats its parent's material under a second
-#      id, and so is a symlink named like a transcript — it reaches outside the configured trees;
+#   2. transcripts that are not conversations are excluded — a subagent run, which repeats its
+#      parent's material under a second id, and a peer-debate benchmark run, which has no person in
+#      it at all — and so is a symlink named like a transcript, which reaches outside the configured
+#      trees. The exclusion list is configurable and can be switched off entirely;
 #   3. `--max-sessions` caps the set by IDENTITY, not merely by count — a cap applied before the
 #      subagent filter would still produce the right number of sessions and the wrong ones;
 #   4. a transcript that yields NO turns still appears in the manifest, exactly once. That is the
@@ -88,6 +90,14 @@ touch -d "$NEXT 00:00:00"  "$NEXTDAY"
 touch -d "$NEXT 10:00:00"  "$LATER"
 touch -d "$PREV 10:00:00"  "$OLD"
 
+# A peer-debate benchmark run: two models arguing on a fixed brief, no person in it. Claude Code
+# flattens the working directory into the project name, so the marker arrives with dashes, not
+# slashes — a pattern anchored on `/peer-debates/` would match nothing.
+mkdir -p "$TMP/claude/projects/-home-x-peer-debates-2026-09-20-topic"
+DEBATE="$TMP/claude/projects/-home-x-peer-debates-2026-09-20-topic/55555555-1111-4111-8111-111111111111.jsonl"
+claude_turn "$DEBATE" 55555555 "SENTINEL_DEBATE"
+touch -d "$DAY 10:45:00" "$DEBATE"
+
 # A symlink named like a transcript, pointing outside both trees. Without `-type f` it is selected
 # and the reflection reads a file from somewhere nobody configured.
 mkdir -p "$TMP/elsewhere"
@@ -133,6 +143,16 @@ $want
 got:
 $got"
 grep -q 'of 5 eligible' <<<"$capped" || fail "the capped run did not report how many it left out"
+
+# --- 3a. the exclusions are configurable, and off by request -----------------
+# On 2026-09-21 benchmark runs were 21 of the day's 32 transcripts, so this is not noise reduction:
+# without it they crowd real sessions out past the cap while the report still counts them as read.
+opened="$(NIGHTSHIFT_REFLECT_EXCLUDE="" run --day "$DAY" --dry-run --max-sessions 99)" \
+  || fail "the run with no exclusions failed: $opened"
+grep -q "$(basename "$DEBATE")" <<<"$opened" \
+  || fail "an empty NIGHTSHIFT_REFLECT_EXCLUDE still excluded something"
+grep -q "$(basename "$SUB")" <<<"$opened" \
+  || fail "an empty NIGHTSHIFT_REFLECT_EXCLUDE still excluded the subagent"
 
 # --- 3b. a directory `find` cannot read stops the run ------------------------
 # Losing a subtree must not shorten the day quietly: an unreadable directory makes `find` exit
@@ -213,7 +233,7 @@ guard 'at least 1'         --day "$DAY" --max-sessions 0 --dry-run
 guard 'needs a value'      --day
 
 # --- 8. no model was called ---------------------------------------------------
-if grep -q 'pi must not be called' <<<"$out$capped$kept$broke$coll$blind"; then
+if grep -q 'pi must not be called' <<<"$out$capped$kept$broke$coll$blind$opened"; then
   fail "the dry run reached the model stub"
 fi
 
