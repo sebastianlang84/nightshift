@@ -99,7 +99,7 @@ BASE_RESOLUTION_WARN_MISSING=1
 source "$NIGHTSHIFT_HOME/lib/base_resolution.sh"
 # Rulebook-declared model per adapter (ADR 0020); empty = the rulebook declares none. Kept separate
 # from the NIGHTSHIFT_*_MODEL env vars so the precedence env > rulebook > CLI default stays legible.
-RB_CLAUDE_MODEL="" RB_CODEX_MODEL="" RB_PI_MODEL="" RB_PI_PROVIDER="" RB_PI_EXTENSIONS="" RB_MAX_VERIFY=""
+RB_CLAUDE_MODEL="" RB_CODEX_MODEL="" RB_CODEX_EFFORT="" RB_PI_MODEL="" RB_PI_PROVIDER="" RB_PI_EXTENSIONS="" RB_MAX_VERIFY=""
 # Which adapter serves the Review stage (ADR 0031); empty = the night's own adapter, as before.
 RB_REVIEW_AGENT=""
 # The night's own adapter as declared by the rulebook (empty = the env/default decides), and whether
@@ -152,6 +152,7 @@ load_rulebook() {
       max_lines)             MAX_LINES="$a" ;;
       claude_model)          RB_CLAUDE_MODEL="$a" ;;
       codex_model)           RB_CODEX_MODEL="$a" ;;
+      codex_effort)          RB_CODEX_EFFORT="$a" ;;
       pi_model)              RB_PI_MODEL="$a" ;;
       pi_provider)           RB_PI_PROVIDER="$a" ;;
       pi_extensions)         RB_PI_EXTENSIONS="$a" ;;
@@ -1407,7 +1408,9 @@ codex_run() { # stage workdir item_dir
   # `agent.codex_model` (ADR 0020), else the CLI default.
   model="${NIGHTSHIFT_CODEX_MODEL-${RB_CODEX_MODEL:-}}"
   [ -z "$model" ] || args+=(--model "$model")
-  effort="${NIGHTSHIFT_CODEX_REASONING_EFFORT:-}"
+  # Effort resolves the same way: env if SET (empty = pass none), else `agent.codex_effort`, else
+  # the CLI default.
+  effort="${NIGHTSHIFT_CODEX_REASONING_EFFORT-${RB_CODEX_EFFORT:-}}"
   [ -z "$effort" ] || args+=(-c "model_reasoning_effort=\"$effort\"")
   # Stage isolation, codex half (ADR 0019). `--ignore-user-config` covers $CODEX_HOME/config.toml and
   # `--ignore-rules` the execpolicy files, but NEITHER covers $CODEX_HOME/AGENTS.md — the operator's

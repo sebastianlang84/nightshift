@@ -108,6 +108,14 @@ reject "an empty primary agent"     'agent:
 # the spellings a human reaches for, and both used to be falsy by accident.
 reject "a non-boolean pi_allow_fix" 'agent:
   pi_allow_fix: yes'                "agent.pi_allow_fix must be true or false"
+# codex does not check a reasoning effort itself — an unknown one passes `--strict-config` and reaches
+# the API — so the parser holds the closed set. `High` and `extra-high` are the plausible typos.
+reject "an unknown codex effort"     'agent:
+  codex_effort: extra-high'         "agent.codex_effort: unknown effort 'extra-high'"
+reject "a capitalised codex effort"  'agent:
+  codex_effort: High'               "agent.codex_effort: unknown effort 'High'"
+reject "an empty codex effort"       'agent:
+  codex_effort:'                    "agent.codex_effort is empty"
 
 # The same standard applies to EVERY mapping section, not just `agent:`. Each section's key set is
 # closed — the parser reads exactly those keys — so a key outside one is a typo, and the only other
@@ -169,6 +177,7 @@ cat > "$TMP/agent-ok.yaml" <<'EOF'
 agent:   # the model this host runs its nights on
   claude_model: "claude-opus-5"
   codex_model: 'gpt-5 #2'
+  codex_effort: xhigh
   primary: pi
   review_agent: pi
   pi_model: z-ai/glm-5.3-flash
@@ -187,6 +196,10 @@ grep -qx "$(printf 'codex_model\tgpt-5 #2')" "$TMP/stdout" || {
   echo "quoted codex_model with '#' mangled: $(grep codex_model "$TMP/stdout")" >&2
   exit 1
 }
+grep -qx "$(printf 'codex_effort\txhigh')" "$TMP/stdout" || {
+  echo "codex_effort not emitted: $(grep codex_effort "$TMP/stdout")" >&2
+  exit 1
+}
 grep -qx "$(printf 'primary_agent\tpi')" "$TMP/stdout" || {
   echo "primary_agent not emitted: $(grep primary_agent "$TMP/stdout")" >&2
   exit 1
@@ -201,6 +214,11 @@ printf 'repos:\n  - path: /srv/example\n    mode: findings-only\n' > "$TMP/no-ag
 python3 "$ROOT/lib/parse_rulebook.py" "$TMP/no-agent.yaml" > "$TMP/stdout-no-agent"
 grep -qx "$(printf 'pi_allow_fix\tfalse')" "$TMP/stdout-no-agent" || {
   echo "an omitted pi_allow_fix did not default to false" >&2
+  exit 1
+}
+# Omitted, the effort is emitted EMPTY, which the Runner reads as "let the CLI default apply".
+grep -qx "$(printf 'codex_effort\t')" "$TMP/stdout-no-agent" || {
+  echo "an omitted codex_effort was not emitted empty: $(grep codex_effort "$TMP/stdout-no-agent")" >&2
   exit 1
 }
 

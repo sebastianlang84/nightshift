@@ -108,6 +108,7 @@ e.g. a smaller/cheaper model for one night.
 agent:
   claude_model: claude-opus-5
   codex_model: gpt-5.6-sol
+  codex_effort: high
 ```
 
 | Variable | Adapter | Effect when unset |
@@ -117,7 +118,7 @@ agent:
 | `NIGHTSHIFT_CLAUDE_SETTING_SOURCES` | claude | `--setting-sources project,local` (stage isolation) |
 | `NIGHTSHIFT_QUOTA_FALLBACK_AGENT` | claude | unset; a structured rejected quota event aborts the night |
 | `NIGHTSHIFT_CODEX_MODEL` | codex | the rulebook's `agent.codex_model`, else no `--model` |
-| `NIGHTSHIFT_CODEX_REASONING_EFFORT` | codex | the CLI default effort applies |
+| `NIGHTSHIFT_CODEX_REASONING_EFFORT` | codex | the rulebook's `agent.codex_effort`, else the CLI default |
 | `NIGHTSHIFT_CODEX_STAGE_HOME` | codex | `state/codex-home` (stage isolation); empty = your own `CODEX_HOME` |
 | `NIGHTSHIFT_EMPTY_ANSWER_RETRIES` | all | `1` — a stage whose model returned nothing is retried once (ADR 0034); `0` disables it |
 | `NIGHTSHIFT_TEST_TIMEOUT` | all | the rulebook's `limits.test_timeout_seconds`, else 600s per `test_cmd` |
@@ -135,7 +136,7 @@ once through the Codex adapter, then keeps the rest of the night on Codex. The r
 the retry are separate `runs.jsonl` rows, and the raw quota event is retained in the item directory.
 Credentials and ordinary stage failures do not trigger the fallback. Configure its model and effort
 through the normal Codex settings, for example `agent.codex_model: gpt-5.6-sol` plus
-`NIGHTSHIFT_CODEX_REASONING_EFFORT=medium`.
+`agent.codex_effort: medium` (or `NIGHTSHIFT_CODEX_REASONING_EFFORT=medium` for a one-off run).
 
 A provider sometimes accepts a turn, bills it, and returns an empty answer. That is not a verdict
 about the repository, so `run_agent` calls the stage again — once, and only when the answer file is

@@ -30,6 +30,7 @@ AGENT_KEYS = (
     "primary",
     "claude_model",
     "codex_model",
+    "codex_effort",
     "pi_model",
     "pi_provider",
     "pi_extensions",
@@ -40,6 +41,12 @@ AGENT_KEYS = (
 # a typo here would silently leave Review on the night's primary adapter — the opposite of what the
 # host asked for, with no signal that the routing never took effect.
 REVIEW_AGENTS = ("claude", "codex", "pi", "mock")
+# Reasoning efforts the codex adapter may request. codex itself does NOT validate the value: an
+# unknown one passes `--strict-config` and reaches the API (verified 2026-09-24, codex-cli 0.155.1),
+# so a typo here would silently spend a night on a request the provider rejects or reinterprets.
+# The set is the CLI's own `ReasoningEffort` variants as serialized in that binary; `none` is left
+# out because it could not be confirmed there.
+CODEX_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 # The emitter below reads only these top-level sections. A typo here would otherwise be ignored and
 # every setting beneath it would silently revert to its default.
 TOP_LEVEL_KEYS = ("branch_prefix", "limits", "recon", "agent", "dimensions", "repos")
@@ -289,6 +296,18 @@ def main(path: str) -> None:
         if "\t" in model:
             raise SystemExit(f"agent.{key} must not contain a tab")
         print(f"{key}\t{model}")
+    # The codex adapter's reasoning effort, declared beside its model and resolved the same way:
+    # NIGHTSHIFT_CODEX_REASONING_EFFORT if set > this key > the CLI default. Unlike a model id, the
+    # domain is small and fixed, so it is closed (CODEX_EFFORTS).
+    effort = agent.get("codex_effort", "")
+    if "codex_effort" in agent and not effort:
+        raise SystemExit("agent.codex_effort is empty — give it a value, or omit the key entirely")
+    if effort and effort not in CODEX_EFFORTS:
+        raise SystemExit(
+            f"agent.codex_effort: unknown effort {effort!r} — "
+            f"expected one of {', '.join(CODEX_EFFORTS)}"
+        )
+    print(f"codex_effort\t{effort}")
     # Which adapter serves the Review stage (ADR 0031). Omitted = Review runs on the night's own
     # adapter, which is the pre-0031 behaviour. Validated against the implemented set for the same
     # reason `mode` is: an unrecognised value cannot be a feature request, and tolerating one would

@@ -118,6 +118,24 @@ The proper fix is a mechanism rather than a policy: wrapping the agent process i
 `build_test_sandbox` already provides for the ship gate (ADR 0026 / hook-spec.md, "when M2 wraps the
 agent process too"). Until that exists, `pi_allow_fix` is the host accepting a known, named risk.
 
+## Amendment, 2026-09-24 — the review leaves pi
+
+With `primary: pi` the amendment above put Fix and Review on the same model again: glm-5.3-flash
+judged glm-5.3-flash's own fixes, which is exactly the author's-twin problem decision 1 exists to
+avoid. This host therefore routes Review to codex (`review_agent: codex`, `codex_model: gpt-6-sol`,
+`codex_effort: medium`). The cost argument that moved the night to pi does not apply here: codex
+runs on the operator's subscription, not per token, and a night holds a handful of reviews.
+
+`agent.codex_effort` is new with this amendment. Until now the effort could only come from
+`NIGHTSHIFT_CODEX_REASONING_EFFORT`, so a host that wanted a fixed effort had to set it outside the
+rulebook, where nobody reading the rulebook would see it. The key mirrors `codex_model`: the env var
+wins when set (empty means pass nothing), else the rulebook, else the CLI default. The parser accepts
+only a closed set of effort names, because the codex CLI accepts any string and fails later.
+
+Known gap: codex's credential-failure signature is still unverified (no codex night has run), so an
+expired codex login may not abort the night the way ADR 0023 intends. The first codex night settles
+that; until then read its morning log for a Review stage that ran but judged nothing.
+
 ## Consequences
 
 - A fix can now be judged by a model that did not write it, on the gate that decides shipping.

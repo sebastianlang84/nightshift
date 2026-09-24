@@ -25,6 +25,8 @@ limits:
 recon:
   enabled: true
   ttl_days: 7
+agent:
+  codex_effort: high
 dimensions:
   - correctness
 repos:
@@ -91,9 +93,12 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1300,"cached_inp
 EOF
 chmod +x "$TMP/bin/codex"
 
+# No NIGHTSHIFT_CODEX_REASONING_EFFORT: the stub demands effort=high, so the whole night proves the
+# rulebook's `agent.codex_effort` reaches every stage.
+env -u NIGHTSHIFT_CODEX_REASONING_EFFORT \
 PATH="$TMP/bin:/usr/bin:/bin" \
 RULEBOOK="$TMP/rulebook.yaml" \
-NIGHTSHIFT_AGENT=codex NIGHTSHIFT_CODEX_MODEL=test-model NIGHTSHIFT_CODEX_REASONING_EFFORT=high \
+NIGHTSHIFT_AGENT=codex NIGHTSHIFT_CODEX_MODEL=test-model \
 NIGHTSHIFT_CODEMAP=0 NIGHTSHIFT_OPEN_PR=0 \
 NIGHTSHIFT_STATE_DIR="$TMP/state" NIGHTSHIFT_RUNS_DIR="$TMP/runs" \
 NIGHTSHIFT_DIGEST_DIR="$TMP/digests" NIGHTSHIFT_WORKTREES="$TMP/worktrees" \
@@ -110,4 +115,53 @@ jq -se 'all(.model=="codex" and .model_id=="gpt-5-codex-test" and .tokens==7 and
             and .context_window==null and .cost_usd==null and .model_cost_usd==null
             and .exit==0)' "$TMP/state/runs.jsonl" >/dev/null
 jq -e 'select(.outcome=="shipped" and .branch!=null)' "$TMP/state/ledger.jsonl" >/dev/null
+
+# Effort precedence, unit level: env if SET (empty = pass none) > `agent.codex_effort` > CLI default.
+# A stub that records its argv NUL-separated; the argv file is deleted before each call so a failed
+# call cannot leave the previous one's argv behind.
+mkdir -p "$TMP/ubin" "$TMP/ustate" "$TMP/uwd" "$TMP/uitem" "$TMP/ucodex"
+cat > "$TMP/ubin/codex" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\0' "$@" > "$NIGHTSHIFT_TEST_ARGV"
+out=""; prev=""
+for a in "$@"; do [ "$prev" = -o ] && out="$a"; prev="$a"; done
+[ -z "$out" ] || printf '%s' '{}' > "$out"
+cat >/dev/null
+printf '%s\n' '{"type":"turn.completed","usage":{"output_tokens":1}}'
+EOF
+chmod +x "$TMP/ubin/codex"
+(
+  fail() { echo "FAIL: $*" >&2; exit 1; }
+  export PATH="$TMP/ubin:$PATH" CODEX_HOME="$TMP/ucodex" NIGHTSHIFT_TEST_ARGV="$TMP/argv"
+  export NIGHTSHIFT_STATE_DIR="$TMP/ustate" NIGHTSHIFT_RUNS_DIR="$TMP/runs" \
+         NIGHTSHIFT_DIGEST_DIR="$TMP/digests" NIGHTSHIFT_WORKTREES="$TMP/worktrees" \
+         RULEBOOK="$TMP/rulebook.yaml" NIGHTSHIFT_CODEMAP=0
+  unset NIGHTSHIFT_CODEX_REASONING_EFFORT NIGHTSHIFT_CODEX_MODEL
+  # shellcheck disable=SC1090
+  NIGHTSHIFT_SOURCED=1 source "$ROOT/bin/nightshift.sh"
+  load_rulebook
+  [ "$RB_CODEX_EFFORT" = high ] || fail "rulebook codex_effort not loaded: '$RB_CODEX_EFFORT'"
+  efforts() { # label -> prints every model_reasoning_effort override codex received
+    rm -f "$TMP/argv"
+    codex_run recon "$TMP/uwd" "$TMP/uitem" >/dev/null 2>&1 || fail "codex_run failed ($1)"
+    [ -f "$TMP/argv" ] || fail "codex_run never reached the stub ($1)"
+    mapfile -d '' -t ARGV < "$TMP/argv"
+    local i
+    for i in "${!ARGV[@]}"; do
+      [ "${ARGV[$i]}" = -c ] || continue
+      case "${ARGV[$((i + 1))]:-}" in model_reasoning_effort=*) printf '%s\n' "${ARGV[$((i + 1))]}" ;; esac
+    done
+  }
+  [ "$(efforts rulebook)" = 'model_reasoning_effort="high"' ] \
+    || fail "rulebook effort must pass -c model_reasoning_effort=\"high\": $(efforts rulebook)"
+  export NIGHTSHIFT_CODEX_REASONING_EFFORT=low
+  [ "$(efforts env-wins)" = 'model_reasoning_effort="low"' ] \
+    || fail "env effort must beat the rulebook: $(efforts env-wins)"
+  export NIGHTSHIFT_CODEX_REASONING_EFFORT=
+  [ -z "$(efforts escape-hatch)" ] || fail "empty env effort must pass none: $(efforts escape-hatch)"
+  unset NIGHTSHIFT_CODEX_REASONING_EFFORT
+  RB_CODEX_EFFORT=""
+  [ -z "$(efforts neither)" ] || fail "no declared effort must pass none: $(efforts neither)"
+)
 echo "test-codex-adapter: ok"

@@ -125,6 +125,10 @@ export NIGHTSHIFT_PI_SANDBOX=none
   || { echo "an empty review-agent override did not fall back to the night's adapter" >&2; exit 1; }
 [ "$(NIGHTSHIFT_REVIEW_AGENT=codex NIGHTSHIFT_AGENT=claude RB_REVIEW_AGENT=pi review_stage_agent)" = codex ] \
   || { echo "the env override lost to the rulebook" >&2; exit 1; }
+# The live route on this host (ADR 0031, amendment 2026-09-24): a pi night whose rulebook sends
+# Review to codex must hand Review to codex, not keep pi judging pi's own fix.
+[ "$(unset NIGHTSHIFT_REVIEW_AGENT; NIGHTSHIFT_AGENT=pi RB_REVIEW_AGENT=codex review_stage_agent)" = codex ] \
+  || { echo "a pi night did not route Review to the rulebook's codex" >&2; exit 1; }
 
 # --- 2. The diagnosis filter. pi's stream carries the prompt and every tool result verbatim, i.e.
 #        the REPO's words — the exact shape that aborted a healthy night on 2026-08-24 when
