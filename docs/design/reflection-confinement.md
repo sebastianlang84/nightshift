@@ -80,9 +80,22 @@ the pi Fix stage. A reflection that silently ran unconfined would be worse than 
 for the pi Fix stage's argv (`pi_sandbox_argv`, [ADR 0032](../adr/0032-the-pi-fix-stage-is-sandboxed.md))
 and binds one extra path per call: that call's payload file, read-only. So the bind set above is
 narrower in practice. The model call sees neither transcript tree, because the payload already
-carries the extracted turns. It sees no rulebook, because the payload carries them too. It gets
-pi's `auth.json` and model catalogs through a throwaway agent dir, as the Fix stage does, and
-writes nothing but a neutral cwd.
+carries the extracted turns. It sees no rulebook, because the payload carries them too. Its credential
+is a **filtered copy** of pi's `auth.json` (and of `models.json`'s `providers`) in a throwaway
+agent dir. The copy holds only the generate and judge providers, so the operator's own files are
+not bound and another provider's token is not reachable. That is design decision 3, and it is
+tighter than the Fix stage, which links the whole file. The call writes nothing but a neutral cwd.
+
+`reflect.sh` also drops `NIGHTSHIFT_TEST_SANDBOX_ROBIND` and `NIGHTSHIFT_TEST_PATH`, the two host
+settings that widen the gate's bind set. It then checks the finished argv against a protected
+list: both transcript trees, the pi directory, `~/.ssh`, `~/.config/gh`, `~/.codex` and
+`~/.claude`. A bind of any of them, or of a directory containing one, refuses the run.
+
+The throwaway agent dir has no `extensions/`. An extension the provider needs, such as the device
+header extension of a gateway host, has to be declared as `agent.pi_extensions` or in
+`NIGHTSHIFT_PI_EXTENSIONS`, exactly as for a night stage. Before the hull, `reflect.sh` discovered
+the operator's extensions. On a gateway host that has not declared its extension, the first
+hulled run will fail with a 403.
 
 Extraction, the citation check and assembling the judge's input stay outside the hull. They are
 this repository's own code and call no model, so a transcript's text is data to them and cannot
@@ -91,8 +104,10 @@ and would not narrow what the model can reach.
 
 No `bwrap` means no model call and no report. `NIGHTSHIFT_REFLECT_SANDBOX=none` is the opt-out,
 and every run that uses it logs it. `tests/test-reflect-hull.sh` checks this: the call can read its
-payload and cannot read the transcripts, a file beside them, or `~/.ssh`; the same probe does see
-them without the hull; and a PATH without `bwrap` stops the run before any call.
+payload and cannot read the transcripts, a file beside them, `~/.ssh` or the operator's
+`auth.json`. It also checks that another provider's token is filtered out, that the same probe does
+see the transcripts without the hull, that a widening knob stays out, that a protected bind refuses
+the run, and that a PATH without `bwrap` stops the run before any call.
 
 ## What this does not protect
 

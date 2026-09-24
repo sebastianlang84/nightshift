@@ -290,19 +290,54 @@ else
   # A child shell sources the Runner for its functions (the same entry point the tests use), so
   # none of its names or its `log` leak into this script. NIGHTSHIFT_PI_SANDBOX is pinned: a
   # night-loop opt-out in the environment must not silently unhull the reflection.
+  #
+  # The credential is narrowed to the providers these two calls use (design decision 3: one named
+  # credential). pi_stage_home links the operator's whole auth.json and models.json, which on a
+  # typical host carry every provider's token; the stage home gets filtered COPIES instead, so the
+  # hull binds no credential file of the operator's at all. The two host knobs that widen the gate's
+  # bind set (NIGHTSHIFT_TEST_SANDBOX_ROBIND, NIGHTSHIFT_TEST_PATH) are dropped: this call needs
+  # neither, and either could hand it a path the design keeps out.
+  env -u NIGHTSHIFT_TEST_SANDBOX_ROBIND -u NIGHTSHIFT_TEST_PATH \
   NIGHTSHIFT_SOURCED=1 NIGHTSHIFT_PI_SANDBOX=bwrap NIGHTSHIFT_PI_STAGE_HOME="$WORK/pi-home" \
     bash -c '
       source "$1/bin/nightshift.sh"
       load_rulebook >/dev/null 2>&1 || true
       home="$(pi_stage_home)" || exit 1
+      real="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
+      for f in auth.json models.json; do
+        rm -f "$home/$f"
+        [ -e "$real/$f" ] || continue
+        ( umask 077
+          jq --arg a "$4" --arg b "$5" "
+            def keep: with_entries(select(.key == \$a or .key == \$b));
+            if \"$f\" == \"auth.json\" then keep
+            else (if (.providers | type) == \"object\" then .providers |= keep else . end) end
+          " "$real/$f" > "$home/$f" ) || { echo "could not narrow $f to the reflection providers" >&2; exit 1; }
+      done
       pi_sandbox_argv "$2" "$home" "$3" || exit 1
       [ "${#TEST_SANDBOX_ARGV[@]}" -gt 0 ] || exit 1
       printf "%s\0" "${TEST_SANDBOX_ARGV[@]}" > "$3/hull.argv"
       printf "%s" "${NIGHTSHIFT_PI_EXTENSIONS-${RB_PI_EXTENSIONS:-}}" > "$3/hull.exts"
-    ' _ "$NIGHTSHIFT_HOME" "$NEUTRAL" "$WORK" 2>"$WORK/hull.err" \
+    ' _ "$NIGHTSHIFT_HOME" "$NEUTRAL" "$WORK" "$GEN_PROVIDER" "$JUDGE_PROVIDER" 2>"$WORK/hull.err" \
     || die "no hull for the model calls, so none is made: $(tail -1 "$WORK/hull.err" 2>/dev/null) $(cat "$WORK/fix.err" 2>/dev/null)"
   mapfile -d '' -t HULL < "$WORK/hull.argv"
   [ "${HULL[0]:-}" = bwrap ] || die "the hull did not come back as a bwrap command line"
+  # The bind set is assembled by shared code that serves other callers, so it is checked here against
+  # what this call must never see, whatever widened it (an extension whose package root turns out to
+  # be the operator's pi directory is the realistic case). A bind of any of these, or of a directory
+  # containing one, refuses the run.
+  PROTECTED=("$CLAUDE_PROJECTS" "$CODEX_SESSIONS" "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
+             "$HOME/.ssh" "$HOME/.config/gh" "$HOME/.codex" "$HOME/.claude")
+  for ((i = 0; i < ${#HULL[@]}; i++)); do
+    case "${HULL[$i]}" in --bind|--ro-bind|--ro-bind-try|--bind-try) ;; *) continue ;; esac
+    src="$(realpath -m -- "${HULL[$((i + 1))]}")"
+    for p in "${PROTECTED[@]}"; do
+      p="$(realpath -m -- "$p")"
+      if [ "$p" = "$src" ] || [ "${p#"$src"/}" != "$p" ]; then
+        die "the hull would bind $src, which exposes $p — refusing the model calls"
+      fi
+    done
+  done
   # The throwaway agent dir has no extensions/ to discover, so an extension the provider needs (on a
   # gateway host, the one that stamps the device header — without it every call is a 403 that reads
   # like a revoked credential) is loaded back by path, exactly as pi_run does for a night stage.

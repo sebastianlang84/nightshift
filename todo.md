@@ -68,7 +68,9 @@ deliverables run no model and send nothing anywhere, so they are built and teste
 5. ~~The runner and its hull.~~ Done: `bin/reflect.sh`, started by hand and deliberately not on a
    timer (ADR 0035). Its model calls run in the `bwrap` hull and fail closed without it (see
    [As built](docs/design/reflection-confinement.md#as-built-2026-09-25)). **Next: run it on a real
-   day** on the host it was built for. It needs that host's `pidso-proxy` provider. The open
+   day** on the host it was built for. It needs that host's `pidso-proxy` provider, and its
+   device header extension must be declared (`agent.pi_extensions`), because the hull no longer
+   discovers extensions. The open
    decisions below can only be settled against real output.
 
 The severity taxonomy and the tool-result question stay open through all of this. Neither blocks

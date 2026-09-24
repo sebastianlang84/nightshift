@@ -9,7 +9,12 @@ unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this
 #      transcript trees the day was read from, not a file beside them;
 #   2. the probe that shows (1) is not blind — with NIGHTSHIFT_REFLECT_SANDBOX=none the same stub
 #      does see the transcripts;
-#   3. without bwrap no model call is made at all, and the run says why.
+#   3. without bwrap no model call is made at all, and the run says why;
+#   4. the credential the call gets is narrowed to the reflection's provider — another provider's
+#      token in the operator's auth.json is not in it, and the operator's file itself is not bound;
+#   5. the host knobs that widen the gate's bind set do not reach this hull, and a bind that would
+#      expose a protected path (here: an extension whose package root is the pi directory) refuses
+#      the run.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REFLECT="$ROOT/bin/reflect.sh"
@@ -31,7 +36,8 @@ bwrap --unshare-all --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib
 DAY="2026-09-20"
 C="$TMP/claude/projects/-home-x-proj"
 mkdir -p "$TMP/bin" "$C" "$TMP/codex/sessions" "$TMP/out" "$TMP/pi-agent"
-echo '{}' > "$TMP/pi-agent/auth.json"
+echo '{"pidso-proxy":{"type":"api_key","key":"KEEP_ME"},"anthropic":{"type":"api_key","key":"OTHER_PROVIDER_TOKEN"}}' \
+  > "$TMP/pi-agent/auth.json"
 T="$C/aaaaaaaa-1111-4111-8111-111111111111.jsonl"
 cat > "$T" <<EOF
 {"type":"user","uuid":"aaaaaaaa-1111-2222-3333-444444444444","timestamp":"${DAY}T10:00:00.000Z","origin":{"kind":"human"},"message":{"role":"user","content":"SENTINEL_HUMAN_LINE"}}
@@ -52,7 +58,9 @@ case "\$payload" in
       "recommendation":"r","cost":"c","quotes":[{"turn":"s:aaaaaaaa","text":"SENTINEL_HUMAN_LINE"}]}]}' ;;
   *)
     v() { if [ -r "\$1" ]; then echo visible; else echo hidden; fi; }
-    echo "PROBE payload=\$(v "\$payload") transcript=\$(v "$T") secret=\$(v "$C/secret.txt") home=\$(v "$HOME/.ssh")" ;;
+    other=absent; grep -q OTHER_PROVIDER_TOKEN "\$PI_CODING_AGENT_DIR/auth.json" 2>/dev/null && other=present
+    keep=absent;  grep -q KEEP_ME "\$PI_CODING_AGENT_DIR/auth.json" 2>/dev/null && keep=present
+    echo "PROBE payload=\$(v "\$payload") transcript=\$(v "$T") secret=\$(v "$C/secret.txt") home=\$(v "$HOME/.ssh") opauth=\$(v "$TMP/pi-agent/auth.json") other=\$other keep=\$keep" ;;
 esac
 EOF
 chmod +x "$TMP/bin/pi"
@@ -78,6 +86,24 @@ grep -q 'payload=visible' <<<"$probe"   || fail "the hull hid the payload itself
 grep -q 'transcript=hidden' <<<"$probe" || fail "the model call could read the transcript tree: $probe"
 grep -q 'secret=hidden' <<<"$probe"     || fail "the model call could read a file beside it: $probe"
 grep -q 'home=hidden' <<<"$probe"       || fail "the model call could read ~/.ssh: $probe"
+grep -q 'opauth=hidden' <<<"$probe"     || fail "the operator's own auth.json is bound into the hull: $probe"
+grep -q 'other=absent' <<<"$probe"      || fail "another provider's token reached the call: $probe"
+grep -q 'keep=present' <<<"$probe"      || fail "the reflection's own credential was filtered away: $probe"
+
+# --- 5. widening knobs stay out, and a protected bind refuses the run ---------
+out="$(NIGHTSHIFT_TEST_SANDBOX_ROBIND="$TMP/claude" run --out "$TMP/out/knob.md")" \
+  || fail "the run with a widening knob in the environment failed: $out"
+grep -q 'transcript=hidden' "$TMP/out/knob.md" \
+  || fail "NIGHTSHIFT_TEST_SANDBOX_ROBIND widened the hull: $(grep PROBE "$TMP/out/knob.md")"
+mkdir -p "$TMP/pi-agent/extensions"
+echo '{}' > "$TMP/pi-agent/package.json"
+echo 'export default {}' > "$TMP/pi-agent/extensions/auth.ts"
+if out="$(NIGHTSHIFT_PI_EXTENSIONS="$TMP/pi-agent/extensions/auth.ts" run --out "$TMP/out/ext.md")"; then
+  fail "an extension rooted at the pi directory was bound and the run went on: $out"
+fi
+grep -q 'refusing the model calls' <<<"$out" || fail "the protected-bind refusal does not say why: $out"
+[ ! -e "$TMP/out/ext.md" ] || fail "a report was written although the hull was refused"
+rm -rf "$TMP/pi-agent/extensions" "$TMP/pi-agent/package.json"
 
 # --- 2. the probe is not blind ------------------------------------------------
 out="$(NIGHTSHIFT_REFLECT_SANDBOX=none run --out "$TMP/out/open.md")" || fail "the unhulled run failed: $out"
