@@ -148,6 +148,23 @@ expect_kept typography     "bracketed text must not trip the matcher"
 [ "$(verdict cross-session)" = kept ] \
   || fail "cross-session ordering with timestamps on both sides should resolve"
 
+# Sources write timestamps in different shapes. Compared as strings, "…:00Z" sorts AFTER
+# "…:00.500Z" and "+02:00" is ignored, so the order is decided on instants, and a pair that has
+# no instant to compare is refused rather than guessed.
+python3 - "$CHECK" <<'PY' || fail "cross-session ordering compared timestamp strings, not instants"
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("check_citations", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+def order(ta, tb):
+    turns = {"x:1": {"session": "x", "seq": 0, "ts": ta}, "y:1": {"session": "y", "seq": 0, "ts": tb}}
+    return m.check_ordering({"before": "x:1", "after": "y:1"}, turns)[0]
+assert order("2026-09-15T20:00:00Z", "2026-09-15T20:00:00.500Z")
+assert not order("2026-09-15T20:00:00.500Z", "2026-09-15T20:00:00Z")
+assert order("2026-09-15T21:00:00+02:00", "2026-09-15T20:00:00Z")
+assert not order("2026-09-15T20:00:00", "2026-09-15T21:00:00Z")
+assert not order("not a time", "2026-09-15T21:00:00Z")
+PY
+
 # --- a checker that cannot read its inputs fails loudly ----------------------
 if python3 "$CHECK" --findings "$TMP/findings.json" --turns "$TMP/nonexistent.turns" \
      --out "$TMP/x.json" >/dev/null 2>&1; then
