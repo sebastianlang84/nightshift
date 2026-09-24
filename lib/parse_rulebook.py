@@ -146,18 +146,16 @@ def main(path: str) -> None:
                 if top_level_key in seen_top_level:
                     raise SystemExit(f"duplicate top-level key '{top_level_key}'")
                 seen_top_level.add(top_level_key)
-                if s.startswith("branch_prefix:"):
+                if top_level_key == "branch_prefix":
                     prefix = quoted_val(s.split(":", 1)[1])
-                elif head == "limits:":
-                    section = "limits"
-                elif head == "recon:":
-                    section = "recon"
-                elif head == "agent:":
-                    section = "agent"
-                elif head == "dimensions:":
-                    section = "dimensions"
-                elif head == "repos:":
-                    section = "repos"
+                elif not head.endswith(":") or head[:-1].strip() != top_level_key:
+                    # `limits: 5`, a flow `limits: {…}` or a bare `limits` used to set no section,
+                    # so every line under it was dropped without a word — the knob silently reverted.
+                    raise SystemExit(f"section '{top_level_key}' must be a bare `{top_level_key}:` header")
+                else:
+                    # Dispatch on the key, not the raw header: `limits :` is the same key, and
+                    # matching the literal `limits:` left its entries unread.
+                    section = top_level_key
             elif section == "limits":
                 put(limits, "limits", s, LIMIT_KEYS)
             elif section == "recon":

@@ -142,10 +142,11 @@ def check_ordering(claim, turns):
             timestamps.append(datetime.fromisoformat(value))
         except (TypeError, ValueError):
             return False, f"{a} and {b} are in different sessions and carry invalid timestamps"
-    try:
-        precedes = timestamps[0] < timestamps[1]
-    except TypeError:
-        return False, f"{a} and {b} carry incomparable timestamps"
+    # A wall-clock time without an offset is no instant: two sessions on different hosts or zones
+    # cannot be ordered by it, so a naive stamp on either side refuses the claim.
+    if any(t.tzinfo is None or t.utcoffset() is None for t in timestamps):
+        return False, f"{a} and {b} carry timestamps without a UTC offset"
+    precedes = timestamps[0] < timestamps[1]
     if precedes:
         return True, ""
     return False, f"{a} does not precede {b} by timestamp"

@@ -145,6 +145,15 @@ reject "a non-boolean recon switch" 'recon:
 # parser's defaults. Top-level keys are closed just like nested mapping keys.
 reject "an unknown top-level section" 'limts:
   max_open_branches: 99'             "unknown top-level key 'limts'"
+# A section header with an inline value set no section, so its entries were dropped unread.
+reject "a section with an inline value" 'limits: 5'  "section 'limits' must be a bare"
+# The key decides, not the literal header: `branch_prefix :` and `limits :` used to parse clean and
+# silently keep the defaults.
+printf 'branch_prefix : custom/\nlimits :\n  max_open_branches: 7\nrepos:\n  - path: /srv/example\n    mode: findings-only\n' \
+  > "$TMP/spaced.yaml"
+python3 "$ROOT/lib/parse_rulebook.py" "$TMP/spaced.yaml" > "$TMP/stdout"
+grep -qx "prefix	custom/" "$TMP/stdout" || { echo "a spaced branch_prefix was ignored" >&2; exit 1; }
+grep -qx "max_open	7" "$TMP/stdout" || { echo "a spaced limits header dropped its entries" >&2; exit 1; }
 
 # Top-level settings are governance too: accepting a repeated scalar would use the later value,
 # while accepting a repeated section would merge or overwrite state from two declarations.
