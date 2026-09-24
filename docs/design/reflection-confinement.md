@@ -82,14 +82,18 @@ and binds one extra path per call: that call's payload file, read-only. So the b
 narrower in practice. The model call sees neither transcript tree, because the payload already
 carries the extracted turns. It sees no rulebook, because the payload carries them too. Its credential
 is a **filtered copy** of pi's `auth.json` (and of `models.json`'s `providers`) in a throwaway
-agent dir. The copy holds only the generate and judge providers, so the operator's own files are
-not bound and another provider's token is not reachable. That is design decision 3, and it is
+agent dir. The copy holds only the generate and judge providers, and the catalog cache is copied as well.
+No file from the operator's pi directory is bound, so another provider's token is not reachable.
+The one exception is a declared extension's package directory, which the call needs. Whatever
+the operator keeps inside that directory is readable. That is design decision 3, and it is
 tighter than the Fix stage, which links the whole file. The call writes nothing but a neutral cwd.
 
 `reflect.sh` also drops `NIGHTSHIFT_TEST_SANDBOX_ROBIND` and `NIGHTSHIFT_TEST_PATH`, the two host
-settings that widen the gate's bind set. It then checks the finished argv against a protected
-list: both transcript trees, the pi directory, `~/.ssh`, `~/.config/gh`, `~/.codex` and
-`~/.claude`. A bind of any of them, or of a directory containing one, refuses the run.
+settings that widen the gate's bind set. It also drops `NIGHTSHIFT_TEST_ENV_PASS`, which copies named variables into the hull. It then
+checks the finished argv. Both transcript trees, `~/.ssh`, `~/.config/gh`, `~/.codex` and
+`~/.claude` are sealed. A bind of one of them, inside one, or of a directory that contains one
+refuses the run. The pi directory refuses a bind of itself or of a directory that contains it.
+A bind below it, the extension's package directory, is allowed.
 
 The throwaway agent dir has no `extensions/`. An extension the provider needs, such as the device
 header extension of a gateway host, has to be declared as `agent.pi_extensions` or in

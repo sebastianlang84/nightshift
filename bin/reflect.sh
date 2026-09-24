@@ -293,11 +293,12 @@ else
   #
   # The credential is narrowed to the providers these two calls use (design decision 3: one named
   # credential). pi_stage_home links the operator's whole auth.json and models.json, which on a
-  # typical host carry every provider's token; the stage home gets filtered COPIES instead, so the
-  # hull binds no credential file of the operator's at all. The two host knobs that widen the gate's
-  # bind set (NIGHTSHIFT_TEST_SANDBOX_ROBIND, NIGHTSHIFT_TEST_PATH) are dropped: this call needs
-  # neither, and either could hand it a path the design keeps out.
-  env -u NIGHTSHIFT_TEST_SANDBOX_ROBIND -u NIGHTSHIFT_TEST_PATH \
+  # typical host carry every provider's token; the stage home gets filtered COPIES instead (and a
+  # plain copy of the catalog cache), so the hull binds no file of the operator's pi directory. The
+  # host knobs that widen the gate's hull (NIGHTSHIFT_TEST_SANDBOX_ROBIND, NIGHTSHIFT_TEST_PATH, and
+  # NIGHTSHIFT_TEST_ENV_PASS, which copies named variables — a GH_TOKEN, say — into it) are dropped:
+  # this call needs none of them.
+  env -u NIGHTSHIFT_TEST_SANDBOX_ROBIND -u NIGHTSHIFT_TEST_PATH -u NIGHTSHIFT_TEST_ENV_PASS \
   NIGHTSHIFT_SOURCED=1 NIGHTSHIFT_PI_SANDBOX=bwrap NIGHTSHIFT_PI_STAGE_HOME="$WORK/pi-home" \
     bash -c '
       source "$1/bin/nightshift.sh"
@@ -314,6 +315,8 @@ else
             else (if (.providers | type) == \"object\" then .providers |= keep else . end) end
           " "$real/$f" > "$home/$f" ) || { echo "could not narrow $f to the reflection providers" >&2; exit 1; }
       done
+      rm -f "$home/models-store.json"
+      [ ! -e "$real/models-store.json" ] || cp "$real/models-store.json" "$home/models-store.json" || exit 1
       pi_sandbox_argv "$2" "$home" "$3" || exit 1
       [ "${#TEST_SANDBOX_ARGV[@]}" -gt 0 ] || exit 1
       printf "%s\0" "${TEST_SANDBOX_ARGV[@]}" > "$3/hull.argv"
@@ -323,20 +326,25 @@ else
   mapfile -d '' -t HULL < "$WORK/hull.argv"
   [ "${HULL[0]:-}" = bwrap ] || die "the hull did not come back as a bwrap command line"
   # The bind set is assembled by shared code that serves other callers, so it is checked here against
-  # what this call must never see, whatever widened it (an extension whose package root turns out to
-  # be the operator's pi directory is the realistic case). A bind of any of these, or of a directory
-  # containing one, refuses the run.
-  PROTECTED=("$CLAUDE_PROJECTS" "$CODEX_SESSIONS" "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
-             "$HOME/.ssh" "$HOME/.config/gh" "$HOME/.codex" "$HOME/.claude")
+  # what this call must never see, whatever widened it. SEALED paths may not be bound, bound from
+  # inside, or sit inside a bound directory. The pi directory is looser in one direction only: a
+  # declared extension's package directory under it has to be bound (on a gateway host it is the
+  # authentication), so a bind BELOW it passes — the directory itself or anything containing it does
+  # not (an extension whose package root turns out to be the pi directory is the realistic case).
+  SEALED=("$CLAUDE_PROJECTS" "$CODEX_SESSIONS" "$HOME/.ssh" "$HOME/.config/gh" "$HOME/.codex"
+          "$HOME/.claude")
+  PIDIR="$(realpath -m -- "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}")"
+  overlaps() { [ "$1" = "$2" ] || [ "${1#"$2"/}" != "$1" ] || [ "${2#"$1"/}" != "$2" ]; }
   for ((i = 0; i < ${#HULL[@]}; i++)); do
     case "${HULL[$i]}" in --bind|--ro-bind|--ro-bind-try|--bind-try) ;; *) continue ;; esac
     src="$(realpath -m -- "${HULL[$((i + 1))]}")"
-    for p in "${PROTECTED[@]}"; do
+    for p in "${SEALED[@]}"; do
       p="$(realpath -m -- "$p")"
-      if [ "$p" = "$src" ] || [ "${p#"$src"/}" != "$p" ]; then
-        die "the hull would bind $src, which exposes $p — refusing the model calls"
-      fi
+      overlaps "$src" "$p" && die "the hull would bind $src, which overlaps $p — refusing the model calls"
     done
+    if [ "$PIDIR" = "$src" ] || [ "${PIDIR#"$src"/}" != "$PIDIR" ]; then
+      die "the hull would bind $src, which exposes $PIDIR — refusing the model calls"
+    fi
   done
   # The throwaway agent dir has no extensions/ to discover, so an extension the provider needs (on a
   # gateway host, the one that stamps the device header — without it every call is a 403 that reads

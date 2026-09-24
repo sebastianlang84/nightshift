@@ -60,7 +60,7 @@ case "\$payload" in
     v() { if [ -r "\$1" ]; then echo visible; else echo hidden; fi; }
     other=absent; grep -q OTHER_PROVIDER_TOKEN "\$PI_CODING_AGENT_DIR/auth.json" 2>/dev/null && other=present
     keep=absent;  grep -q KEEP_ME "\$PI_CODING_AGENT_DIR/auth.json" 2>/dev/null && keep=present
-    echo "PROBE payload=\$(v "\$payload") transcript=\$(v "$T") secret=\$(v "$C/secret.txt") home=\$(v "$HOME/.ssh") opauth=\$(v "$TMP/pi-agent/auth.json") other=\$other keep=\$keep" ;;
+    echo "PROBE payload=\$(v "\$payload") transcript=\$(v "$T") secret=\$(v "$C/secret.txt") home=\$(v "$HOME/.ssh") opauth=\$(v "$TMP/pi-agent/auth.json") other=\$other keep=\$keep envsecret=\${REFLECT_TEST_SECRET:-unset}" ;;
 esac
 EOF
 chmod +x "$TMP/bin/pi"
@@ -91,10 +91,18 @@ grep -q 'other=absent' <<<"$probe"      || fail "another provider's token reache
 grep -q 'keep=present' <<<"$probe"      || fail "the reflection's own credential was filtered away: $probe"
 
 # --- 5. widening knobs stay out, and a protected bind refuses the run ---------
-out="$(NIGHTSHIFT_TEST_SANDBOX_ROBIND="$TMP/claude" run --out "$TMP/out/knob.md")" \
-  || fail "the run with a widening knob in the environment failed: $out"
+out="$(NIGHTSHIFT_TEST_SANDBOX_ROBIND="$TMP/claude" REFLECT_TEST_SECRET=leaked \
+       NIGHTSHIFT_TEST_ENV_PASS=REFLECT_TEST_SECRET run --out "$TMP/out/knob.md")" \
+  || fail "the run with widening knobs in the environment failed: $out"
 grep -q 'transcript=hidden' "$TMP/out/knob.md" \
   || fail "NIGHTSHIFT_TEST_SANDBOX_ROBIND widened the hull: $(grep PROBE "$TMP/out/knob.md")"
+grep -q 'envsecret=unset' "$TMP/out/knob.md" \
+  || fail "NIGHTSHIFT_TEST_ENV_PASS carried a variable into the hull: $(grep PROBE "$TMP/out/knob.md")"
+# A bind INSIDE a sealed tree refuses the run too, not only one that contains it.
+if out="$(NIGHTSHIFT_TEST_PATH="$C" NIGHTSHIFT_PI_EXTENSIONS="$C/secret.txt" run --out "$TMP/out/inside.md")"; then
+  fail "an extension inside a transcript tree was bound and the run went on: $out"
+fi
+grep -q 'refusing the model calls' <<<"$out" || fail "the sealed-bind refusal does not say why: $out"
 mkdir -p "$TMP/pi-agent/extensions"
 echo '{}' > "$TMP/pi-agent/package.json"
 echo 'export default {}' > "$TMP/pi-agent/extensions/auth.ts"
