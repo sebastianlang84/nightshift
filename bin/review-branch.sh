@@ -158,7 +158,11 @@ review_repo() { # repo [branchref]
 
   # all OPEN (unmerged vs base) nightshift/* branches on origin
   local branches
-  branches=$(git -C "$repo" branch -r --no-merged "$base" 2>/dev/null | tr -d ' ' | grep "^origin/${PREFIX}" || true)
+  branches=$(git -C "$repo" branch -r --no-merged "$base" 2>/dev/null | tr -d ' ' | while IFS= read -r branch; do
+    case "$branch" in
+      "origin/${PREFIX}"*) printf '%s\n' "$branch" ;;
+    esac
+  done || true)
   if [ -z "$branches" ]; then
     printf '\n=== %s ===\nno open %s* branches (base %s)\n' "$(basename "$repo")" "$PREFIX" "$base"
     return 0

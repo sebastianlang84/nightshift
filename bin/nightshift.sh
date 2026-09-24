@@ -2906,7 +2906,11 @@ advise_branches() {
     path="${REPO_PATHS[$i]}"; [ -d "$path/.git" ] || continue
     git -C "$path" fetch --prune -q origin 2>/dev/null || true   # --prune: drop stale refs so review skips phantom branches
     base="$(resolve_base "$path" "${REPO_BASES[$i]:-}")"
-    branches=$(git -C "$path" branch -r --no-merged "$base" 2>/dev/null | tr -d ' ' | grep "^origin/${BRANCH_PREFIX}" || true)
+    branches=$(git -C "$path" branch -r --no-merged "$base" 2>/dev/null | tr -d ' ' | while IFS= read -r branch; do
+      case "$branch" in
+        "origin/${BRANCH_PREFIX}"*) printf '%s\n' "$branch" ;;
+      esac
+    done || true)
     [ -n "$branches" ] || continue
     while IFS= read -r ref; do
       [ -n "$ref" ] || continue
