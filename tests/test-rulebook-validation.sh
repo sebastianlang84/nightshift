@@ -146,6 +146,36 @@ reject "a non-boolean recon switch" 'recon:
 reject "an unknown top-level section" 'limts:
   max_open_branches: 99'             "unknown top-level key 'limts'"
 
+# Top-level settings are governance too: accepting a repeated scalar would use the later value,
+# while accepting a repeated section would merge or overwrite state from two declarations.
+cat > "$TMP/duplicate-branch-prefix.yaml" <<'YAML'
+branch_prefix: nightshift/
+branch_prefix: other/
+repos:
+  - path: /srv/example
+    mode: findings-only
+YAML
+if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/duplicate-branch-prefix.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
+  echo "parser accepted a duplicate top-level branch_prefix" >&2
+  exit 1
+fi
+grep -q "duplicate top-level key 'branch_prefix'" "$TMP/stderr"
+
+cat > "$TMP/duplicate-limits.yaml" <<'YAML'
+limits:
+  max_open_branches: 2
+limits:
+  max_fix_iterations: 2
+repos:
+  - path: /srv/example
+    mode: findings-only
+YAML
+if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/duplicate-limits.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
+  echo "parser accepted a duplicate top-level limits section" >&2
+  exit 1
+fi
+grep -q "duplicate top-level key 'limits'" "$TMP/stderr"
+
 # A repo entry's keys are closed too, and this is the misconfig with the widest blast radius:
 # `test-cmd:` parsed clean and left `test_cmd` empty, so the repo shipped UNGATED past its
 # ADR 0022 ship gate — the human had written a gate and never got one. (ADR 0026 now refuses an
