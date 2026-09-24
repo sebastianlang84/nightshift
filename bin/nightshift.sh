@@ -2973,6 +2973,7 @@ write_digest() { # made open status [advice]
     local fcount=0
     [ -f "$LEDGER" ] && fcount=$(jq -s --arg n "$NIGHT" '[.[]|select(.night==$n and .outcome=="finding")]|length' "$LEDGER" 2>/dev/null || echo 0)
     echo "- agent: \`$RUN_AGENT_ROUTE\` · shipped this run: ${made} · surfaced (findings): ${fcount} · open (awaiting your verdict): ${open}/${MAX_OPEN} (cap)"
+    [ "$status" = ceiling ] && echo "- **Stopped: run ceiling reached** (\`max_branches_per_run: ${MAX_RUN_BRANCHES:-?}\`) — further fixable findings were left for a later night."
     [ "$status" = budget ] && echo "- **Stopped: time budget exhausted** (\`${MAX_RUN_SECONDS:-?}s\`) — the night ended on the spend cap, not for lack of work."
     # An aborted night must announce itself in the ONE artifact the operator actually reads in the
     # morning. Without this the digest of a credential outage is indistinguishable from a clean
@@ -3323,7 +3324,7 @@ main() {
   # work resumes; when merging stops it fills to the cap and stops. "All night" continuous operation
   # is bounded by this cap, by running out of new work, and by the subscription 5h window.
   while true; do
-    [ "$made" -ge "$MAX_RUN_BRANCHES" ] && { log "safety ceiling ($MAX_RUN_BRANCHES) reached — stop"; break; }
+    [ "$made" -ge "$MAX_RUN_BRANCHES" ] && { log "safety ceiling ($MAX_RUN_BRANCHES) reached — stop"; stop_reason=ceiling; break; }
     if over_budget; then log "time budget (${MAX_RUN_SECONDS}s) exhausted — stop"; stop_reason=budget; break; fi
     # The single gate every pass goes through — it catches a credential failure raised by
     # verify_findings before the loop as well as one raised by any stage inside a previous pass.
@@ -3345,7 +3346,7 @@ main() {
   while IFS=$'\t' read -r repo mode cfgbase; do
     [ -n "$repo" ] || continue
     [ "$open" -ge "$MAX_OPEN" ] && { log "open-branch cap reached ($open/$MAX_OPEN) — stop"; stop_reason=backpressure; break; }
-    [ "$made" -ge "$MAX_RUN_BRANCHES" ] && { log "safety ceiling ($MAX_RUN_BRANCHES) reached — stop"; break; }
+    [ "$made" -ge "$MAX_RUN_BRANCHES" ] && { log "safety ceiling ($MAX_RUN_BRANCHES) reached — stop"; stop_reason=ceiling; break; }
 
     id="$RUNS_DIR/item-$(date +%s%N)"; mkdir -p "$id"
     echo "$repo" > "$id/repo"
@@ -3470,11 +3471,6 @@ main() {
       if [ "$open" -ge "$MAX_OPEN" ]; then
         log "  open-branch cap reached ($open/$MAX_OPEN) — stop"; stop_reason=backpressure; break
       fi
-      # The run ceiling binds per shipped branch like the open cap: checked only per pass, one repo
-      # with a findings budget above it overshot (observed 2026-08-28: ceiling 3, pass shipped 5).
-      if [ "$made" -ge "$MAX_RUN_BRANCHES" ]; then
-        log "  safety ceiling ($MAX_RUN_BRANCHES) reached — stop"; break
-      fi
       # Per-finding dir as a SIBLING of the item dir ("item-<nanos>-f<k>"), not a child ("f<k>").
       # The ledger/telemetry `item` field is basename "$fd"; a bare "f0"/"f1" collided across items
       # and runs, making harvest `verdict <item>` and runs->ledger joins ambiguous. The sibling name
@@ -3530,6 +3526,13 @@ main() {
       # Spend budget: stop BEFORE starting a new fix (the only mutation). Findings already surfaced
       # this pass stay recorded; we simply do not open another branch once the budget is spent.
       if over_budget; then log "  time budget exhausted — stop before fix"; stop_reason=budget; break; fi
+      # The run ceiling binds per branch, here where one would be opened: checked only per pass, one
+      # repo with a findings budget above it overshot (2026-08-28: ceiling 3, pass shipped 5). The
+      # item's remaining findings still run — a surfaced one opens no branch and must not be lost.
+      if [ "$made" -ge "$MAX_RUN_BRANCHES" ]; then
+        log "  safety ceiling ($MAX_RUN_BRANCHES) reached — no further fix this run ($fp)"
+        stop_reason=ceiling; continue
+      fi
 
       # One finding = one branch = one fresh worktree from base (diffs stay independent).
       wt="$WORKTREES_DIR/$(basename "$id")-f$k"
@@ -3625,7 +3628,7 @@ main() {
       [ -n "$b" ] && git -C "$repo" branch -q -D "$b" >/dev/null 2>&1 || true
       if [ -n "$AGENT_FATAL" ]; then stop_reason=agent_unavailable; break; fi
     done
-    case "$stop_reason" in backpressure|budget|agent_unavailable) break ;; esac
+    case "$stop_reason" in backpressure|budget|agent_unavailable|ceiling) break ;; esac
   done < <(select_order)
     case "$stop_reason" in budget|agent_unavailable) break ;; esac
     # Gate on SHIPPABLE progress. Findings surface once (they dedup/latch), so a pass that only
