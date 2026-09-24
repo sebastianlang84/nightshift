@@ -270,11 +270,67 @@ fi
   printf '\n===== END =====\n'
 } > "$WORK/generate-payload.md"
 
-log "generate: $GEN_MODEL on $(wc -c < "$WORK/generate-payload.md") bytes"
 NEUTRAL="$WORK/neutral"; mkdir -p "$NEUTRAL"
+
+# --- the hull (docs/design/reflection-confinement.md) -------------------------
+# The two model calls are where the day's text meets something it can steer, so they run inside the
+# bwrap hull the pi Fix stage already uses (pi_sandbox_argv, ADR 0032): no $HOME, no SSH key, no `gh`
+# credential, no docker socket; writable only the neutral cwd and a throwaway agent dir holding links
+# to pi's credential and catalogs. The payload file is the one thing each call is given to read — the
+# transcripts themselves are not bound at all. The extraction, the citation check and the assembly
+# before and after run no model: text in a transcript is data to them, not instructions.
+#
+# Fails CLOSED, as the design requires: no bwrap, no model call. NIGHTSHIFT_REFLECT_SANDBOX=none is
+# the opt-out, and it says so on every run.
+HULL=()
+PI_EXTRA=()
+if [ "${NIGHTSHIFT_REFLECT_SANDBOX:-bwrap}" = none ]; then
+  log "hull DISABLED by NIGHTSHIFT_REFLECT_SANDBOX=none — the model calls run under the full account"
+else
+  # A child shell sources the Runner for its functions (the same entry point the tests use), so
+  # none of its names or its `log` leak into this script. NIGHTSHIFT_PI_SANDBOX is pinned: a
+  # night-loop opt-out in the environment must not silently unhull the reflection.
+  NIGHTSHIFT_SOURCED=1 NIGHTSHIFT_PI_SANDBOX=bwrap NIGHTSHIFT_PI_STAGE_HOME="$WORK/pi-home" \
+    bash -c '
+      source "$1/bin/nightshift.sh"
+      load_rulebook >/dev/null 2>&1 || true
+      home="$(pi_stage_home)" || exit 1
+      pi_sandbox_argv "$2" "$home" "$3" || exit 1
+      [ "${#TEST_SANDBOX_ARGV[@]}" -gt 0 ] || exit 1
+      printf "%s\0" "${TEST_SANDBOX_ARGV[@]}" > "$3/hull.argv"
+      printf "%s" "${NIGHTSHIFT_PI_EXTENSIONS-${RB_PI_EXTENSIONS:-}}" > "$3/hull.exts"
+    ' _ "$NIGHTSHIFT_HOME" "$NEUTRAL" "$WORK" 2>"$WORK/hull.err" \
+    || die "no hull for the model calls, so none is made: $(tail -1 "$WORK/hull.err" 2>/dev/null) $(cat "$WORK/fix.err" 2>/dev/null)"
+  mapfile -d '' -t HULL < "$WORK/hull.argv"
+  [ "${HULL[0]:-}" = bwrap ] || die "the hull did not come back as a bwrap command line"
+  # The throwaway agent dir has no extensions/ to discover, so an extension the provider needs (on a
+  # gateway host, the one that stamps the device header — without it every call is a 403 that reads
+  # like a revoked credential) is loaded back by path, exactly as pi_run does for a night stage.
+  PI_EXTRA=(--no-extensions)
+  IFS=, read -r -a exts < "$WORK/hull.exts" || true
+  for ext in ${exts[@]+"${exts[@]}"}; do
+    ext="$(printf '%s' "$ext" | tr -d '[:space:]')"
+    [ -n "$ext" ] || continue
+    [ -e "$ext" ] || die "declared pi extension not found: $ext"
+    PI_EXTRA+=(-e "$(realpath -e "$ext")")
+  done
+  log "hull: model calls confined (bwrap, ${#HULL[@]} arguments)"
+fi
+
+in_hull() { # payload cmd... -> runs cmd, inside the hull when there is one, with payload readable
+  local payload="$1"; shift
+  if [ "${#HULL[@]}" -gt 0 ]; then
+    "${HULL[@]}" --ro-bind "$payload" "$payload" "$@"
+  else
+    "$@"
+  fi
+}
+
+log "generate: $GEN_MODEL on $(wc -c < "$WORK/generate-payload.md") bytes"
 # -nc -ns: the reflection judges the rulebooks, so it must not also be steered by them. `< /dev/null`
 # because pi waits on an inherited stdin and never sends the request without it.
-( cd "$NEUTRAL" && pi -p -a -nt -nc -ns --no-session \
+( cd "$NEUTRAL" && in_hull "$WORK/generate-payload.md" pi -p -a -nt -nc -ns --no-session \
+    ${PI_EXTRA[@]+"${PI_EXTRA[@]}"} \
     --provider "$GEN_PROVIDER" --model "$GEN_MODEL" --thinking high \
     @"$WORK/generate-payload.md" "Follow the instructions in the attached file." \
     > "$WORK/generate.raw" 2>"$WORK/generate.err" < /dev/null ) \
@@ -303,7 +359,8 @@ python3 "$LIB/build_judge_input.py" --checked "$WORK/checked.json" --turns "${TU
 # --- 5. judge -----------------------------------------------------------------
 { cat "$PROMPTS/judge.md"; printf '\n\n'; cat "$WORK/judge-input.txt"; } > "$WORK/judge-payload.md"
 log "judge: $JUDGE_MODEL on $(wc -c < "$WORK/judge-payload.md") bytes"
-( cd "$NEUTRAL" && pi -p -a -nt -nc -ns --no-session \
+( cd "$NEUTRAL" && in_hull "$WORK/judge-payload.md" pi -p -a -nt -nc -ns --no-session \
+    ${PI_EXTRA[@]+"${PI_EXTRA[@]}"} \
     --provider "$JUDGE_PROVIDER" --model "$JUDGE_MODEL" --thinking high \
     @"$WORK/judge-payload.md" "Follow the instructions in the attached file." \
     > "$WORK/judge.md" 2>"$WORK/judge.err" < /dev/null ) \

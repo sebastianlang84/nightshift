@@ -74,6 +74,26 @@ once for both.
 Failure mode: **closed**. No `bwrap` means the job does not run, matching what ADR 0032 decided for
 the pi Fix stage. A reflection that silently ran unconfined would be worse than no reflection.
 
+### As built, 2026-09-25
+
+`bin/reflect.sh` wraps the two **model calls** in the hull, not the whole job. It asks the Runner
+for the pi Fix stage's argv (`pi_sandbox_argv`, [ADR 0032](../adr/0032-the-pi-fix-stage-is-sandboxed.md))
+and binds one extra path per call: that call's payload file, read-only. So the bind set above is
+narrower in practice. The model call sees neither transcript tree, because the payload already
+carries the extracted turns. It sees no rulebook, because the payload carries them too. It gets
+pi's `auth.json` and model catalogs through a throwaway agent dir, as the Fix stage does, and
+writes nothing but a neutral cwd.
+
+Extraction, the citation check and assembling the judge's input stay outside the hull. They are
+this repository's own code and call no model, so a transcript's text is data to them and cannot
+act as instructions. Moving them inside would bind the transcript trees and the output directory
+and would not narrow what the model can reach.
+
+No `bwrap` means no model call and no report. `NIGHTSHIFT_REFLECT_SANDBOX=none` is the opt-out,
+and every run that uses it logs it. `tests/test-reflect-hull.sh` checks this: the call can read its
+payload and cannot read the transcripts, a file beside them, or `~/.ssh`; the same probe does see
+them without the hull; and a PATH without `bwrap` stops the run before any call.
+
 ## What this does not protect
 
 Confinement bounds what the job can *reach*. It does nothing about what the job can *say*, and the

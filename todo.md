@@ -65,12 +65,11 @@ deliverables run no model and send nothing anywhere, so they are built and teste
    dedicated account is not reachable from this side, so the draft proposes the `build_test_sandbox`
    hull instead, failing closed without bwrap.
 4. ~~Generate prompt and judge stage.~~ Done, now that the payload destination is settled.
-5. **The runner.** `bin/reflect.sh` exists, started by hand and deliberately not on a timer
-   (ADR 0035) — but it does **not** yet apply the `bwrap` hull
-   [`docs/design/reflection-confinement.md`](docs/design/reflection-confinement.md) requires, nor
-   refuse to run without it: its `pi` calls run under the full account. A manual start is not
-   exempt (the design says so). **Next: add the hull, failing closed; then run it on a real day** —
-   the open decisions below can only be settled against real output.
+5. ~~The runner and its hull.~~ Done: `bin/reflect.sh`, started by hand and deliberately not on a
+   timer (ADR 0035). Its model calls run in the `bwrap` hull and fail closed without it (see
+   [As built](docs/design/reflection-confinement.md#as-built-2026-09-25)). **Next: run it on a real
+   day** on the host it was built for. It needs that host's `pidso-proxy` provider. The open
+   decisions below can only be settled against real output.
 
 The severity taxonomy and the tool-result question stay open through all of this. Neither blocks
 step 1: findings come out unranked, and the extractor's first version drops tool results exactly as
@@ -82,7 +81,7 @@ the prototype did.
 - ~~Citation checker~~ — `lib/check_citations.py`.
 - ~~Generate prompt~~ — `prompts/reflection/generate.md`.
 - ~~Judge stage input~~ — `lib/build_judge_input.py` plus `prompts/reflection/judge.md`.
-- **Entry point** — `bin/reflect.sh`, still without the hull (step 5).
+- ~~Entry point and hull~~ — `bin/reflect.sh`.
 
 **Open decisions inside the design.**
 
