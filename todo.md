@@ -7,7 +7,7 @@ Only active, actionable work belongs here. Items are ordered by priority.
 - Implemented behavior: `README.md`, `CONTEXT.md`, and `docs/design/`
 - Completed work: remove it; Git history and ADRs are the record
 
-Last triaged: 2026-08-26 against `main`. The Fable v2 review findings and the earlier P1/P2 backlog are
+Last triaged: 2026-09-24 against `main`. The Fable v2 review findings and the earlier P1/P2 backlog are
 resolved and removed: fail-closed rulebook parsing, configured-base PRs, recon never on the live
 checkout, collision-safe recon caches and work-item IDs, empty-Explore rotation, Fix-stage write
 confinement (R8), the `surface` route + bounded findings-only loops, hardened recon cache writes,
@@ -21,17 +21,12 @@ yield-weighting / never-exclude with the empty-scope feedback loop (ADR 0015).
   model-derived PR title/body for secrets and re-issue the machine's `gh` credential without
   `admin:public_key` (risk-analysis R12/N6). Credential rotation is an operator action.
 
-## Runner behavior
+## Operations
 
-- **`max_branches_per_run` overshoots by up to one pass.** The `MAX_RUN_BRANCHES` check sits at the
-  top of the pass loop in `run_night` ([`bin/nightshift.sh`](bin/nightshift.sh)), while the
-  open-branch cap is re-checked per item inside the pass. A pass therefore runs every repo to
-  completion before the ceiling is consulted again: observed 2026-08-28 with `max_branches_per_run: 3`,
-  where pass 1 shipped 5 branches (two repos at a findings budget of 2, plus one) and what actually
-  stopped the run was `max_open_branches: 5`. Nothing is unsafe about this — the open-branch cap is
-  the real bound and it held — but the knob does not mean what its name says, which matters for an
-  operator throttling a run deliberately. Either move the check next to the per-item cap check, or
-  rename it and say in [`rulebook.example.yaml`](rulebook.example.yaml) that it is a per-pass floor.
+- **Open branches go unreviewed long enough to stop the night.** 2026-09-20 shipped 10 branches and
+  filled `max_open_branches: 10`; the next four nights each ended after a minute with "0 considered"
+  until the branches were reviewed on 2026-09-24. Nothing was wrong with the runner — review
+  throughput is the bound. Decide whether the cap, the per-night yield, or a review cadence moves.
 
 ## `ideas` lens — operator-supplied work items
 
@@ -70,9 +65,9 @@ deliverables run no model and send nothing anywhere, so they are built and teste
    dedicated account is not reachable from this side, so the draft proposes the `build_test_sandbox`
    hull instead, failing closed without bwrap.
 4. ~~Generate prompt and judge stage.~~ Done, now that the payload destination is settled.
-5. **The runner and its unit.** What remains. It wires the five steps together, applies the hull, and
-   is the first piece that runs unattended — so it is also where the fail-closed rule lives: no
-   bwrap, no run.
+5. ~~The runner.~~ Done: `bin/reflect.sh`, started by hand and deliberately not on a timer
+   (ADR 0035). **Next: run it on a real day** — the open decisions below can only be settled
+   against real output.
 
 The severity taxonomy and the tool-result question stay open through all of this. Neither blocks
 step 1: findings come out unranked, and the extractor's first version drops tool results exactly as
@@ -84,10 +79,7 @@ the prototype did.
 - ~~Citation checker~~ — `lib/check_citations.py`.
 - ~~Generate prompt~~ — `prompts/reflection/generate.md`.
 - ~~Judge stage input~~ — `lib/build_judge_input.py` plus `prompts/reflection/judge.md`.
-- **Entry point and unit.** The one piece still missing: a runner that walks a day's transcripts
-  through extract, generate, check, build and judge, inside the hull
-  ([`docs/design/reflection-confinement.md`](docs/design/reflection-confinement.md)), and writes the
-  report. Nothing runs on a schedule until it exists.
+- ~~Entry point~~ — `bin/reflect.sh`.
 
 **Open decisions inside the design.**
 
