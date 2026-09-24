@@ -2106,9 +2106,12 @@ refresh_settled_branches() { # cache the branches whose latest ledger verdict is
   SETTLED_BRANCHES=""
   [ -f "$LEDGER" ] || return 0
   # Terminal set mirrors known_work()'s: merged/resolved/wontfix/dropped all mean "decided".
+  # "Latest" is the row appended last: the ledger is append-only and jq's group_by keeps input
+  # order within a group. Sorting on `ts` does not — its local-offset stamps sort out of order in
+  # the hour the clocks fall back.
   SETTLED_BRANCHES=$(jq -rs '
     [ .[] | select(.outcome=="verdict" and .branch!=null and .repo!=null) ]
-    | group_by([.repo, .branch]) | map(sort_by(.ts) | last)
+    | group_by([.repo, .branch]) | map(last)
     | map(select(.verdict=="merged" or .verdict=="resolved"
                  or .verdict=="wontfix" or .verdict=="dropped"))
     | map(.repo + "\t" + .branch) | join("\n")' "$LEDGER" 2>/dev/null) || SETTLED_BRANCHES=""
@@ -3003,7 +3006,7 @@ write_digest() { # made open status [advice]
     # feedback loop made visible. A branch with no terminal verdict counts as open.
     [ -f "$LEDGER" ] && jq -rs '
       ([.[]|select(.outcome=="verdict" and .repo!=null and .branch!=null)]
-        | group_by([.repo,.branch]) | map(sort_by(.ts)|last) | map(select(.verdict=="merged" or .verdict=="dropped"))
+        | group_by([.repo,.branch]) | map(last) | map(select(.verdict=="merged" or .verdict=="dropped"))
         | INDEX([.repo,.branch] | tojson)) as $v
       | [.[]|select(.outcome=="shipped" and .repo!=null and .branch!=null)|{repo:.repo,branch:.branch}] | unique as $ship
       | ($ship|map(select($v[([.repo,.branch] | tojson)].verdict=="merged"))|length) as $m
@@ -3041,7 +3044,7 @@ write_digest() { # made open status [advice]
       | [.[] | select(.dimension!=null and ([.item]|inside($void)|not)
                       and (.outcome=="empty" or .outcome=="finding" or .outcome=="shipped" or .outcome=="abandoned"))]
       | group_by([.repo,.dimension])
-      | map(sort_by(.ts) | .[-3:])
+      | map(.[-3:])
       | map(select(length==3 and all(.[]; .outcome=="empty" and .scope=="out_of_scope")))
       | if length==0 then empty else
           "\n## Suggested rulebook exclusions (ADR 0015)\n"
@@ -3068,7 +3071,7 @@ write_digest() { # made open status [advice]
     # One parameterised `rate` for all four slices, so the four cannot drift apart.
     [ -f "$LEDGER" ] && jq -rs '
       def rate($key; $name):
-        ([.[]|select(.outcome=="verdict" and .repo!=null and .branch!=null)] | group_by([.repo,.branch]) | map(sort_by(.ts)|last)
+        ([.[]|select(.outcome=="verdict" and .repo!=null and .branch!=null)] | group_by([.repo,.branch]) | map(last)
           | map(select(.verdict=="merged" or .verdict=="dropped")) | INDEX([.repo,.branch] | tojson)) as $v
         | [.[]|select(.outcome=="shipped" and .repo!=null and .branch!=null)]
         | group_by(.[$key] // "—")
@@ -3342,6 +3345,7 @@ main() {
   while IFS=$'\t' read -r repo mode cfgbase; do
     [ -n "$repo" ] || continue
     [ "$open" -ge "$MAX_OPEN" ] && { log "open-branch cap reached ($open/$MAX_OPEN) — stop"; stop_reason=backpressure; break; }
+    [ "$made" -ge "$MAX_RUN_BRANCHES" ] && { log "safety ceiling ($MAX_RUN_BRANCHES) reached — stop"; break; }
 
     id="$RUNS_DIR/item-$(date +%s%N)"; mkdir -p "$id"
     echo "$repo" > "$id/repo"
@@ -3465,6 +3469,11 @@ main() {
     for (( k=0; k<n_find; k++ )); do
       if [ "$open" -ge "$MAX_OPEN" ]; then
         log "  open-branch cap reached ($open/$MAX_OPEN) — stop"; stop_reason=backpressure; break
+      fi
+      # The run ceiling binds per shipped branch like the open cap: checked only per pass, one repo
+      # with a findings budget above it overshot (observed 2026-08-28: ceiling 3, pass shipped 5).
+      if [ "$made" -ge "$MAX_RUN_BRANCHES" ]; then
+        log "  safety ceiling ($MAX_RUN_BRANCHES) reached — stop"; break
       fi
       # Per-finding dir as a SIBLING of the item dir ("item-<nanos>-f<k>"), not a child ("f<k>").
       # The ledger/telemetry `item` field is basename "$fd"; a bare "f0"/"f1" collided across items

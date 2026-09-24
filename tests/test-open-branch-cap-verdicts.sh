@@ -65,6 +65,11 @@ verdict rejected dropped 2026-08-10T04:00:00+02:00
 verdict squashed merged  2026-08-10T04:00:00+02:00
 verdict reopened dropped 2026-08-10T04:00:00+02:00
 verdict reopened open     2026-08-12T04:00:00+02:00
+# The ledger's order is the verdict's order. Its stamps carry the host's offset, and in the hour
+# the clocks fall back a later verdict sorts BEFORE an earlier one as text: merged at 02:15+01:00
+# follows open at 02:45+02:00. Sorting on `ts` kept the old `open` and held the slot.
+verdict fallback open     2026-10-25T02:45:00+02:00
+verdict fallback merged   2026-10-25T02:15:00+01:00
 
 export NIGHTSHIFT_STATE_DIR="$TMP/state" NIGHTSHIFT_RUNS_DIR="$TMP/runs" \
        NIGHTSHIFT_DIGEST_DIR="$TMP/digests" NIGHTSHIFT_WORKTREES="$TMP/worktrees" \
@@ -92,6 +97,9 @@ branch_is_settled "$TMP/repo" nightshift/squashed \
   || { echo "a branch with no verdict is still awaiting one" >&2; exit 1; }
 ! branch_is_settled "$TMP/repo" nightshift/reopened \
   || { echo "the latest verdict must win — reopened is pending again" >&2; exit 1; }
+
+branch_is_settled "$TMP/repo" nightshift/fallback \
+  || { echo "the verdict appended last must win, whatever its stamp sorts as" >&2; exit 1; }
 
 # A verdict for the same branch NAME in another repo must not free this repo's slot.
 ! branch_is_settled "$TMP/other" nightshift/rejected \
