@@ -20,6 +20,9 @@
 #   review-branch.sh <repo-path>            # one repo, every open branch
 #   review-branch.sh <repo-path> <branch>   # one specific branch (with or without origin/ prefix)
 #
+# A git query that fails yields an UNKNOWN verdict, never a guessed one; the review goes on and
+# the exit status is 1.
+#
 # Base per repo mirrors the Runner (rulebook `base:` wins, else auto-detect origin HEAD),
 # so the review base is exactly the one nightshift branched from.
 set -euo pipefail
@@ -56,7 +59,13 @@ review_branch() { # repo base branchref
   printf 'base: %s\n' "$base"
 
   # (1) the branch's OWN commits — never affected by base drift
-  local commits; commits=$(git -C "$repo" log --oneline "$base..$ref" 2>/dev/null || true)
+  local commits
+  if ! commits=$(git -C "$repo" log --oneline "$base..$ref" 2>/dev/null); then
+    printf 'commits on branch: (query failed)\n'
+    printf 'VERDICT: UNKNOWN — could not determine whether the branch is already contained.\n'
+    REVIEW_RC=1   # not `return 1`: under set -e that would end the run, and every later branch goes unreviewed
+    return 0
+  fi
   if [ -z "$commits" ]; then
     printf 'commits on branch: (none) — already contained in %s\n' "$base"
     printf 'VERDICT: ALREADY MERGED — safe to delete.\n'
@@ -66,8 +75,10 @@ review_branch() { # repo base branchref
   printf 'commits on branch:\n%s\n' "$(printf '%s\n' "$commits" | sed 's/^/  /')"
 
   # (2) base drift — how far base moved since the branch point (context, not a problem)
-  local drift; drift=$(git -C "$repo" rev-list --count "$ref..$base" 2>/dev/null || echo 0)
-  if [ "$drift" -gt 0 ]; then
+  local drift
+  if ! drift=$(git -C "$repo" rev-list --count "$ref..$base" 2>/dev/null); then
+    printf 'base drift: unknown (query failed)\n'   # context only; the verdict does not rest on it
+  elif [ "$drift" -gt 0 ]; then
     printf 'base drift: %s commit(s) landed on %s since the branch point — a TWO-dot diff would\n' "$drift" "$basebranch"
     printf '            misreport these as branch deletions. This tool uses three-dot, so it does not.\n'
   else
@@ -75,14 +86,33 @@ review_branch() { # repo base branchref
   fi
 
   # (3) the authoritative change: three-dot (merge-base...branch)
-  printf 'change (three-dot, authoritative):\n%s\n' \
-    "$(git -C "$repo" diff --stat "$base...$ref" | sed 's/^/  /')"
+  local stat
+  if ! stat=$(git -C "$repo" diff --stat "$base...$ref"); then
+    printf 'VERDICT: UNKNOWN — could not read the change (three-dot diff failed).\n'
+    REVIEW_RC=1
+    return 0
+  fi
+  printf 'change (three-dot, authoritative):\n%s\n' "$(printf '%s\n' "$stat" | sed 's/^/  /')"
+  # Read the full diff now, not after the verdict: a verdict above a diff that never arrived still
+  # reads as one to act on.
+  local fulldiff
+  if ! fulldiff=$(git -C "$repo" diff "$base...$ref"); then
+    printf 'VERDICT: UNKNOWN — could not read the full diff.\n'
+    REVIEW_RC=1
+    return 0
+  fi
 
   # (4) merge preview — does it actually apply onto current base?
   local mt rc=0
   mt=$(git -C "$repo" merge-tree --write-tree "$base" "$ref" 2>&1) || rc=$?
   local merge_line conflicts=""
-  if [ "$rc" -eq 0 ]; then
+  if [ "$rc" -gt 1 ]; then
+    # merge-tree exits 1 for conflicts and >1 for an error: an error is not a conflict.
+    printf 'merge preview: failed (merge-tree exit %s)\n' "$rc"
+    printf 'VERDICT: UNKNOWN — could not preview the merge.\n'
+    REVIEW_RC=1
+    return 0
+  elif [ "$rc" -eq 0 ]; then
     merge_line="CLEAN — applies onto current $basebranch with no conflict"
   else
     conflicts=$(printf '%s\n' "$mt" | grep -iE 'conflict|CONFLICT' | head -8 || true)
@@ -93,8 +123,13 @@ review_branch() { # repo base branchref
 
   # (5) scope check (advisory) — files changed but not named in any commit message (R9 guard)
   local changed msg unmentioned=""
-  changed=$(git -C "$repo" diff --name-only "$base...$ref" || true)
-  msg=$(git -C "$repo" log "$base..$ref" --format='%B' || true)
+  # A failed query must not read as "nothing unmentioned": that is how an empty list becomes CLEAN.
+  if ! changed=$(git -C "$repo" diff --name-only "$base...$ref") \
+     || ! msg=$(git -C "$repo" log "$base..$ref" --format='%B'); then
+    printf 'VERDICT: UNKNOWN — could not read the changed files or commit messages.\n'
+    REVIEW_RC=1
+    return 0
+  fi
   local f
   while IFS= read -r f; do
     [ -z "$f" ] && continue
@@ -138,14 +173,21 @@ review_branch() { # repo base branchref
 
   # (7) full authoritative diff, last so the verdict stays on top
   printf -- '--- full diff (three-dot) ---\n'
-  git -C "$repo" diff "$base...$ref" || true
+  printf '%s\n' "$fulldiff"
 }
 
 # ------------------------------------------------------------------- one repo ----
 review_repo() { # repo [branchref]
   local repo="$1" only="${2:-}"
   [ -d "$repo/.git" ] || { printf '\n=== %s ===\n(skip: not a git repo)\n' "$repo"; return 0; }
-  git -C "$repo" fetch --prune -q origin 2>/dev/null || true   # --prune: don't review branches already deleted on origin
+  # --prune: don't review branches already deleted on origin. A failed fetch leaves stale refs, and a
+  # stale ref can read as "already merged" while origin holds newer commits on that branch.
+  if ! git -C "$repo" fetch --prune -q origin 2>/dev/null; then
+    printf '\n=== %s ===\nVERDICT: UNKNOWN — fetch from origin failed; refusing to judge stale refs\n' \
+      "$(basename "$repo")"
+    REVIEW_RC=1
+    return 0
+  fi
   local base; base="$(base_for_repo "$repo")"
 
   if [ -n "$only" ]; then
@@ -157,12 +199,19 @@ review_repo() { # repo [branchref]
   fi
 
   # all OPEN (unmerged vs base) nightshift/* branches on origin
-  local branches
-  branches=$(git -C "$repo" branch -r --no-merged "$base" 2>/dev/null | tr -d ' ' | while IFS= read -r branch; do
+  local listing branches
+  if ! listing=$(git -C "$repo" branch -r --no-merged "$base" 2>/dev/null); then
+    # A failed listing is not an empty one: "no open branches" would hide every branch it missed.
+    printf '\n=== %s ===\nVERDICT: UNKNOWN — could not list open %s* branches (base %s)\n' \
+      "$(basename "$repo")" "$PREFIX" "$base"
+    REVIEW_RC=1
+    return 0
+  fi
+  branches=$(printf '%s\n' "$listing" | tr -d ' ' | while IFS= read -r branch; do
     case "$branch" in
       "origin/${PREFIX}"*) printf '%s\n' "$branch" ;;
     esac
-  done || true)
+  done)
   if [ -z "$branches" ]; then
     printf '\n=== %s ===\nno open %s* branches (base %s)\n' "$(basename "$repo")" "$PREFIX" "$base"
     return 0
@@ -172,9 +221,11 @@ review_repo() { # repo [branchref]
 }
 
 # ---------------------------------------------------------------------- main ----
+REVIEW_RC=0   # set to 1 by any UNKNOWN verdict; the run continues, the exit status reports it
 load_rulebook
 if [ "$#" -ge 1 ]; then
   review_repo "$1" "${2:-}"
 else
   for repo in "${REPO_PATHS[@]}"; do review_repo "$repo"; done
 fi
+exit "$REVIEW_RC"
