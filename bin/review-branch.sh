@@ -20,6 +20,9 @@
 #   review-branch.sh <repo-path>            # one repo, every open branch
 #   review-branch.sh <repo-path> <branch>   # one specific branch (with or without origin/ prefix)
 #
+# A git query that fails yields an UNKNOWN verdict, never a guessed one; the review goes on and
+# the exit status is 1.
+#
 # Base per repo mirrors the Runner (rulebook `base:` wins, else auto-detect origin HEAD),
 # so the review base is exactly the one nightshift branched from.
 set -euo pipefail
@@ -60,7 +63,8 @@ review_branch() { # repo base branchref
   if ! commits=$(git -C "$repo" log --oneline "$base..$ref" 2>/dev/null); then
     printf 'commits on branch: (query failed)\n'
     printf 'VERDICT: UNKNOWN — could not determine whether the branch is already contained.\n'
-    return 1
+    REVIEW_RC=1   # not `return 1`: under set -e that would end the run, and every later branch goes unreviewed
+    return 0
   fi
   if [ -z "$commits" ]; then
     printf 'commits on branch: (none) — already contained in %s\n' "$base"
@@ -98,8 +102,13 @@ review_branch() { # repo base branchref
 
   # (5) scope check (advisory) — files changed but not named in any commit message (R9 guard)
   local changed msg unmentioned=""
-  changed=$(git -C "$repo" diff --name-only "$base...$ref" || true)
-  msg=$(git -C "$repo" log "$base..$ref" --format='%B' || true)
+  # A failed query must not read as "nothing unmentioned": that is how an empty list becomes CLEAN.
+  if ! changed=$(git -C "$repo" diff --name-only "$base...$ref") \
+     || ! msg=$(git -C "$repo" log "$base..$ref" --format='%B'); then
+    printf 'VERDICT: UNKNOWN — could not read the changed files or commit messages.\n'
+    REVIEW_RC=1
+    return 0
+  fi
   local f
   while IFS= read -r f; do
     [ -z "$f" ] && continue
@@ -150,7 +159,14 @@ review_branch() { # repo base branchref
 review_repo() { # repo [branchref]
   local repo="$1" only="${2:-}"
   [ -d "$repo/.git" ] || { printf '\n=== %s ===\n(skip: not a git repo)\n' "$repo"; return 0; }
-  git -C "$repo" fetch --prune -q origin 2>/dev/null || true   # --prune: don't review branches already deleted on origin
+  # --prune: don't review branches already deleted on origin. A failed fetch leaves stale refs, and a
+  # stale ref can read as "already merged" while origin holds newer commits on that branch.
+  if ! git -C "$repo" fetch --prune -q origin 2>/dev/null; then
+    printf '\n=== %s ===\nVERDICT: UNKNOWN — fetch from origin failed; refusing to judge stale refs\n' \
+      "$(basename "$repo")"
+    REVIEW_RC=1
+    return 0
+  fi
   local base; base="$(base_for_repo "$repo")"
 
   if [ -n "$only" ]; then
@@ -162,12 +178,19 @@ review_repo() { # repo [branchref]
   fi
 
   # all OPEN (unmerged vs base) nightshift/* branches on origin
-  local branches
-  branches=$(git -C "$repo" branch -r --no-merged "$base" 2>/dev/null | tr -d ' ' | while IFS= read -r branch; do
+  local listing branches
+  if ! listing=$(git -C "$repo" branch -r --no-merged "$base" 2>/dev/null); then
+    # A failed listing is not an empty one: "no open branches" would hide every branch it missed.
+    printf '\n=== %s ===\nVERDICT: UNKNOWN — could not list open %s* branches (base %s)\n' \
+      "$(basename "$repo")" "$PREFIX" "$base"
+    REVIEW_RC=1
+    return 0
+  fi
+  branches=$(printf '%s\n' "$listing" | tr -d ' ' | while IFS= read -r branch; do
     case "$branch" in
       "origin/${PREFIX}"*) printf '%s\n' "$branch" ;;
     esac
-  done || true)
+  done)
   if [ -z "$branches" ]; then
     printf '\n=== %s ===\nno open %s* branches (base %s)\n' "$(basename "$repo")" "$PREFIX" "$base"
     return 0
@@ -177,9 +200,11 @@ review_repo() { # repo [branchref]
 }
 
 # ---------------------------------------------------------------------- main ----
+REVIEW_RC=0   # set to 1 by any UNKNOWN verdict; the run continues, the exit status reports it
 load_rulebook
 if [ "$#" -ge 1 ]; then
   review_repo "$1" "${2:-}"
 else
   for repo in "${REPO_PATHS[@]}"; do review_repo "$repo"; done
 fi
+exit "$REVIEW_RC"
