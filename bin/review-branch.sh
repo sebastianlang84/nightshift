@@ -56,7 +56,12 @@ review_branch() { # repo base branchref
   printf 'base: %s\n' "$base"
 
   # (1) the branch's OWN commits — never affected by base drift
-  local commits; commits=$(git -C "$repo" log --oneline "$base..$ref" 2>/dev/null || true)
+  local commits
+  if ! commits=$(git -C "$repo" log --oneline "$base..$ref" 2>/dev/null); then
+    printf 'commits on branch: (query failed)\n'
+    printf 'VERDICT: UNKNOWN — could not determine whether the branch is already contained.\n'
+    return 1
+  fi
   if [ -z "$commits" ]; then
     printf 'commits on branch: (none) — already contained in %s\n' "$base"
     printf 'VERDICT: ALREADY MERGED — safe to delete.\n'
