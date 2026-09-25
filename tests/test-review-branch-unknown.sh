@@ -4,9 +4,9 @@ unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this
 
 # bin/review-branch.sh must never turn a failed git query into a verdict. A failed history query
 # read as "no commits" printed "ALREADY MERGED — safe to delete" for a branch with unmerged work; a
-# failed file query read as CLEAN; a failed listing read as "no open branches"; a failed fetch judged
-# stale refs. Each failure yields UNKNOWN, the review of the remaining branches goes on, and the
-# exit status is 1. The failures are injected by a git shim.
+# failed file query read as CLEAN; a merge-tree error read as a conflict; a failed listing read as
+# "no open branches"; a failed fetch judged stale refs. Each failure yields UNKNOWN, the review of
+# the remaining branches goes on, and the exit status is 1. The failures are injected by a git shim.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
@@ -21,7 +21,12 @@ for b in alpha beta; do
   g checkout -q -b "nightshift/$b" main
   printf '%s\n' "$b" > "$TMP/repo/$b.txt"; g add -A; g commit -q -m "fix: $b"; g push -q origin "nightshift/$b"
 done
+# gamma edits README.md, and main then edits the same line: a real conflict, which must stay
+# CONFLICTS and never become UNKNOWN.
+g checkout -q -b nightshift/gamma main
+printf 'gamma\n' > "$TMP/repo/README.md"; g add -A; g commit -q -m "fix: gamma README.md"; g push -q origin nightshift/gamma
 g checkout -q main
+printf 'moved on\n' > "$TMP/repo/README.md"; g add -A; g commit -q -m "main moves"; g push -q origin main
 
 cat > "$TMP/rulebook.yaml" <<YAML
 branch_prefix: nightshift/
@@ -39,6 +44,9 @@ args=" \$* "
 if [ -n "\${FAIL_LOG_REF:-}" ] && [[ "\$args" == *" log --oneline "*"..\$FAIL_LOG_REF "* ]]; then exit 128; fi
 if [ -n "\${FAIL_FETCH:-}" ] && [[ "\$args" == *" fetch "* ]]; then exit 128; fi
 if [ -n "\${FAIL_NAMES:-}" ] && [[ "\$args" == *" diff --name-only "* ]]; then exit 128; fi
+if [ -n "\${FAIL_STAT:-}" ] && [[ "\$args" == *" diff --stat "* ]]; then exit 128; fi
+if [ -n "\${FAIL_MERGETREE:-}" ] && [[ "\$args" == *" merge-tree "* ]]; then exit 128; fi
+if [ -n "\${FAIL_FULLDIFF:-}" ] && [[ "\$args" == *" diff origin/"* ]]; then exit 128; fi
 if [ -n "\${FAIL_LISTING:-}" ] && [[ "\$args" == *" branch -r --no-merged "* ]]; then exit 128; fi
 exec "$REAL_GIT" "\$@"
 SHIM
@@ -61,6 +69,9 @@ fail() { echo "test-review-branch-unknown: $1" >&2; cat "$TMP/out.$2" "$TMP/err.
 review ok
 [ "$(cat "$TMP/rc.ok")" -eq 0 ] || fail "clean review exited non-zero" ok
 ! grep -q UNKNOWN "$TMP/out.ok" || fail "clean review printed UNKNOWN" ok
+section ok gamma | grep -q 'VERDICT: CONFLICTS' || fail "a real conflict was not reported as CONFLICTS" ok
+section ok alpha | grep -q '^merge preview: CLEAN' || fail "a clean merge was not reported as CLEAN" ok
+! section ok alpha | grep -q 'VERDICT: CONFLICTS' || fail "a clean merge was judged CONFLICTS" ok
 
 # The history query for the FIRST branch fails: UNKNOWN for it, no delete instruction, the second
 # branch still gets its review, exit 1.
@@ -76,6 +87,23 @@ review names FAIL_NAMES=1
 section names alpha | grep -q 'VERDICT: UNKNOWN — could not read' || fail "failed file query gave no UNKNOWN verdict" names
 ! grep -q 'VERDICT: CLEAN' "$TMP/out.names" || fail "failed file query produced a CLEAN verdict" names
 [ "$(cat "$TMP/rc.names")" -eq 1 ] || fail "failed file query did not reach the exit status" names
+
+# The change summary fails: UNKNOWN, exit 1.
+review stat FAIL_STAT=1
+section stat alpha | grep -q 'VERDICT: UNKNOWN — could not read the change' || fail "failed diff --stat gave no UNKNOWN verdict" stat
+[ "$(cat "$TMP/rc.stat")" -eq 1 ] || fail "failed diff --stat did not reach the exit status" stat
+
+# merge-tree errors (exit >1): UNKNOWN, not CONFLICTS — an error is not a conflict.
+review mt FAIL_MERGETREE=1
+section mt alpha | grep -q 'VERDICT: UNKNOWN — could not preview the merge' || fail "merge-tree error gave no UNKNOWN verdict" mt
+! grep -q 'VERDICT: CONFLICTS' "$TMP/out.mt" || fail "merge-tree error read as a conflict" mt
+[ "$(cat "$TMP/rc.mt")" -eq 1 ] || fail "merge-tree error did not reach the exit status" mt
+
+# The full diff fails: UNKNOWN, and no verdict to act on is left standing.
+review full FAIL_FULLDIFF=1
+section full alpha | grep -q 'VERDICT: UNKNOWN — could not read the full diff' || fail "failed full diff gave no UNKNOWN verdict" full
+! grep -qE 'VERDICT: (CLEAN|REVIEW)' "$TMP/out.full" || fail "failed full diff left an actionable verdict" full
+[ "$(cat "$TMP/rc.full")" -eq 1 ] || fail "failed full diff did not reach the exit status" full
 
 # The branch listing fails: UNKNOWN for the repo, never "no open branches", exit 1.
 review list FAIL_LISTING=1

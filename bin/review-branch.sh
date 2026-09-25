@@ -75,8 +75,10 @@ review_branch() { # repo base branchref
   printf 'commits on branch:\n%s\n' "$(printf '%s\n' "$commits" | sed 's/^/  /')"
 
   # (2) base drift — how far base moved since the branch point (context, not a problem)
-  local drift; drift=$(git -C "$repo" rev-list --count "$ref..$base" 2>/dev/null || echo 0)
-  if [ "$drift" -gt 0 ]; then
+  local drift
+  if ! drift=$(git -C "$repo" rev-list --count "$ref..$base" 2>/dev/null); then
+    printf 'base drift: unknown (query failed)\n'   # context only; the verdict does not rest on it
+  elif [ "$drift" -gt 0 ]; then
     printf 'base drift: %s commit(s) landed on %s since the branch point — a TWO-dot diff would\n' "$drift" "$basebranch"
     printf '            misreport these as branch deletions. This tool uses three-dot, so it does not.\n'
   else
@@ -84,14 +86,33 @@ review_branch() { # repo base branchref
   fi
 
   # (3) the authoritative change: three-dot (merge-base...branch)
-  printf 'change (three-dot, authoritative):\n%s\n' \
-    "$(git -C "$repo" diff --stat "$base...$ref" | sed 's/^/  /')"
+  local stat
+  if ! stat=$(git -C "$repo" diff --stat "$base...$ref"); then
+    printf 'VERDICT: UNKNOWN — could not read the change (three-dot diff failed).\n'
+    REVIEW_RC=1
+    return 0
+  fi
+  printf 'change (three-dot, authoritative):\n%s\n' "$(printf '%s\n' "$stat" | sed 's/^/  /')"
+  # Read the full diff now, not after the verdict: a verdict above a diff that never arrived still
+  # reads as one to act on.
+  local fulldiff
+  if ! fulldiff=$(git -C "$repo" diff "$base...$ref"); then
+    printf 'VERDICT: UNKNOWN — could not read the full diff.\n'
+    REVIEW_RC=1
+    return 0
+  fi
 
   # (4) merge preview — does it actually apply onto current base?
   local mt rc=0
   mt=$(git -C "$repo" merge-tree --write-tree "$base" "$ref" 2>&1) || rc=$?
   local merge_line conflicts=""
-  if [ "$rc" -eq 0 ]; then
+  if [ "$rc" -gt 1 ]; then
+    # merge-tree exits 1 for conflicts and >1 for an error: an error is not a conflict.
+    printf 'merge preview: failed (merge-tree exit %s)\n' "$rc"
+    printf 'VERDICT: UNKNOWN — could not preview the merge.\n'
+    REVIEW_RC=1
+    return 0
+  elif [ "$rc" -eq 0 ]; then
     merge_line="CLEAN — applies onto current $basebranch with no conflict"
   else
     conflicts=$(printf '%s\n' "$mt" | grep -iE 'conflict|CONFLICT' | head -8 || true)
@@ -152,7 +173,7 @@ review_branch() { # repo base branchref
 
   # (7) full authoritative diff, last so the verdict stays on top
   printf -- '--- full diff (three-dot) ---\n'
-  git -C "$repo" diff "$base...$ref" || true
+  printf '%s\n' "$fulldiff"
 }
 
 # ------------------------------------------------------------------- one repo ----
