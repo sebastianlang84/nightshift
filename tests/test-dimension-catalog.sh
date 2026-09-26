@@ -20,6 +20,30 @@ mapfile -t configured < <(
   echo "dimension template drift: got '${configured[*]}'" >&2; exit 1;
 }
 
+# Both global dimensions and per-repo overrides select serviced lenses, so reject ids outside the
+# same built-in catalog instead of recording a lens for which the Runner has no prompt.
+reject_unknown_dimension() { # label rulebook body expected error
+  printf '%s\n' "$2" > "$TMP/invalid-dimensions.yaml"
+  if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/invalid-dimensions.yaml" \
+      >"$TMP/stdout" 2>"$TMP/stderr"; then
+    echo "parser accepted $1" >&2
+    exit 1
+  fi
+  grep -q "$3" "$TMP/stderr" || {
+    echo "$1: wrong error: $(cat "$TMP/stderr")" >&2
+    exit 1
+  }
+}
+reject_unknown_dimension "an unknown global lens" 'dimensions:
+  - securty
+repos:
+  - path: /srv/example
+    mode: findings-only' "dimensions: unknown lens 'securty'"
+reject_unknown_dimension "an unknown per-repo lens" 'repos:
+  - path: /srv/example
+    mode: findings-only
+    dimensions: docs,securityy' "repo /srv/example: unknown lens 'securityy'"
+
 mapfile -t prompt_files < <(
   find "$ROOT/prompts/dimensions" -maxdepth 1 -type f -name '*.md' -printf '%f\n' |
     sed 's/\.md$//' | sort
