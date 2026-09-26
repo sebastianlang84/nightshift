@@ -37,6 +37,7 @@ cat > "$TMP/codex.jsonl" <<'EOF'
 {"timestamp":"2026-09-14T21:54:04.000Z","ordinal":3,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<harness instructions>INJECTED</harness instructions>"}]}}
 {"timestamp":"2026-09-14T21:54:10.000Z","ordinal":4,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hast du die feedbacks schon mal angesehen?"}]}}
 {"timestamp":"2026-09-14T21:54:20.000Z","ordinal":5,"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":\"grep -rn feedback\"}"}}
+{"timestamp":"2026-09-14T21:54:30.000Z","ordinal":6,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<3 this looks right"}]}}
 EOF
 
 # --- 1. Claude: the conversation survives, the plumbing does not ---------------
@@ -93,6 +94,8 @@ again="$(python3 "$EXTRACT" "$TMP/claude.jsonl")"
 cout="$(python3 "$EXTRACT" "$TMP/codex.jsonl")" || fail "extractor failed on the Codex fixture"
 grep -q '^hast du die feedbacks schon mal angesehen?$' <<<"$cout" \
   || fail "the Codex human turn is missing — format detection probably fell back to Claude"
+grep -q '^<3 this looks right$' <<<"$cout" \
+  || fail "an angle-leading Codex human turn was dropped"
 grep -q 'tool shell' <<<"$cout" || fail "the Codex tool call is missing"
 grep -q 'INJECTED' <<<"$cout" \
   && fail "harness instructions delivered through the user role reached the output"

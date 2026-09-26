@@ -187,7 +187,7 @@ def codex_turns(path, session, prose_max, short):
             if role == "user":
                 # Codex delivers harness instructions through the user role too; they are wrapped
                 # in tags and are not something a person typed.
-                if body.startswith("<") or "instructions>" in body[:40]:
+                if "instructions>" in body[:40]:
                     continue
                 yield {"id": f"{session}:{short[native]}", "role": "human",
                        "ts": stamp, "body": body, "tools": []}
