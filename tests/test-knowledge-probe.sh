@@ -73,6 +73,33 @@ jq -e '
   any(.diagnostics[]; .code == "orphan_concept" and .file == "orphan.md")
 ' "$TMP/report.json" >/dev/null
 
+# A repeated root key must be rejected even when the final value is supported.
+cat > "$TMP/repo/index.md" <<'EOF'
+---
+okf_version: "0.1"
+okf_version: "0.2"
+---
+# Index
+* [Good](good.md) - grounded concept.
+* [Computation](calc.md) - incomplete computation contract.
+EOF
+python3 "$ROOT/lib/knowledge_probe.py" "$TMP/repo" > "$TMP/duplicate-root-report.json"
+jq -e '
+  .profile == "okf-0.2" and
+  .summary.portable_structure_clean == false and
+  any(.diagnostics[]; .code == "duplicate_frontmatter_key" and .file == "index.md")
+' "$TMP/duplicate-root-report.json" >/dev/null
+
+# Restore the valid root index for the end-to-end Runner check below.
+cat > "$TMP/repo/index.md" <<'EOF'
+---
+okf_version: "0.2"
+---
+# Index
+* [Good](good.md) - grounded concept.
+* [Computation](calc.md) - incomplete computation contract.
+EOF
+
 # End-to-end: the opt-in lens runs the deterministic probe, the mock emits the knowledge-specific
 # invariant matrix, validation accepts it, and findings-only records a clean pass without a branch.
 mkdir -p "$TMP/state" "$TMP/runs" "$TMP/digests" "$TMP/worktrees"
