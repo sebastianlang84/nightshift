@@ -53,8 +53,9 @@ ledgers diverge silently: duplicate branches, broken caps and rotation). See
    Step 5's `dry-run` is the cheap way to find out before a real run does.
 3. **Write the rulebook.** Copy `rulebook.example.yaml` to `rulebook.yaml` and list the repos this
    installation may touch, their `mode` (`branch-fix` / `findings-only`), optional `base:`,
-   `dimensions:`, and the `limits:` block. The parser rejects a malformed rulebook and the run aborts
-   rather than silently servicing a partial fleet. A key it does not recognise counts as malformed:
+   `dimensions:`, and the `limits:` block. Change-size guidance limits (`max_files_per_change` and
+   `max_lines_per_change`) must be positive integers. The parser rejects a malformed rulebook and
+   the run aborts rather than silently servicing a partial fleet. A key it does not recognise counts as malformed:
    every section takes a closed set of keys, so a typo (`max_open_branchs:`, `test-cmd:`) fails the
    parse by name instead of dropping that knob and running the night on the default you never wrote.
    `repos:` must contain at least one entry with an absolute, non-empty `path`; an empty fleet aborts

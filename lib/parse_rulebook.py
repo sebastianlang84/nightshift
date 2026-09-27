@@ -217,8 +217,16 @@ def main(path: str) -> None:
     if not mfi.isdecimal() or int(mfi) < 1:
         raise SystemExit("limits.max_fix_iterations must be a positive integer")
     print(f"max_fix_iterations\t{mfi}")
-    print(f"max_files\t{limits.get('max_files_per_change', '15')}")
-    print(f"max_lines\t{limits.get('max_lines_per_change', '400')}")
+    # These values are prompt guidance, but zero or non-numeric input still makes that guidance
+    # useless or contradictory. Reject it here rather than passing malformed limits to a stage.
+    mfc = limits.get("max_files_per_change", "15")
+    if not mfc.isdecimal() or int(mfc) < 1:
+        raise SystemExit("limits.max_files_per_change must be a positive integer")
+    print(f"max_files\t{mfc}")
+    mlc = limits.get("max_lines_per_change", "400")
+    if not mlc.isdecimal() or int(mlc) < 1:
+        raise SystemExit("limits.max_lines_per_change must be a positive integer")
+    print(f"max_lines\t{mlc}")
     # Wall-clock spend budget for the whole night (ADR 0013). Empty = no time cap (bash applies the
     # NIGHTSHIFT_MAX_RUN_SECONDS env override first). Validate a present value as a positive integer.
     mrm = limits.get("max_run_minutes", "")
