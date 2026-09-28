@@ -100,6 +100,7 @@ recon:                           # reconnaissance stage (ADR 0010): surveys each
 # first. The Runner rotates — each repo/pass gets the lens with the highest staleness × recon yield
 # weight, so coverage spreads over nights and even a `low` lens still comes round.
 # Trim this list, or override per repo with a repo-level `dimensions:` (comma-separated) key.
+# Every id needs a prompts/dimensions/<id>.md lens file; the parser refuses any other id.
 # Use only general for unrestricted search: categories become hints; the default list stays below.
 dimensions:
   - correctness                  # live/latent bugs, wrong results, unhandled edges

@@ -4,6 +4,7 @@
 Handles exactly the shape we control: top-level `branch_prefix`, a `limits:` map,
 and a `repos:` list of `{path, mode}`. Not a general YAML parser on purpose (no deps)."""
 import sys
+from pathlib import Path
 
 # Every mapping section's key set is CLOSED: the emitters at the bottom of main() read exactly
 # these keys and nothing else, so a key outside the set can only be a typo — and tolerating one is
@@ -55,6 +56,10 @@ REPO_KEYS = ("path", "mode", "base", "findings", "dimensions", "test_net", "test
 # The modes the Runner actually implements. A repo whose mode is not in here is a typo, not a
 # feature request — see the validation below for why that must abort rather than be skipped.
 REPO_MODES = ("findings-only", "branch-fix")
+# A dimension is serviceable when prompts/dimensions/<id>.md exists — the built-in catalog and the
+# custom lenses ADR 0010 allows alike. Any other id would be recorded as serviced with no lens prompt.
+LENS_DIR = Path(__file__).resolve().parent.parent / "prompts" / "dimensions"
+LENSES = tuple(sorted(f.name[:-3] for f in LENS_DIR.glob("*.md") if f.is_file() and len(f.name) > 3))
 
 
 def val(raw: str) -> str:
@@ -355,6 +360,11 @@ def main(path: str) -> None:
     print(f"review_agent\t{review_agent}")
     # Global review-dimension set; ORDER is the cold-start / tie priority in the Runner.
     for d in dims:
+        if d not in LENSES:
+            raise SystemExit(
+                f"dimensions: unknown lens {d!r} — "
+                f"expected a lens file in {LENS_DIR}: {', '.join(LENSES)}"
+            )
         print(f"dimension\t{d}")
     for r in repos:
         path = r.get("path", "")
@@ -383,6 +393,13 @@ def main(path: str) -> None:
                 f"repo {r.get('path', '')}: unknown mode {mode!r} — "
                 f"expected one of {', '.join(sorted(REPO_MODES))}"
             )
+        repo_dimensions = r.get("dimensions", "")
+        for dimension in (d.strip() for d in repo_dimensions.split(",") if d.strip()):
+            if dimension not in LENSES:
+                raise SystemExit(
+                    f"repo {r.get('path', '')}: unknown lens {dimension!r} — "
+                    f"expected a lens file in {LENS_DIR}: {', '.join(LENSES)}"
+                )
         # test_cmd MUST stay last on the row — a command legitimately contains spaces, and bash's
         # `read` soaks the remainder into the final variable. A tab would split it in two.
         test_cmd = r.get("test_cmd", "")
