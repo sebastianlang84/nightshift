@@ -20,8 +20,8 @@ mapfile -t configured < <(
   echo "dimension template drift: got '${configured[*]}'" >&2; exit 1;
 }
 
-# Both global dimensions and per-repo overrides select serviced lenses, so reject ids outside the
-# same built-in catalog instead of recording a lens for which the Runner has no prompt.
+# Both global dimensions and per-repo overrides select serviced lenses, so reject an id with no
+# prompts/dimensions/<id>.md file instead of recording a lens for which the Runner has no prompt.
 reject_unknown_dimension() { # label rulebook body expected error
   printf '%s\n' "$2" > "$TMP/invalid-dimensions.yaml"
   if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/invalid-dimensions.yaml" \
@@ -43,6 +43,27 @@ reject_unknown_dimension "an unknown per-repo lens" 'repos:
   - path: /srv/example
     mode: findings-only
     dimensions: docs,securityy' "repo /srv/example: unknown lens 'securityy'"
+
+# A custom lens (ADR 0010) is serviceable once its prompt file exists: a parser installed next to
+# prompts/dimensions/my-lens.md accepts it globally and per repo.
+mkdir -p "$TMP/home/lib" "$TMP/home/prompts/dimensions"
+cp "$ROOT/lib/parse_rulebook.py" "$TMP/home/lib/"
+cp "$ROOT"/prompts/dimensions/*.md "$TMP/home/prompts/dimensions/"
+echo "custom lens" > "$TMP/home/prompts/dimensions/my-lens.md"
+printf '%s\n' 'dimensions:' '  - my-lens' 'repos:' '  - path: /srv/example' '    mode: findings-only' \
+  '    dimensions: docs,my-lens' > "$TMP/custom-dimensions.yaml"
+out="$(python3 "$TMP/home/lib/parse_rulebook.py" "$TMP/custom-dimensions.yaml")" || {
+  echo "parser rejected a custom lens backed by a prompt file" >&2; exit 1;
+}
+grep -qx $'dimension\tmy-lens' <<<"$out" || { echo "custom global lens not emitted" >&2; exit 1; }
+grep -q 'dimensions=docs,my-lens' <<<"$out" || { echo "custom per-repo lens not emitted: $out" >&2; exit 1; }
+# A directory named like a lens is no lens file: the Runner would append nothing for it.
+mkdir "$TMP/home/prompts/dimensions/audit.md"
+printf '%s\n' 'dimensions:' '  - audit' 'repos:' '  - path: /srv/example' '    mode: findings-only' \
+  > "$TMP/dir-dimension.yaml"
+if python3 "$TMP/home/lib/parse_rulebook.py" "$TMP/dir-dimension.yaml" >/dev/null 2>&1; then
+  echo "parser accepted a lens id backed by a directory" >&2; exit 1
+fi
 
 mapfile -t prompt_files < <(
   find "$ROOT/prompts/dimensions" -maxdepth 1 -type f -name '*.md' -printf '%f\n' |
