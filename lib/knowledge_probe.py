@@ -194,7 +194,9 @@ def main(repo_arg: str) -> None:
             if path != PurePosixPath("index.md") and fm_lines is not None:
                 add("error", "reserved_frontmatter", path, "non-root index.md must not have frontmatter")
             if path == PurePosixPath("index.md") and fm_lines is not None:
-                fields, _ = top_fields(fm_lines)
+                fields, duplicates = top_fields(fm_lines)
+                for key in duplicates:
+                    add("error", "duplicate_frontmatter_key", path, f"duplicate top-level key: {key}", f"{key}:")
                 extra = sorted(set(fields) - {"okf_version"})
                 if extra:
                     add("error", "root_index_frontmatter", path, f"root index frontmatter has non-OKF keys: {', '.join(extra)}")
