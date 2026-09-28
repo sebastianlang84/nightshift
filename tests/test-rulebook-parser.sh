@@ -88,4 +88,20 @@ EOF
 python3 "$ROOT/lib/parse_rulebook.py" "$TMP/zerolimits.yaml" >/dev/null \
   || { echo "test-rulebook-parser: 0 must be accepted as 'no cap' for the sandbox rlimits" >&2; exit 1; }
 
+# The change-size guidance limits, unlike the rlimits above, have no "no cap" meaning: 0 and
+# non-numeric values are refused, and the defaults stand when the keys are absent.
+for key in max_files_per_change max_lines_per_change; do
+  for bad in 0 x -3; do
+    printf '%s\n' limits: "  $key: $bad" repos: '  - path: /srv/x' '    mode: findings-only' \
+      > "$TMP/badsize.yaml"
+    if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/badsize.yaml" >/dev/null 2>"$TMP/badsize.err"; then
+      echo "test-rulebook-parser: $key: $bad must be refused" >&2; exit 1
+    fi
+    grep -q "limits.$key must be a positive integer" "$TMP/badsize.err" \
+      || { echo "test-rulebook-parser: $key: $bad refused for the wrong reason" >&2; exit 1; }
+  done
+done
+grep -qx $'max_files\t15' <<<"$out" && grep -qx $'max_lines\t400' <<<"$out" \
+  || { echo "test-rulebook-parser: change-size limits must default to 15 / 400" >&2; exit 1; }
+
 echo "test-rulebook-parser: ok"
