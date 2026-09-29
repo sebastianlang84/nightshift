@@ -107,7 +107,7 @@ e.g. a smaller/cheaper model for one night.
 
 ```yaml
 agent:
-  claude_model: claude-opus-5
+  claude_model: claude-opus-5-5
   codex_model: gpt-6-sol
   codex_effort: high
 ```
@@ -243,7 +243,7 @@ choice came from — which model actually served is a separate, after-the-fact q
 `runs.jsonl`:
 
 ```
-[nightshift] claude model: claude-opus-5 (from rulebook agent.claude_model)
+[nightshift] claude model: claude-opus-5-5 (from rulebook agent.claude_model)
 [nightshift] claude model: not declared — the CLI's own default applies (runs.jsonl model_id records what served)
 ```
 
