@@ -62,6 +62,32 @@ lockfile" from "the suite rewrote a workflow" — both simply appeared in the co
 
 Each iteration of the loop re-records, so the tree that ships is the one the *last* review approved.
 
+### Amendment (2026-09-29) — a hook that passes can change the commit too
+
+The restore above makes the hooks *see* the reviewed tree. It does not stop them changing it: a
+`pre-commit` hook that exits 0 may still rewrite and stage files (a formatter, a generated
+manifest), and a `post-commit` hook may amend. The commit then carries a tree neither the reviewer
+nor the gate saw. [ADR 0036](0036-a-rejected-commit-gets-one-fix-retry.md) named this gap.
+
+- **After a successful commit and before the push, `finalize` compares the tree of the new
+  branch's tip with the recorded reviewed tree.** A mismatch refuses the push, logs the changed
+  paths, deletes the local branch like the rejection path does, and records `commit-failed`.
+- **The branch is checked, not `HEAD`, and the push sends that exact sha** (`<sha>:refs/heads/<branch>`).
+  A `post-commit` hook can leave `HEAD` on the reviewed commit and point the branch at another one;
+  a check on `HEAD` followed by a push of the branch name would pass it.
+- **`commit-failed`, not a new outcome.** The item is a commit the host repo's hooks would not let
+  ship as reviewed. The digest already reports that value, and `already_acted` does not suppress
+  it, so like a rejection it stays unlatched and a later night may try again.
+- **No ADR 0036 retry.** A passing hook prints no demand the Fix stage could answer, and the
+  retry's prompt presents the hook's output as a refusal. Feeding the hook's diff back to Fix is a
+  separate decision.
+- **Cost today: not expected, not proven.** The one repo this host's rulebook enables, partflow,
+  keeps its hooks in `scripts/hooks`, and a text search of them finds no `git add`. That does not
+  rule out staging through `update-index`, `apply --cached` or a helper script. A repo that adopts a staging formatter hook
+  would get `commit-failed` on every item until the Fix stage produces already-formatted output.
+
+Regression cover: [`tests/test-finalize-hook-modified-tree.sh`](../../tests/test-finalize-hook-modified-tree.sh).
+
 ## Consequences
 
 **"The reviewer saw what shipped" stops being a timing property and becomes a structural one.** It

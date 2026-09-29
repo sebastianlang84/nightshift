@@ -2856,9 +2856,28 @@ $(cat "$id/worknote.md")" >"$id/commit-hook.log" 2>&1 || crc=$?
       || log "  $(basename "$repo"): cleanup warning — local branch remains: $branch"
     return "$crc"
   fi
-  sha=$(git -C "$wt" rev-parse HEAD)
+  # A hook that PASSES may still have changed the commit: a formatter that rewrites and stages
+  # files, or a post-commit hook that amends or moves the branch. Then the commit is not the tree
+  # the reviewer and the test gate saw, and pushing it breaks ADR 0027 by the hook's hand instead
+  # of the suite's. It is refused as `commit-failed` — a commit the host repo's hooks would not let
+  # ship as reviewed — with no retry: the hook printed no demand the Fix stage could answer.
+  # The check reads the BRANCH, not HEAD, and the push below sends that exact sha: a post-commit
+  # hook can leave HEAD on the reviewed commit and point the branch elsewhere.
+  local ctree
+  sha=$(git -C "$wt" rev-parse -q --verify "refs/heads/$branch^{commit}" 2>/dev/null || true)
+  ctree=$(git -C "$wt" rev-parse -q --verify "${sha:-refs/heads/$branch}^{tree}" 2>/dev/null || true)
+  if [ -z "$sha" ] || [ "$ctree" != "$rtree" ]; then
+    log "  $(basename "$repo"): the repo's own hooks changed the commit — it is not the reviewed tree; NOT shipping: $branch"
+    [ -n "$ctree" ] && git -C "$wt" diff-tree -r --name-status "$rtree" "$ctree" 2>/dev/null \
+      | head -20 | sed 's/^/    hook changed: /' >&2 || true
+    ledger_append "$(basename "$id")" "$repo" "$fp" "" "" "commit-failed" "$summary" "" "" "$verif" "$dim" "$type" "$csig"
+    git -C "$wt" checkout -q --detach >/dev/null 2>&1 || true
+    git -C "$repo" branch -q -D "$branch" >/dev/null 2>&1 \
+      || log "  $(basename "$repo"): cleanup warning — local branch remains: $branch"
+    return 1
+  fi
   # Layer 1 hook active for THIS push only (-c), never persisted to the repo config.
-  if ! git -c core.hooksPath="$HOOKS_DIR" -C "$wt" push -q -u origin "$branch"; then
+  if ! git -c core.hooksPath="$HOOKS_DIR" -C "$wt" push -q origin "$sha:refs/heads/$branch"; then
     log "  $(basename "$repo"): push failed — not shipped: $branch"
     ledger_append "$(basename "$id")" "$repo" "$fp" "$branch" "$sha" "push-failed" "$summary" "" "" "$verif" "$dim" "$type" "$csig"
     git -C "$wt" checkout -q --detach >/dev/null 2>&1 || true
