@@ -10,8 +10,10 @@ Rules:
 - Satisfy the repo's own commit conventions as PART of this change — a CHANGELOG entry where the
   repo keeps one and the change is user-visible, plus whatever its AGENTS.md / CONTRIBUTING
   requires of a change like this. That companion edit is IN scope; it is not scope creep. The
-  runner commits your working tree exactly as you leave it and runs the repo's own hooks: a hook
-  that rejects the commit discards the whole fix, so an unmet convention costs the entire change.
+  runner commits your working tree exactly as you leave it and runs the repo's own hooks: a
+  rejected commit gets at most one retry with the hook's output (none when this finding's fix
+  iterations are spent), and if that retry does not ship the whole fix is discarded — so an unmet
+  convention can cost the entire change.
 - Edit files in the working tree only. Do NOT run git (no add/commit/push/branch)
   and do NOT create scratch files — the runner handles branching and committing.
 - Run no destructive commands.
@@ -23,7 +25,8 @@ You are not required to produce a change. If the finding turns out to be wrong, 
 does not work the way the finding assumes, or if you cannot make a change you would stand behind,
 then leave the working tree exactly as you found it and say why in your final message. That is a
 complete and correct outcome — it is recorded as abandoned, not as a failure, and nothing about
-tonight counts it against you. A forced, half-understood or padded change is worse than none: it
+tonight counts it against you. On a commit retry the earlier version already passed review, so
+leaving that tree as it is ends the item as commit-failed instead. A forced, half-understood or padded change is worse than none: it
 costs a human the review either way, and it teaches the next night the wrong lesson.
 
 If something about YOUR OWN working conditions got in the way — a tool you needed and did not

@@ -914,6 +914,26 @@ commit_subject() { # finding_type summary -> subject line
   if [ -n "$ct" ]; then printf '%s(nightshift): %s' "$ct" "$2"; else printf 'nightshift: %s' "$2"; fi
 }
 
+# Hook output reaches the retry's Fix prompt (ADR 0036), and a hook runs on the host with the
+# operator's environment. A best-effort filter for the credential shapes a hook is likeliest to echo:
+# PEM blocks, `key=value` / `key: value` pairs whose key names a secret, common token prefixes and JWTs.
+redact_hook_output() { # stdin -> stdout
+  sed -E \
+    -e '/-----BEGIN [A-Z ]*PRIVATE KEY-----/,/-----END [A-Z ]*PRIVATE KEY-----/c [redacted private key]' \
+    -e 's#(bearer[[:space:]]+)[A-Za-z0-9._~+/=-]+#\1[redacted]#Ig' \
+    -e 's#(authorization["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"']?[A-Za-z]+[[:space:]]+)[^[:space:]"'"'"']+#\1[redacted]#Ig' \
+    -e 's/((pass(word|wd)?|secret|token|jwt|cookie|credential|api[_-]?key|access[_-]?key|private[_-]?key|ssh[_-]?key|authorization|auth[_-]?token)["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"']?)[^[:space:]"'"'"']+/\1[redacted]/Ig' \
+    -e 's/(gh[pousr]_|github_pat_|glpat-|xox[abprs]-|sk-|AKIA)[A-Za-z0-9_-]{12,}/\1[redacted]/g' \
+    -e 's#(://[^/:@[:space:]]+:)[^@[:space:]]+@#\1[redacted]@#g' \
+    -e 's/eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(\.[A-Za-z0-9_-]*)?/[redacted jwt]/g'
+}
+
+# Output quoted into a prompt sits inside a ``` fence; a run of backticks in it would close that fence
+# early and turn the rest into prompt text. Break every such run so the quote cannot end itself.
+fence_safe() { # stdin -> stdout
+  sed -E "s/\`{3,}/'''/g"
+}
+
 stage_prompt() { # stage workdir item_dir -> prompt on stdout
   local stage="$1" wd="$2" id="$3" prompt
   prompt="$(cat "$NIGHTSHIFT_HOME/prompts/$stage.md")
@@ -968,13 +988,45 @@ if it is genuinely ONE coherent, reviewable improvement — never bundle unrelat
 
 ## Gates this repo applies to the commit
 The runner commits your working tree exactly as you leave it, with the repo's own hooks active. A
-rejected commit discards the ENTIRE fix — there is no second attempt. You do NOT write the commit
-message and cannot change it; the runner's subject line will be exactly:
+rejected commit gets at most ONE retry (none once this finding's fix iterations are spent): this
+stage runs again with the hook's output, and the revision goes through review and the test gate
+again. A retry that still fails the gate discards the ENTIRE fix
+— so satisfy it now. You do NOT write the commit message and cannot change it; the runner's
+subject line will be exactly:
 
     $subj
 
 Judge any hook that reads the subject against THAT line, not against one you would have written.
 Satisfy these as part of the change:$gates"
+    fi
+    # A commit-rejected.log here means finalize tried to commit the tree this worktree still holds
+    # and git refused it — almost always the repo's own hooks (ADR 0036). This is the one retry.
+    # Unlike the suite output in tests.log, the hooks ran on the HOST, outside the ship gate's
+    # sandbox, so their output is redacted of credential-shaped text before a model sees it —
+    # redacted whole, before trimming, so a cut cannot separate a key from its label. Trimmed
+    # to its tail, where a hook states its verdict, and to a byte cap so a chatty hook cannot crowd
+    # out the prompt. Tested with -f, not -s: a hook that fails silently still consumed a commit.
+    if [ -f "$id/commit-rejected.log" ]; then
+      local hookout
+      hookout="$(redact_hook_output < "$id/commit-rejected.log" | tail -n 100 | tail -c 6000 | fence_safe)"
+      [ -n "$hookout" ] || hookout="(the hook printed nothing)"
+      prompt="$prompt
+
+## An earlier attempt was rejected by this repo's commit hooks
+The reviewer accepted an earlier version of this fix, the test suite passed, and the runner's commit
+was then refused — by the repo's own hooks, unless the output below shows git itself failing. The
+working tree holds your latest attempt, which started from that rejected one. This is the ONLY
+retry: revise the change so the hook accepts it, keeping the original finding fixed. The revision is
+reviewed and tested again before the next commit, with no further Fix run: a reviewer who does not
+ship it, a red suite, or a second rejection discards the entire fix. The runner never bypasses hooks
+and never adds a commit-message trailer for you; satisfy the gate in the files (for example a
+CHANGELOG entry where the change is user-visible). If the gate demands something you cannot
+honestly provide, leave the tree as it is and say why in your final message. What git printed (last
+100 lines, at most 6000 bytes, credential-shaped text redacted):
+
+\`\`\`
+$hookout
+\`\`\`"
     fi
     # A tests.log here means the PREVIOUS iteration of this same loop passed review and then broke
     # the repo's suite (ADR 0022). run_test_gate deletes the file the moment the suite is green, so
@@ -990,7 +1042,7 @@ pass is not a solution. If the failing test is itself wrong, say so in the workn
 deliberately rather than deleting or skipping it. Last 100 lines:
 
 \`\`\`
-$(tail -n 100 "$id/tests.log")
+$(tail -n 100 "$id/tests.log" | fence_safe)
 \`\`\`"
     fi
   fi
@@ -1155,6 +1207,17 @@ mock_fix() { # workdir item_dir — applies the fix for THIS finding (dispatched
     printf '# Worknote\n\nThe finding does not hold up on reading the code; nothing changed.\n' \
       > "$id/worknote.md"
     return 0
+  fi
+  # The commit retry (ADR 0036): a mock that reads the hook's demand out of the PROMPT the real
+  # adapters would send, so a test proves the output reached the Fix prompt, redaction included. It
+  # copies the hook's `NEED=…` demand into HOOK_OK.
+  # `revert` instead undoes the whole change, the retry's other way to reach an empty commit.
+  if [ -s "$id/commit-rejected.log" ]; then
+    case "${NIGHTSHIFT_MOCK_FIX_HEEDS_HOOK:-0}" in
+      1) stage_prompt fix "$wd" "$id" | grep -o 'NEED=[A-Za-z0-9]*' | tail -n 1 > "$wd/HOOK_OK" || true ;;
+      revert) git -C "$wd" checkout -q HEAD -- .
+        printf '# Worknote\n\nCould not satisfy the hook; reverted.\n' > "$id/worknote.md"; return 0 ;;
+    esac
   fi
   case "$file" in
     README.md) sed -i 's/teh /the /g' "$wd/README.md"
@@ -2680,8 +2743,12 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 blocked, 3 
 }
 
 # ---------------------------------------------------------------- finalize ----
-finalize() { # repo worktree item_dir [seq] [base] -> echoes branch name
-  local repo="$1" wt="$2" id="$3" seq="${4:-0}" basearg="${5:-}" fp type dim csig slug branch sha summary verif
+# Exit status: 0 shipped (branch echoed), 4 the repo's own hooks rejected the commit, 1 any other
+# refusal. `retry_ok`=1 means the caller will rerun the Fix stage once on a hook rejection (ADR 0036),
+# so that rejection is not yet an outcome: no ledger row is written, and the hook's output is left in
+# item_dir/commit-rejected.log for the retry's prompt. Every other path records its own outcome.
+finalize() { # repo worktree item_dir [seq] [base] [retry_ok] -> echoes branch name
+  local repo="$1" wt="$2" id="$3" seq="${4:-0}" basearg="${5:-}" retry_ok="${6:-0}" fp type dim csig slug branch sha summary verif
   fp=$(jq -r '.fingerprint' "$id/finding.json")
   type=$(jq -r '.type // "change"' "$id/finding.json")   # default so the branch slug never reads "null"
   dim=$(jq -r '.dimension // ""' "$id/finding.json")     # the review lens (ADR 0010), leads the slug
@@ -2741,27 +2808,53 @@ finalize() { # repo worktree item_dir [seq] [base] -> echoes branch name
   # and the ledger recorded `shipped` — a fix that does not exist, holding an open-branch slot.
   # (Observed 2026-08-02: partflow's CHANGELOG pre-commit hook rejected a deps cleanup; the empty
   # branch shipped anyway. `set -e` cannot catch it — finalize runs inside an `if` condition.)
-  if ! git -C "$wt" ${hookargs[@]+"${hookargs[@]}"} \
+  # The hooks' output is captured (stdout AND stderr) rather than left on the Runner's stderr: on a
+  # rejection it is the only statement of what the gate wanted, and the one retry (ADR 0036) hands
+  # it to the Fix stage. It is still copied to stderr, so the night's log reads as before.
+  # Whether anything is staged is decided BEFORE the hooks run: a hook that unstages the change and
+  # then fails has rejected a real fix, not found an empty one.
+  local crc=0 staged=1
+  git -C "$wt" diff --cached --quiet 2>/dev/null && staged=0
+  git -C "$wt" ${hookargs[@]+"${hookargs[@]}"} \
        -c user.name=nightshift -c user.email=nightshift@localhost \
        commit -q -m "$(commit_subject "$type" "$(jq -r '.summary' "$id/finding.json")")
 
-$(cat "$id/worknote.md")"; then
+$(cat "$id/worknote.md")" >"$id/commit-hook.log" 2>&1 || crc=$?
+  cat "$id/commit-hook.log" >&2 2>/dev/null || true
+  if [ "$crc" -eq 0 ]; then
+    rm -f "$id/commit-hook.log" "$id/commit-rejected.log"
+  else
     # An EMPTY index is not the same event as a rejected commit, and recording it as one makes the
     # Fix stage's honest way out look like a malfunction. A stage that tried, found no change it
     # could stand behind, and left the tree alone has ABANDONED the item — a verdict the ledger
     # already has, from the reviewer's `abandon`. Distinguishing them is what makes "stop rather
     # than force something" a usable instruction instead of a statistic against the night.
-    if git -C "$wt" diff --cached --quiet 2>/dev/null; then
+    # After a hook rejection (ADR 0036) the same empty index means the retry reverted a fix the
+    # reviewer had accepted; `abandoned` would latch that finding, so it stays the rejection it was.
+    if [ "$staged" -eq 0 ] && [ -f "$id/commit-rejected.log" ]; then
+      log "  $(basename "$repo"): commit retry: the revision removed the whole change — commit-failed, not shipped: $branch"
+      ledger_append "$(basename "$id")" "$repo" "$fp" "" "" "commit-failed" "$summary" "" "" "$verif" "$dim" "$type" "$csig"
+      crc=1
+    elif [ "$staged" -eq 0 ]; then
       log "  $(basename "$repo"): the fix stage changed nothing — abandoned, not shipped: $branch"
       ledger_append "$(basename "$id")" "$repo" "$fp" "" "" "abandoned" "$summary" "" "" "$verif" "$dim" "$type" "$csig"
+      crc=1
     else
-      log "  $(basename "$repo"): commit rejected by the repo's own hooks — not shipped: $branch"
-      ledger_append "$(basename "$id")" "$repo" "$fp" "" "" "commit-failed" "$summary" "" "" "$verif" "$dim" "$type" "$csig"
+      mv -f "$id/commit-hook.log" "$id/commit-rejected.log" 2>/dev/null || true
+      if [ "$retry_ok" = 1 ]; then
+        log "  $(basename "$repo"): commit rejected by the repo's own hooks — not shipped yet, one fix retry follows: $branch"
+      else
+        log "  $(basename "$repo"): commit rejected by the repo's own hooks — not shipped: $branch"
+        ledger_append "$(basename "$id")" "$repo" "$fp" "" "" "commit-failed" "$summary" "" "" "$verif" "$dim" "$type" "$csig"
+      fi
+      crc=4
     fi
+    rm -f "$id/commit-hook.log"
+    # Detaching keeps index and working tree: the rejected tree stays in place for the retry.
     git -C "$wt" checkout -q --detach >/dev/null 2>&1 || true
     git -C "$repo" branch -q -D "$branch" >/dev/null 2>&1 \
       || log "  $(basename "$repo"): cleanup warning — local branch remains: $branch"
-    return 1
+    return "$crc"
   fi
   sha=$(git -C "$wt" rev-parse HEAD)
   # Layer 1 hook active for THIS push only (-c), never persisted to the repo config.
@@ -3295,7 +3388,7 @@ main() {
     log "quota fallback: $NIGHTSHIFT_QUOTA_FALLBACK_AGENT (activated only after a structured rejected quota event)"
     log_model_selection codex NIGHTSHIFT_CODEX_MODEL "$RB_CODEX_MODEL"
   fi
-  local made=0 considered=0 findings=0 repo mode cfgbase id fp fnj iter verdict wt base b summary open="" pass=0 progress ship_progress stop_reason=ok disp rfind farr n_find k fd dim explore_rc n_partial fix_rc review_rc
+  local made=0 considered=0 findings=0 repo mode cfgbase id fp fnj iter verdict wt base b summary open="" pass=0 progress ship_progress stop_reason=ok disp rfind farr n_find k fd dim explore_rc n_partial fix_rc review_rc hook_retry=0 retry_ok=0 retry_why="" frc=0 fix_cap=0
   local runner_pid="$BASHPID"
   trap 'interrupted_digest TERM 143' TERM
   trap 'interrupted_digest INT 130' INT
@@ -3539,8 +3632,13 @@ main() {
       if ! setup_worktree "$repo" "$wt" "$base"; then
         log "  $(basename "$repo"): could not create worktree for finding — skip"; continue
       fi
-      iter=0; verdict="revise"; gate=""
-      while [ "$iter" -lt "$MAX_FIX_ITER" ]; do
+      iter=0; verdict="revise"; gate=""; hook_retry=0; fix_cap="$MAX_FIX_ITER"
+      # The outer loop turns at most twice. Its second turn is the ONE retry a hook-rejected commit
+      # gets (ADR 0036): the same fix↔review↔gate loop again, from the rejected tree, with the hook's
+      # output in the Fix prompt — and on the same `iter` counter, so the retry spends the item's
+      # fix-iteration budget instead of opening a second one.
+      while :; do
+      while [ "$iter" -lt "$fix_cap" ]; do
         iter=$((iter + 1))
         # Cleared per ITERATION, not per finding: only the attempt the loop ends on may classify the
         # item below. A `fail` carried over from an earlier iteration would outrank a later `abandon`
@@ -3595,11 +3693,56 @@ main() {
         fi
       done
       b=""
-      if [ "$verdict" = ship ]; then
-        if b=$(finalize "$repo" "$wt" "$fd" "$made" "$base"); then
-          made=$((made + 1)); open=$((open + 1)); progress=1; ship_progress=1
-          log "  $(basename "$repo"): shipped -> $b"
+      [ "$verdict" = ship ] || break
+      # A retry is offered only once and only while the fix-iteration budget has a turn left. The
+      # time budget is checked after the rejection, since the hook itself may have spent it.
+      retry_ok=0
+      if [ "$hook_retry" -eq 0 ]; then
+        if [ "$iter" -ge "$MAX_FIX_ITER" ]; then retry_why="no fix iteration left ($iter/$MAX_FIX_ITER)"
+        else retry_ok=1; fi
+      fi
+      frc=0
+      b=$(finalize "$repo" "$wt" "$fd" "$made" "$base" "$retry_ok") || frc=$?
+      if [ "$frc" -eq 0 ]; then
+        made=$((made + 1)); open=$((open + 1)); progress=1; ship_progress=1
+        [ "$hook_retry" -eq 1 ] && log "  $(basename "$repo"): commit retry: the revised fix passed the repo's hooks"
+        log "  $(basename "$repo"): shipped -> $b"
+        gate=finalized; break
+      fi
+      b=""
+      if [ "$frc" -eq 4 ] && [ "$retry_ok" -eq 1 ]; then
+        hook_retry=1
+        # finalize left the outcome to us; the post-loop branch below records it as commit-failed.
+        if over_budget; then gate=budget; verdict=""; break; fi
+        # ONE Fix run, then one Review and one gate run: the retry never loops back into Fix, so a
+        # red suite or a `revise` on the revision ends it as commit-failed.
+        verdict=revise; gate=""; fix_cap=$((iter + 1))
+        log "  $(basename "$repo"): commit retry: rerunning the fix once with the hook's output (fix iteration $((iter + 1))/$MAX_FIX_ITER) ($fp)"
+        continue
+      fi
+      # finalize recorded its own outcome (commit-failed, abandoned or push-failed).
+      if [ "$frc" -eq 4 ]; then
+        if [ "$hook_retry" -eq 1 ]; then
+          log "  $(basename "$repo"): commit retry: rejected again by the repo's hooks — commit-failed ($fp)"
+        else
+          log "  $(basename "$repo"): commit retry: not attempted — $retry_why — commit-failed ($fp)"
         fi
+      fi
+      gate=finalized; break
+      done   # the commit-retry loop
+      if [ "$gate" = finalized ]; then
+        :
+      elif [ "$hook_retry" -eq 1 ] && [ "$gate" != tampered ]; then
+        # The retry ended before a second commit: the time budget ran out, its Fix or Review stage
+        # failed, the reviewer did not ship the revision, or the suite refused it. The item is what it already was — a fix the
+        # repo's hooks rejected — and it is recorded as that, unlatched, so a later night may try
+        # again. An unusable agent ends the night below; the rejection it follows was observed while
+        # the agent still worked, so ADR 0023 does not withhold it.
+        # Same row shape as finalize's own commit-failed (verifiability and type included).
+        ledger_append "$(basename "$fd")" "$repo" "$fp" "" "" "commit-failed" "$summary" "" "" \
+          "$(jq -r '.verifiability // ""' "$fd/finding.json" 2>/dev/null || true)" "$dim" \
+          "$(jq -r '.type // "change"' "$fd/finding.json" 2>/dev/null || true)" "$csig"
+        log "  $(basename "$repo"): commit retry: the revision did not reach a commit (${gate:-verdict ${verdict:-none}}) — commit-failed ($fp)"
       elif [ "$gate" = tampered ]; then
         ledger_append "$(basename "$fd")" "$repo" "$fp" "" "" "worktree-tampered" "$summary" "" "" "" "$dim" "" "$csig"
         log "  $(basename "$repo"): worktree tampering refused — not shipped ($fp)"
