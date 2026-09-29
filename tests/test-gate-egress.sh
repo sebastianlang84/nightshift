@@ -123,13 +123,26 @@ gate() { local cmd="$1"; shift
 # --- 2. a service on the HOST's loopback is unreachable, with and without net --
 # This is the concrete thing --share-net exposed: partflow, llmstack, open-webui and the dashboard
 # all listen on this machine. A stand-in for them runs here for the duration of the test.
-python3 -m http.server 18231 --bind 127.0.0.1 >/dev/null 2>&1 &
+# The kernel picks the port: a fixed one collides with a sibling copy of this suite, and then the
+# stand-in that answers is the sibling's, gone the moment that copy exits. The listener is bound
+# before its port is published, so a port read from the file is already this test's own.
+python3 - "$TMP/httpd.port" >/dev/null 2>&1 <<'HTTPD' &
+import http.server, os, sys
+s = http.server.HTTPServer(("127.0.0.1", 0), http.server.SimpleHTTPRequestHandler)
+with open(sys.argv[1] + ".tmp", "w") as f:
+    f.write(str(s.server_address[1]))
+os.rename(sys.argv[1] + ".tmp", sys.argv[1])
+s.serve_forever()
+HTTPD
 HTTPD=$!
-trap 'kill $HTTPD 2>/dev/null; rm -rf "$TMP"' EXIT
-sleep 1
-curl -s -m 3 -o /dev/null "http://127.0.0.1:18231/" || fail "the stand-in host service is not up; the test would prove nothing"
+# `|| true`: under `set -e` a failing command inside the EXIT trap ends the trap there, so a
+# stand-in that already died would turn a passing run into rc=1 and leak $TMP.
+trap 'kill $HTTPD 2>/dev/null || true; rm -rf "$TMP"' EXIT
+for _ in $(seq 300); do [ -s "$TMP/httpd.port" ] && break; sleep 0.1; done  # 30s: a loaded host is slow
+PORT="$(cat "$TMP/httpd.port" 2>/dev/null)" || fail "the stand-in host service did not start"
+curl -s -m 3 -o /dev/null "http://127.0.0.1:$PORT/" || fail "the stand-in host service is not up; the test would prove nothing"
 
-probe_cmd='curl -s -m 6 -o /dev/null -w "%{http_code}" http://127.0.0.1:18231/ 2>/dev/null; echo " <- host loopback"'
+probe_cmd='curl -s -m 6 -o /dev/null -w "%{http_code}" http://127.0.0.1:'"$PORT"'/ 2>/dev/null; echo " <- host loopback"'
 out="$(gate "$probe_cmd")"
 grep -q '200 <- host loopback' <<<"$out" && { echo "$out" >&2; fail "a gate WITHOUT test_net reached a service on the host's loopback"; }
 out="$(gate "$probe_cmd" GATE_NET=true)"
@@ -138,14 +151,14 @@ grep -q '200 <- host loopback' <<<"$out" && { echo "$out" >&2; fail "a gate WITH
 # The sandbox's own loopback still works, or a suite that starts a test server cannot run at all.
 out="$(gate 'python3 -c "
 import http.server,threading,urllib.request
-s=http.server.HTTPServer((\"127.0.0.1\",18231),http.server.SimpleHTTPRequestHandler)
+s=http.server.HTTPServer((\"127.0.0.1\",'"$PORT"'),http.server.SimpleHTTPRequestHandler)
 threading.Thread(target=s.serve_forever,daemon=True).start()
-print(\"own-loopback=\", urllib.request.urlopen(\"http://127.0.0.1:18231/\").status)
+print(\"own-loopback=\", urllib.request.urlopen(\"http://127.0.0.1:'"$PORT"'/\").status)
 "')"
 grep -q 'own-loopback= 200' <<<"$out" \
   || { echo "$out" >&2; fail "the sandbox cannot reach its OWN loopback — a suite with a test server breaks"; }
 # …and that listener must be the sandbox's, not the host's: same port, different namespace.
-curl -s -m 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:18231/" | grep -q 200 \
+curl -s -m 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/" | grep -q 200 \
   || fail "the host's own service on that port disappeared — the namespaces are not separate"
 
 # The same, WITH test_net — which is where it used to break. The proxy variables are exported to the
@@ -155,10 +168,10 @@ curl -s -m 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:18231/" | grep -q 
 # no_proxy must exempt loopback — the sandbox's own, which grants nothing that --unshare-net took.
 out="$(gate 'python3 -c "
 import http.server,threading,urllib.request
-s=http.server.HTTPServer((\"127.0.0.1\",18231),http.server.SimpleHTTPRequestHandler)
+s=http.server.HTTPServer((\"127.0.0.1\",'"$PORT"'),http.server.SimpleHTTPRequestHandler)
 threading.Thread(target=s.serve_forever,daemon=True).start()
-print(\"own-loopback=\", urllib.request.urlopen(\"http://127.0.0.1:18231/\").status)
-print(\"by-name=\", urllib.request.urlopen(\"http://localhost:18231/\").status)
+print(\"own-loopback=\", urllib.request.urlopen(\"http://127.0.0.1:'"$PORT"'/\").status)
+print(\"by-name=\", urllib.request.urlopen(\"http://localhost:'"$PORT"'/\").status)
 "' GATE_NET=true)"
 grep -q 'own-loopback= 200' <<<"$out" \
   || { echo "$out" >&2; fail "with test_net the suite cannot reach its OWN server — the proxy hijacked loopback"; }
@@ -195,11 +208,26 @@ grep -q 'nightshift-egress' <<<"$(gate 'ls / 2>&1')" \
 # SECOND zero and the comparison below gets "0\n0". Count lines instead.
 # `|| true` INSIDE the substitution: pgrep exits 1 when nothing matches, and `pipefail` would hand
 # that to the assignment, which `set -e` turns into an exit right here.
-before="$( { pgrep -f 'egress_proxy.py' 2>/dev/null || true; } | wc -l)"
-gate 'true' GATE_NET=true >/dev/null
-sleep 1
-after="$( { pgrep -f 'egress_proxy.py' 2>/dev/null || true; } | wc -l)"
-[ "$after" -le "$before" ] || fail "an egress proxy survived the gate ($before -> $after)"
+# Only this test's proxies: their socket sits under its own $TMP/worktrees. A host-wide count moves
+# with every sibling suite that opens or closes a gate meanwhile, in either direction. `pgrep -f`
+# takes a regex, so the path is escaped: an unescaped `[` in TMPDIR would match nothing and make
+# both counts a vacuous zero.
+mine="egress_proxy\\.py $(printf '%s' "$TMP/worktrees/" | sed 's/[][\\.*^$+?(){}|]/\\&/g')"
+# Polled, not slept: under load a proxy may take longer than a fixed second to exit after SIGINT.
+# Prints how many of this test's proxies are still running after up to 10s.
+settled_mine() { local n; for _ in $(seq 100); do
+    n="$( { pgrep -f "$mine" 2>/dev/null || true; } | wc -l)"; [ "$n" -eq 0 ] && break; sleep 0.1
+  done; echo "$n"; }
+# Scoped to this test, every earlier gate's proxy must be gone too: a count that only has to stay
+# level would let a survivor from sections 2-4 through.
+before="$(settled_mine)"
+[ "$before" -eq 0 ] || fail "an egress proxy from an earlier gate in this test is still running ($before)"
+# With `before` at 0, "no proxy afterwards" only means something if one ran at all.
+out="$(gate 'true' GATE_NET=true)"
+grep -q '\[egress\] listening on' <<<"$out" \
+  || { echo "$out" >&2; fail "the test_net gate started no egress proxy — its teardown cannot be checked"; }
+after="$(settled_mine)"
+[ "$after" -eq 0 ] || fail "an egress proxy survived the gate ($after still running after 10s)"
 find "$TMP/worktrees" -maxdepth 1 -name 'gate-egress.*' | grep -q . \
   && fail "the egress socket directory was left behind"
 
