@@ -47,8 +47,7 @@ test gate, then one more commit attempt.**
   and is never read back.
 - **The same checks, not a shortcut.** The retry is one more Fix run, followed by the same staging,
   reviewed-tree record, Review stage and `test_cmd` gate a first attempt gets. Nothing about the
-  retry lets a tree reach a commit that the reviewer and the gate have not both seen, beyond what a
-  passing hook itself adds (see *Not addressed*). It does not
+  retry lets a tree reach a pushed commit that the reviewer and the gate have not both seen. It does not
   loop: a `revise` verdict or a red suite on the revision ends it, where a first attempt would go
   back into Fix.
 - **The same budget.** The retry spends a turn of the item's existing `max_fix_iterations` counter;
@@ -104,9 +103,9 @@ test gate, then one more commit attempt.**
   stage's code on the host before this change; feeding its output back does not create that
   exposure, but it does give it a return path into the prompt.
 - **Unchanged:** a first attempt that leaves no change is still `abandoned`.
-- **Not addressed:** finalize still pushes whatever a *passing* hook adds to the commit — a
-  formatter that edits and stages files — without comparing the commit's tree to the reviewed one.
-  That predates this decision and is independent of it.
+- **Not addressed here:** a *passing* hook that edits and stages files — a formatter — changes the
+  commit's tree. That predates this decision and is independent of it; the amendment to
+  [ADR 0027](0027-the-reviewed-tree-is-what-ships.md) now refuses such a commit before the push.
 - Regression cover: [`tests/test-finalize-commit-rejected.sh`](../../tests/test-finalize-commit-rejected.sh)
   drives a rejection that the retry satisfies (shipped, with the hook's demand in the pushed tree), a
   second rejection, no retry once the iteration budget is spent, a revision the test gate or the
