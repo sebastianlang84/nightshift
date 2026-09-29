@@ -85,6 +85,32 @@ finally:
 print("policy ok")
 PY
 
+# --- 1b. a proxy that never gets ready is reaped, whatever the path looks like ---
+# With no ready line there is no pid, so the gate reaps by `pkill -f` on the socket path — an
+# extended regex. The path derives from NIGHTSHIFT_WORKTREES, so `[` `]` `+` `(` in it made the
+# unescaped pattern miss the proxy, which then kept running after its socket directory was removed.
+# A stand-in that never prints plays the hung proxy. This runs before the bwrap check because the
+# gate reaches this path before it asks for a sandbox. The check sits INSIDE the gate's shell: the
+# leaked process only dies with that shell, and the Runner's shell lives for the rest of the night.
+mkdir -p "$TMP/hung-home/lib" "$TMP/hung-item" "$TMP/hung-state"
+echo 'import time; time.sleep(120)' > "$TMP/hung-home/lib/egress_proxy.py"
+out="$(env ROOT="$ROOT" ID="$TMP/hung-item" HUNG_HOME="$TMP/hung-home" NIGHTSHIFT_WORKTREES="$TMP/work[trees]+(x)" \
+    NIGHTSHIFT_STATE_DIR="$TMP/hung-state" NIGHTSHIFT_RUNS_DIR="$TMP/hung-state/runs" \
+    NIGHTSHIFT_DIGEST_DIR="$TMP/hung-state/digests" bash -c '
+  set +u; NIGHTSHIFT_SOURCED=1 . "$ROOT/bin/nightshift.sh" >/dev/null 2>&1; set +e
+  NIGHTSHIFT_HOME="$HUNG_HOME"
+  repo_test_cmd() { echo true; }; repo_test_net() { echo 1; }
+  run_test_gate /hung/repo /hung/wt "$ID"; echo "GATE_RC=$?"
+  sleep 0.5
+  stub="$(printf "%s" "$HUNG_HOME/lib/egress_proxy.py" | sed "s/[][\\\\.*^\$+?(){}|]/\\\\&/g")"
+  if pgrep -f "$stub" >/dev/null; then
+    echo SURVIVED; pkill -f "$stub"
+  fi
+  :' 2>&1)"
+grep -q 'GATE_RC=2' <<<"$out" || { echo "$out" >&2; fail "a proxy with no ready line did not block the gate"; }
+grep -q 'SURVIVED' <<<"$out" \
+  && fail "a proxy that never got ready survived its gate (the socket path has regex metacharacters)"
+
 command -v bwrap >/dev/null 2>&1 || skip "bwrap is not installed"
 bwrap --unshare-all --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib \
       --symlink usr/lib64 /lib64 --proc /proc --dev /dev /bin/true >/dev/null 2>&1 \

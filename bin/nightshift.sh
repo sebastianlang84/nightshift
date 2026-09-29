@@ -2583,7 +2583,9 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 blocked, 3 
       log "  $(basename "$repo"): the egress proxy did not come up — NOT shipping (see $id/egress.log)"
       exec 8<&-
       # No pid to kill (that is what failed), so reap by the socket path, which mktemp made unique.
-      pkill -f "egress_proxy.py $TEST_EGRESS_DIR/egress.sock" 2>/dev/null || true
+      # pkill -f takes an extended regex and the path comes from NIGHTSHIFT_WORKTREES / TMPDIR, so it
+      # is escaped and anchored: a `[` or `+` in it would otherwise miss this proxy or hit a sibling's.
+      pkill -f -- "egress_proxy\.py $(printf '%s' "$TEST_EGRESS_DIR/egress.sock" | sed 's/[][\\.*^$+?(){}|]/\\&/g')\$" 2>/dev/null || true
       rm -rf "$TEST_EGRESS_DIR"
       return 2
     fi
