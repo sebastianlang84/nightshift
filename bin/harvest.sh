@@ -268,8 +268,12 @@ manual_verdict() { # selector verdict [reason]
 # The probe is pure observation (no model, no network, no ledger write), so it is safe to run on
 # every harvest. Non-fatal by contract: a probe failure must never take down reconciliation.
 run_probe() { # [--print]
+  local i args=()
+  for i in "${!REPO_PATHS[@]}"; do
+    args+=(--base "${REPO_PATHS[$i]}" "${REPO_BASES[$i]:-}")
+  done
   python3 "$NIGHTSHIFT_HOME/lib/probe_findings.py" \
-    --ledger "$LEDGER" --out "$PROBE_SNAPSHOT" "$@"
+    --ledger "$LEDGER" --out "$PROBE_SNAPSHOT" "${args[@]}" "$@"
 }
 
 # Age in whole days, for the "how long has this been rotting" column.

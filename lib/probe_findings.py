@@ -7,7 +7,7 @@ shows up as "TODO" forever — in the digest, in the dashboard, and in the explo
 known-work block.
 
 This probe supplies the one signal the system already has: `code_sig` (ADR 0014), the hash of the
-finding's target files at the moment it was recorded. Recomputing it against today's HEAD splits
+finding's target files at the moment it was recorded. Recomputing it against the configured base splits
 the open findings into three honest states:
 
     untouched     — signature unchanged: the target code was never touched, so the finding
@@ -21,7 +21,7 @@ Output is a derived SNAPSHOT (state/findings-probe.json), not ledger events: the
 it never claims a verdict. The one thing it carries across runs is each item's `verify` block —
 an earned model result — which is kept only while the signature it was made against still holds.
 
-    probe_findings.py --ledger L --out S [--print]
+    probe_findings.py --ledger L --out S [--base REPO REF] [--print]
     probe_findings.py record-verify --out S --item ID --sig SIG --result open|resolved [--reason R]
 """
 from __future__ import annotations
@@ -138,26 +138,36 @@ def dimension(row: dict) -> str:
 
 
 def path_like(name: str) -> bool:
-    """Does this segment plausibly name a file? Only consulted when NOTHING resolved at HEAD: a
+    """Does this segment plausibly name a file? Only consulted when NOTHING resolved at the base: a
     last-resort fingerprint can be free-form model prose, which hashes to `absent:` for every
     entry and would otherwise read as a permanent false 'code_changed'."""
     return "/" in name or "." in name
 
 
-def code_sig(repo: str, files: list[str]) -> tuple[str, int] | None:
-    """Recompute ADR 0014's content signature at HEAD -> (signature, files that resolved).
+def resolve_base_sha(repo: str, configured: str = "") -> str | None:
+    """Use the Runner's shared resolver, then pin its ref so every target sees one tree."""
+    helper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "base_resolution.sh")
+    p = subprocess.run(
+        ["bash", "-c", 'source "$1"; ref=$(resolve_base "$2" "$3"); '
+         'git -C "$2" rev-parse --verify "$ref^{commit}"',
+         "probe-base", helper, repo, configured], capture_output=True, text=True)
+    return p.stdout.strip() if p.returncode == 0 else None
+
+
+def code_sig(repo: str, files: list[str], ref: str) -> tuple[str, int] | None:
+    """Recompute ADR 0014's content signature at ref -> (signature, files that resolved).
 
     None when the repo cannot be read at all — an unreachable repo must yield `unknown`, never a
     false 'changed' (fail closed). Deliberately mirrors the Runner's `code_sig()` byte for byte,
     including the `absent:<path>` placeholder, so the two signatures are comparable."""
-    if not files:
+    if not files or not ref:
         return None
     if subprocess.run(["git", "-C", repo, "rev-parse", "--git-dir"],
                       capture_output=True).returncode != 0:
         return None
     blobs, resolved = [], 0
     for f in files:
-        p = subprocess.run(["git", "-C", repo, "rev-parse", f"HEAD:{f}"],
+        p = subprocess.run(["git", "-C", repo, "rev-parse", f"{ref}:{f}"],
                            capture_output=True, text=True)
         if p.returncode == 0:
             blobs.append(p.stdout.strip())
@@ -167,14 +177,14 @@ def code_sig(repo: str, files: list[str]) -> tuple[str, int] | None:
     return hashlib.sha1(("\n".join(blobs) + "\n").encode()).hexdigest()[:12], resolved
 
 
-def classify(row: dict) -> tuple[str, str | None, str]:
+def classify(row: dict, base_sha: str | None) -> tuple[str, str | None, str]:
     """-> (state, code_sig_now, note)."""
     repo = str(row.get("repo") or "")
     stored = str(row.get("code_sig") or "")
     files = targets(str(row.get("fingerprint") or ""))
     if not stored:
         return "unknown", None, "recorded before content signatures (ADR 0014) — no baseline"
-    probed = code_sig(repo, files)
+    probed = code_sig(repo, files, base_sha or "")
     if probed is None:
         return "unknown", None, "repo unreadable — not guessing"
     current, resolved = probed
@@ -208,22 +218,29 @@ def write_snapshot(path: str, data: dict) -> None:
     os.replace(tmp, path)
 
 
-def probe(ledger: str, out: str) -> dict:
+def probe(ledger: str, out: str, bases: dict[str, str] | None = None) -> dict:
     prev = {i.get("item"): i for i in load_snapshot(out).get("items", [])
             if isinstance(i, dict)}
     items = []
+    bases = bases or {}
+    commits: dict[str, str | None] = {}
     for row in open_findings(read_ledger(ledger)):
-        state, current, note = classify(row)
+        repo = str(row.get("repo") or "")
+        if repo not in commits:
+            commits[repo] = resolve_base_sha(repo, bases.get(repo, ""))
+        base_sha = commits[repo]
+        state, current, note = classify(row, base_sha)
         item = str(row.get("item") or "")
         entry = {
             "item": item,
-            "repo": str(row.get("repo") or ""),
+            "repo": repo,
             "fingerprint": str(row.get("fingerprint") or ""),
             "dimension": dimension(row),
             "summary": str(row.get("summary") or ""),
             "ts": str(row.get("ts") or ""),
             "code_sig": str(row.get("code_sig") or ""),
             "code_sig_now": current or "",
+            "base_sha": base_sha or "",
             "state": state,
             "note": note,
         }
@@ -288,6 +305,8 @@ def main(argv: list[str]) -> int:
     rv.add_argument("--reason", default="")
     ap.add_argument("--ledger")
     ap.add_argument("--out", dest="out_top")
+    ap.add_argument("--base", nargs=2, action="append", default=[], metavar=("REPO", "REF"),
+                    help="configured base per repo (repeatable; otherwise auto-detected)")
     ap.add_argument("--print", dest="do_print", action="store_true")
     args = ap.parse_args(argv)
 
@@ -298,7 +317,7 @@ def main(argv: list[str]) -> int:
         ap.error("--ledger and --out are required")
     if not os.path.isfile(args.ledger):
         return 0                       # no ledger yet — nothing to probe, not an error
-    data = probe(args.ledger, args.out_top)
+    data = probe(args.ledger, args.out_top, dict(args.base))
     if args.do_print:
         print_table(data)
     return 0

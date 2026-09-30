@@ -349,7 +349,8 @@ never push outside `nightshift/*` (see [`docs/design/hook-spec.md`](design/hook-
   bin/harvest.sh close <item> [reason] # record `resolved` (quote a multi-word reason)
   ```
   The `STATE` column comes from the freshness probe that runs at the end of every harvest — it
-  recomputes each finding's content signature and never invents a verdict:
+  recomputes each finding's content signature on its configured base (or the auto-detected base),
+  independently of the operator checkout's HEAD, and never invents a verdict:
 
   | State | Means | What to do |
   |-------|-------|------------|

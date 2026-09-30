@@ -268,16 +268,16 @@ finding_fingerprint() { # finding.json -> canonical identity or ""
 }
 
 # Content signature of a finding's target (ADR 0014, invalidation). A short hash of the target files'
-# blob shas at HEAD: when the code under a finding changes, the signature changes, and a previously
+# blob shas at the inspected tree: when the code changes, the signature changes, and a previously
 # suppressed identity (resolved/abandoned/dropped) becomes eligible again — a `wontfix` alone stays
 # permanent. Empty when there is no locatable target.
-code_sig() { # repo finding.json -> 12-char signature or ""
-  local repo="$1" fj="$2" files sig
+code_sig() { # repo finding.json [ref] -> 12-char signature or ""
+  local repo="$1" fj="$2" ref="${3:-HEAD}" files sig
   files=$(jq -r '(.files // [ .file ]) | map(select(. != null and . != "")) | unique | .[]' "$fj" 2>/dev/null || true)
   [ -n "$files" ] || { echo ""; return; }
   sig=$(while IFS= read -r f; do
           [ -n "$f" ] || continue
-          git -C "$repo" rev-parse "HEAD:$f" 2>/dev/null || echo "absent:$f"
+          git -C "$repo" rev-parse "$ref:$f" 2>/dev/null || echo "absent:$f"
         done <<< "$files" | sha1sum | cut -c1-12)
   echo "$sig"
 }
@@ -2928,8 +2928,12 @@ repo_cfg_base() { # repo -> the rulebook's `base:` for it ("" = auto-detect)
 }
 
 run_probe() { # refresh the freshness snapshot; never fatal — it is derived, disposable state
+  local i args=()
+  for i in "${!REPO_PATHS[@]}"; do
+    args+=(--base "${REPO_PATHS[$i]}" "${REPO_BASES[$i]:-}")
+  done
   python3 "$NIGHTSHIFT_HOME/lib/probe_findings.py" \
-    --ledger "$LEDGER" --out "$PROBE_SNAPSHOT" >/dev/null 2>&1 \
+    --ledger "$LEDGER" --out "$PROBE_SNAPSHOT" "${args[@]}" >/dev/null 2>&1 \
     || log "findings probe failed (non-fatal)"
 }
 
@@ -2951,11 +2955,13 @@ verify_findings() {
     if over_budget; then log "verify: time budget exhausted — stop"; break; fi
     row=$(base64 -d <<<"$row")
     item=$(jq -r '.item' <<<"$row");        repo=$(jq -r '.repo' <<<"$row")
-    fp=$(jq -r '.fingerprint' <<<"$row");   sig=$(jq -r '.code_sig_now' <<<"$row")
+    fp=$(jq -r '.fingerprint' <<<"$row")
     summary=$(jq -r '.summary' <<<"$row");  dim=$(jq -r '.dimension' <<<"$row")
     ts=$(jq -r '.ts' <<<"$row")
     [ -d "$repo/.git" ] || continue
-    base="$(resolve_base "$repo" "$(repo_cfg_base "$repo")")"
+    # The probe hashes this immutable commit, not a ref that can move before worktree creation.
+    base=$(jq -r '.base_sha // ""' <<<"$row")
+    [ -n "$base" ] || continue
     wt="$WORKTREES_DIR/verify-$(date +%s%N)"
     setup_worktree "$repo" "$wt" "$base" || { log "verify: no worktree for $(basename "$repo") — skip"; continue; }
     id="$RUNS_DIR/verify-$(date +%s%N)"; mkdir -p "$id"
@@ -2964,6 +2970,8 @@ verify_findings() {
     jq -nc --arg s "$summary" --arg fp "$fp" --arg d "$dim" --arg ts "$ts" \
       --argjson files "$(jq -c '[(.fingerprint|split(":")[0]|split(","))[]|select(length>0)]' <<<"$row")" \
       '{summary:$s,fingerprint:$fp,dimension:$d,recorded:$ts,files:$files}' > "$id/finding.json"
+    # Cache only the content actually inspected by Verify, even if the base ref advances meanwhile.
+    sig=$(code_sig "$wt" "$id/finding.json")
     verify_rc=0
     run_agent verify "$wt" "$id" || verify_rc=$?
     remove_worktree "$repo" "$wt"
@@ -3409,7 +3417,7 @@ main() {
     log "quota fallback: $NIGHTSHIFT_QUOTA_FALLBACK_AGENT (activated only after a structured rejected quota event)"
     log_model_selection codex NIGHTSHIFT_CODEX_MODEL "$RB_CODEX_MODEL"
   fi
-  local made=0 considered=0 findings=0 repo mode cfgbase id fp fnj iter verdict wt base b summary open="" pass=0 progress ship_progress stop_reason=ok disp rfind farr n_find k fd dim explore_rc n_partial fix_rc review_rc hook_retry=0 retry_ok=0 retry_why="" frc=0 fix_cap=0
+  local made=0 considered=0 findings=0 repo mode cfgbase id fp fnj iter verdict wt base base_sha b summary open="" pass=0 progress ship_progress stop_reason=ok disp rfind farr n_find k fd dim explore_rc n_partial fix_rc review_rc hook_retry=0 retry_ok=0 retry_why="" frc=0 fix_cap=0
   local runner_pid="$BASHPID"
   trap 'interrupted_digest TERM 143' TERM
   trap 'interrupted_digest INT 130' INT
@@ -3469,6 +3477,9 @@ main() {
     if ! setup_worktree "$repo" "$wt" "$base"; then
       log "  $(basename "$repo"): could not create worktree — skip"; continue
     fi
+    # Findings and each independent fix must describe the exact base tree Explore is reading.
+    # $base stays the ref name: finalize hands it to open_pr as the PR base.
+    base_sha=$(git -C "$wt" rev-parse HEAD)
     # codemap: nightshift keeps the structural index current ITSELF — never a manual step. Indexing is
     # local + incremental (seconds), so just do it every run before explore; the index is always
     # current. --approve makes first-time automatic: the rulebook is already the human's consent
@@ -3598,7 +3609,7 @@ main() {
       # Content signature of the finding's target (ADR 0014): lets a suppressed identity become
       # eligible again once the underlying code changes. Persist the resolved fingerprint, the
       # selected dimension, AND the code signature so finalize/ledger/dedup all read one identity.
-      csig=$(code_sig "$repo" "$fd/finding.json")
+      csig=$(code_sig "$repo" "$fd/finding.json" "$base_sha")
       fnj=$(jq --arg fp "$fp" --arg d "$dim" --arg cs "$csig" \
               '.fingerprint=$fp | .dimension=$d | .code_sig=$cs' "$fd/finding.json") \
         && printf '%s' "$fnj" > "$fd/finding.json"
@@ -3650,7 +3661,7 @@ main() {
 
       # One finding = one branch = one fresh worktree from base (diffs stay independent).
       wt="$WORKTREES_DIR/$(basename "$id")-f$k"
-      if ! setup_worktree "$repo" "$wt" "$base"; then
+      if ! setup_worktree "$repo" "$wt" "$base_sha"; then
         log "  $(basename "$repo"): could not create worktree for finding — skip"; continue
       fi
       iter=0; verdict="revise"; gate=""; hook_retry=0; fix_cap="$MAX_FIX_ITER"

@@ -110,4 +110,75 @@ verify_findings
 [ "$(snap_get item-retry result)" = open ] \
   || { echo "the unchanged finding was not retried after verify recovered" >&2; exit 1; }
 
+# --- only the configured base advances; the operator checkout stays behind ----------
+printf 'teh base defect\n' > "$REPO/README.md"
+printf '# retrun base value\n' > "$REPO/app.py"
+git -C "$REPO" add README.md app.py; git -C "$REPO" commit -qm base-before
+finding item-base README.md
+finding item-cache app.py
+checkout_sha=$(git -C "$REPO" rev-parse HEAD)
+git -C "$REPO" update-ref refs/remotes/origin/main "$checkout_sha"
+git -C "$REPO" switch -qc develop
+printf '# retrun base value\n# unrelated\n' > "$REPO/app.py"
+git -C "$REPO" commit -qam base-unfixed
+changed_sig=$(sig_of app.py)
+git -C "$REPO" update-ref refs/remotes/origin/develop HEAD
+git -C "$REPO" checkout -q --detach "$checkout_sha"
+REPO_PATHS=("$REPO") REPO_BASES=(develop)
+verify_findings
+[ "$(snap_get item-cache result)" = open ] \
+  || { echo "a configured-base change must reach Verify even with checkout HEAD unchanged" >&2; exit 1; }
+[ "$(snap_get item-cache sig)" = "$changed_sig" ] \
+  || { echo "Verify must cache the signature of the configured base it inspected" >&2; exit 1; }
+[ "$(snap_get item-base result)" = "" ] \
+  || { echo "a target unchanged on the base must not reach Verify" >&2; exit 1; }
+runs_before=$(find "$RUNS_DIR" -maxdepth 1 -name 'verify-*' | wc -l)
+verify_findings
+[ "$(find "$RUNS_DIR" -maxdepth 1 -name 'verify-*' | wc -l)" = "$runs_before" ] \
+  || { echo "an unchanged configured base must retain its negative cache" >&2; exit 1; }
+
+git -C "$REPO" switch -q develop
+printf 'the base defect\n' > "$REPO/README.md"
+printf '# return base value\n' > "$REPO/app.py"
+git -C "$REPO" commit -qam base-fixed
+git -C "$REPO" update-ref refs/remotes/origin/develop HEAD
+git -C "$REPO" checkout -q --detach "$checkout_sha"
+verify_findings
+[ "$(verdict_of item-base)" = resolved ] \
+  || { echo "a fix only on the configured base must resolve an untouched-checkout finding" >&2; exit 1; }
+[ "$(verdict_of item-cache)" = resolved ] \
+  || { echo "advancing only the base must invalidate a prior negative Verify result" >&2; exit 1; }
+[ "$(git -C "$REPO" rev-parse HEAD)" = "$checkout_sha" ] \
+  || { echo "Verify must leave the operator checkout unchanged" >&2; exit 1; }
+
+# --- a base ref moves between probing and worktree creation -------------------------
+finding item-pinned README.md
+git -C "$REPO" switch -q develop
+printf 'teh pinned defect\n' > "$REPO/README.md"
+git -C "$REPO" commit -qam pinned-unfixed
+probed_sha=$(git -C "$REPO" rev-parse HEAD)
+printf 'the pinned defect\n' > "$REPO/README.md"
+git -C "$REPO" commit -qam pinned-fixed
+later_sha=$(git -C "$REPO" rev-parse HEAD)
+git -C "$REPO" update-ref refs/remotes/origin/develop "$probed_sha"
+git -C "$REPO" checkout -q --detach "$checkout_sha"
+setup_saved=$(declare -f setup_worktree)
+observed_base=""
+setup_worktree() {
+  observed_base="$3"
+  git -C "$1" update-ref refs/remotes/origin/develop "$later_sha"
+  git -C "$1" worktree add -q --detach "$2" "$3"
+}
+verify_findings
+eval "$setup_saved"
+[ "$observed_base" = "$probed_sha" ] \
+  || { echo "Verify must inspect the pinned probe commit when the ref moves" >&2; exit 1; }
+[ "$(verdict_of item-pinned)" = "" ] \
+  || { echo "Verify inspected a newer tree than the probe" >&2; exit 1; }
+[ "$(snap_get item-pinned result)" = "" ] \
+  || { echo "a cached result for the old tree must expire after the base moves" >&2; exit 1; }
+verify_findings
+[ "$(verdict_of item-pinned)" = resolved ] \
+  || { echo "the next pass must inspect the advanced base" >&2; exit 1; }
+
 echo "test-finding-verify: ok"
