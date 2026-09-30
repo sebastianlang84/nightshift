@@ -3417,7 +3417,7 @@ main() {
     log "quota fallback: $NIGHTSHIFT_QUOTA_FALLBACK_AGENT (activated only after a structured rejected quota event)"
     log_model_selection codex NIGHTSHIFT_CODEX_MODEL "$RB_CODEX_MODEL"
   fi
-  local made=0 considered=0 findings=0 repo mode cfgbase id fp fnj iter verdict wt base b summary open="" pass=0 progress ship_progress stop_reason=ok disp rfind farr n_find k fd dim explore_rc n_partial fix_rc review_rc hook_retry=0 retry_ok=0 retry_why="" frc=0 fix_cap=0
+  local made=0 considered=0 findings=0 repo mode cfgbase id fp fnj iter verdict wt base base_sha b summary open="" pass=0 progress ship_progress stop_reason=ok disp rfind farr n_find k fd dim explore_rc n_partial fix_rc review_rc hook_retry=0 retry_ok=0 retry_why="" frc=0 fix_cap=0
   local runner_pid="$BASHPID"
   trap 'interrupted_digest TERM 143' TERM
   trap 'interrupted_digest INT 130' INT
@@ -3478,7 +3478,8 @@ main() {
       log "  $(basename "$repo"): could not create worktree — skip"; continue
     fi
     # Findings and each independent fix must describe the exact base tree Explore is reading.
-    base=$(git -C "$wt" rev-parse HEAD)
+    # $base stays the ref name: finalize hands it to open_pr as the PR base.
+    base_sha=$(git -C "$wt" rev-parse HEAD)
     # codemap: nightshift keeps the structural index current ITSELF — never a manual step. Indexing is
     # local + incremental (seconds), so just do it every run before explore; the index is always
     # current. --approve makes first-time automatic: the rulebook is already the human's consent
@@ -3608,7 +3609,7 @@ main() {
       # Content signature of the finding's target (ADR 0014): lets a suppressed identity become
       # eligible again once the underlying code changes. Persist the resolved fingerprint, the
       # selected dimension, AND the code signature so finalize/ledger/dedup all read one identity.
-      csig=$(code_sig "$repo" "$fd/finding.json" "$base")
+      csig=$(code_sig "$repo" "$fd/finding.json" "$base_sha")
       fnj=$(jq --arg fp "$fp" --arg d "$dim" --arg cs "$csig" \
               '.fingerprint=$fp | .dimension=$d | .code_sig=$cs' "$fd/finding.json") \
         && printf '%s' "$fnj" > "$fd/finding.json"
@@ -3660,7 +3661,7 @@ main() {
 
       # One finding = one branch = one fresh worktree from base (diffs stay independent).
       wt="$WORKTREES_DIR/$(basename "$id")-f$k"
-      if ! setup_worktree "$repo" "$wt" "$base"; then
+      if ! setup_worktree "$repo" "$wt" "$base_sha"; then
         log "  $(basename "$repo"): could not create worktree for finding — skip"; continue
       fi
       iter=0; verdict="revise"; gate=""; hook_retry=0; fix_cap="$MAX_FIX_ITER"
