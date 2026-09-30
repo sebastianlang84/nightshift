@@ -19,6 +19,14 @@ printf '# Demo\n\nThis is teh demo.\n' > "$TMP/repo/README.md"
 git -C "$TMP/repo" -c user.name=test -c user.email=test@localhost add -A
 git -C "$TMP/repo" -c user.name=test -c user.email=test@localhost commit -q -m initial
 git -C "$TMP/repo" push -q -u origin main
+# Explore reads develop while the operator stays on main with a different target blob.
+git -C "$TMP/repo" switch -qc develop
+printf '# Demo\n\nThis is teh configured-base demo.\n' > "$TMP/repo/README.md"
+git -C "$TMP/repo" -c user.name=test -c user.email=test@localhost commit -qam develop
+git -C "$TMP/repo" push -q origin develop
+base_sha=$(git -C "$TMP/repo" rev-parse HEAD)
+base_sig=$(git -C "$TMP/repo" rev-parse HEAD:README.md | sha1sum | cut -c1-12)
+git -C "$TMP/repo" switch -q main
 
 cat > "$TMP/rulebook.yaml" <<EOF
 branch_prefix: nightshift/
@@ -31,6 +39,7 @@ dimensions:
 repos:
   - path: $TMP/repo
     mode: findings-only
+    base: develop
 EOF
 
 RULEBOOK="$TMP/rulebook.yaml" NIGHTSHIFT_AGENT=mock NIGHTSHIFT_CODEMAP=0 NIGHTSHIFT_OPEN_PR=0 \
@@ -42,6 +51,13 @@ LEDGER="$TMP/state/ledger.jsonl"
 # Surfaced a finding, shipped nothing.
 [ "$(jq -s '[.[]|select(.outcome=="finding")]|length' "$LEDGER")" -ge 1 ] || { echo "no finding surfaced" >&2; exit 1; }
 [ "$(jq -s '[.[]|select(.outcome=="shipped")]|length' "$LEDGER")" -eq 0 ] || { echo "findings-only shipped a branch" >&2; exit 1; }
+jq -es --arg sig "$base_sig" 'all(.[]|select(.outcome=="finding"); .code_sig==$sig)' "$LEDGER" >/dev/null \
+  || { echo "new findings must be signed against Explore's base, not checkout HEAD" >&2; exit 1; }
+RULEBOOK="$TMP/rulebook.yaml" NIGHTSHIFT_STATE_DIR="$TMP/state" \
+  "$ROOT/bin/harvest.sh" probe >"$TMP/probe-out"
+jq -e --arg sha "$base_sha" 'all(.items[]; .state=="untouched" and .base_sha==$sha)' \
+  "$TMP/state/findings-probe.json" >/dev/null \
+  || { echo "harvest must probe the same configured base as Explore" >&2; exit 1; }
 # The loop stopped after ONE pass with the explicit findings-only reason.
 grep -q "pass 1: only surfaced findings, no shippable work — stop" "$TMP/stderr" \
   || { echo "missing explicit findings-only stop reason" >&2; cat "$TMP/stderr" >&2; exit 1; }

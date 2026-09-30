@@ -115,4 +115,31 @@ probe
   || { echo "a new finding after an old terminal verdict must reopen the identity" >&2; exit 1; }
 [ "$(rows)" = 4 ] || { echo "the reopened identity must appear in todos" >&2; exit 1; }
 
+# Auto-detection must observe a remote base advancing while checkout HEAD stays behind.
+git -C "$REPO" branch checkout-snapshot
+printf 'fixed on remote base\n' > "$REPO/drift.md"
+git -C "$REPO" commit -qam remote-base
+remote_sha=$(git -C "$REPO" rev-parse HEAD)
+remote_sig=$(sig_of drift.md)
+git -C "$REPO" update-ref refs/remotes/origin/main "$remote_sha"
+git -C "$REPO" checkout -q checkout-snapshot
+probe
+[ "$(state_of item-drift-reopened)" = code_changed ] \
+  || { echo "auto-detected origin/main must outrank an unchanged checkout HEAD" >&2; exit 1; }
+jq -e --arg sha "$remote_sha" --arg sig "$remote_sig" \
+  '.items[]|select(.item=="item-drift-reopened")|.base_sha==$sha and .code_sig_now==$sig' "$SNAP" >/dev/null
+# A configured local base must win over auto-detection when it has no remote counterpart.
+python3 "$PROBE" --ledger "$LEDGER" --out "$SNAP" --base "$REPO" checkout-snapshot
+[ "$(state_of item-drift-reopened)" = untouched ] \
+  || { echo "a configured local base must override auto-detected origin/main" >&2; exit 1; }
+# Missing configured refs use the same fallback as the Runner.
+python3 "$PROBE" --ledger "$LEDGER" --out "$SNAP" --base "$REPO" missing-base
+[ "$(state_of item-drift-reopened)" = code_changed ] \
+  || { echo "a missing configured base must fall back to the shared auto-detection" >&2; exit 1; }
+jq -nc --arg r "$TMP/missing-repo" \
+  '{item:"item-unreadable",repo:$r,outcome:"finding",fingerprint:"drift.md:bug:anchor",code_sig:"deadbeefdead"}' >> "$LEDGER"
+probe
+[ "$(state_of item-unreadable)" = unknown ] \
+  || { echo "an unreadable base must stay unknown, not hash absent files as changed" >&2; exit 1; }
+
 echo "test-finding-probe: ok"

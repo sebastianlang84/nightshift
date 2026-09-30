@@ -29,7 +29,8 @@ unrelated edit, or a reformat.
 **1. Two layers, cheapest first, both fail closed.**
 
 *Layer 1 — deterministic probe (`lib/probe_findings.py`).* For every open finding, recompute
-`code_sig` at HEAD and classify: `untouched` (signature matches — certainly still open),
+`code_sig` at the configured base (using the shared base resolver) and classify:
+`untouched` (signature matches — certainly still open),
 `code_changed` (signature differs — may be fixed), `unknown` (no baseline signature on pre-0014
 rows, an unreadable repo, or a fingerprint with no file targets). No model, no network. It runs at
 the end of every `harvest.sh`.
@@ -51,7 +52,10 @@ outranks it.
 
 **4. A verify result is remembered per signature.** The outcome is stored in the snapshot keyed to
 the signature it was made against. An unchanged finding is therefore never re-verified, and an item
-re-enters the queue exactly when its code moves again. That, plus `max_verifies_per_run` (default
+re-enters the queue exactly when its code moves again. The probe pins the base commit in the
+snapshot; Verify reads that same commit and caches the target signature from its worktree.
+New findings also store the signature of the base tree Explore inspected, independently of the
+operator checkout's HEAD. That, plus `max_verifies_per_run` (default
 5, `0` disables the stage entirely), bounds what closure can cost per night.
 
 **5. A human front door for what the machine will not decide.** `harvest.sh todos` lists open
