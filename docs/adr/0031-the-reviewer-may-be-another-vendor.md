@@ -122,7 +122,7 @@ agent process too"). Until that exists, `pi_allow_fix` is the host accepting a k
 
 With `primary: pi` the amendment above put Fix and Review on the same model again: glm-5.3-flash
 judged glm-5.3-flash's own fixes, which is exactly the author's-twin problem decision 1 exists to
-avoid. This host therefore routes Review to codex (`review_agent: codex`, `codex_model: gpt-6-sol`,
+avoid. This host therefore routes Review to codex (`review_agent: codex`, `codex_model: gpt-6.1-sol` since 2026-09-29,
 `codex_effort: medium`). The cost argument that moved the night to pi does not apply here: codex
 runs on the operator's subscription, not per token, and a night holds a handful of reviews.
 
