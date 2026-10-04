@@ -2853,7 +2853,8 @@ $(cat "$id/worknote.md")" >"$id/commit-hook.log" 2>&1 || crc=$?
     fi
     rm -f "$id/commit-hook.log"
     # Detaching keeps index and working tree: the rejected tree stays in place for the retry.
-    git -C "$wt" checkout -q --detach >/dev/null 2>&1 || true
+    # It fires post-checkout too, from the tree read-tree just restored — so it takes the redirect.
+    git -C "$wt" ${hookargs[@]+"${hookargs[@]}"} checkout -q --detach >/dev/null 2>&1 || true
     git -C "$repo" branch -q -D "$branch" >/dev/null 2>&1 \
       || log "  $(basename "$repo"): cleanup warning — local branch remains: $branch"
     return "$crc"
@@ -2873,7 +2874,7 @@ $(cat "$id/worknote.md")" >"$id/commit-hook.log" 2>&1 || crc=$?
     [ -n "$ctree" ] && git -C "$wt" diff-tree -r --name-status "$rtree" "$ctree" 2>/dev/null \
       | head -20 | sed 's/^/    hook changed: /' >&2 || true
     ledger_append "$(basename "$id")" "$repo" "$fp" "" "" "commit-failed" "$summary" "" "" "$verif" "$dim" "$type" "$csig"
-    git -C "$wt" checkout -q --detach >/dev/null 2>&1 || true
+    git -C "$wt" ${hookargs[@]+"${hookargs[@]}"} checkout -q --detach >/dev/null 2>&1 || true
     git -C "$repo" branch -q -D "$branch" >/dev/null 2>&1 \
       || log "  $(basename "$repo"): cleanup warning — local branch remains: $branch"
     return 1
@@ -2882,7 +2883,7 @@ $(cat "$id/worknote.md")" >"$id/commit-hook.log" 2>&1 || crc=$?
   if ! git -c core.hooksPath="$HOOKS_DIR" -C "$wt" push -q origin "$sha:refs/heads/$branch"; then
     log "  $(basename "$repo"): push failed — not shipped: $branch"
     ledger_append "$(basename "$id")" "$repo" "$fp" "$branch" "$sha" "push-failed" "$summary" "" "" "$verif" "$dim" "$type" "$csig"
-    git -C "$wt" checkout -q --detach >/dev/null 2>&1 || true
+    git -C "$wt" ${hookargs[@]+"${hookargs[@]}"} checkout -q --detach >/dev/null 2>&1 || true
     git -C "$repo" branch -q -D "$branch" >/dev/null 2>&1 \
       || log "  $(basename "$repo"): cleanup warning — local branch remains: $branch"
     return 1
