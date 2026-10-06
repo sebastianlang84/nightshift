@@ -372,6 +372,29 @@ git -C "$TMP/hookwt" add -A
 git -C "$TMP/hookwt" -c user.name=n -c user.email=n@localhost commit -q -m unguarded
 [ -e "$FIRED" ] || fail "control failed: the worktree hook never fires, so §13 proves nothing"
 
+# `checkout` fires post-checkout from the same directory. finalize's failure paths detach right
+# after `read-tree --reset -u` has put the candidate's `.githooks/` back in the tree, so a
+# candidate-written post-checkout is just as reachable there as a pre-commit is at the commit.
+CO_FIRED="$TMP/checkout-hook-fired"
+printf '#!/bin/sh\ntouch %s\n' "$CO_FIRED" > "$TMP/hookwt/.githooks/post-checkout"
+chmod +x "$TMP/hookwt/.githooks/post-checkout"
+( set +u; NIGHTSHIFT_SOURCED=1 . "$ROOT/bin/nightshift.sh" >/dev/null 2>&1; set +e
+  mapfile -t ha < <(worktree_hook_args "$HREPO2" "$TMP/hookwt")
+  git -C "$TMP/hookwt" "${ha[@]}" checkout -q -b guarded-co
+  git -C "$TMP/hookwt" "${ha[@]}" checkout -q --detach ) \
+  || fail "the guarded checkout did not run at all"
+[ -e "$CO_FIRED" ] && fail "a worktree-resident post-checkout hook executed for a Runner checkout"
+git -C "$TMP/hookwt" checkout -q --detach
+[ -e "$CO_FIRED" ] || fail "control failed: the worktree post-checkout hook never fires, so this proves nothing"
+# The override only helps where it is passed: every checkout finalize runs — the failure-path
+# detaches included — must carry it.
+( set +u; NIGHTSHIFT_SOURCED=1 . "$ROOT/bin/nightshift.sh" >/dev/null 2>&1; set +e
+  body="$(declare -f finalize)"
+  cos="$(grep 'git .*checkout' <<<"$body")"
+  [ -n "$cos" ] || { echo "finalize runs no checkout — this check is stale" >&2; exit 1; }
+  ! grep -qv 'hookargs' <<<"$cos" ) \
+  || fail "finalize runs a checkout without the worktree hook redirect"
+
 # An absolute hooksPath outside the worktree is not candidate-writable — leave it alone.
 git -C "$HREPO2" config core.hooksPath /opt/somewhere/hooks
 ( set +u; NIGHTSHIFT_SOURCED=1 . "$ROOT/bin/nightshift.sh" >/dev/null 2>&1; set +e
