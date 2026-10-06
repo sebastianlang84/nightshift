@@ -1567,13 +1567,13 @@ repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
 }
 
 # ---- pi adapter (first-party CLI headless, ADR 0031) ----
-# READ-ONLY STAGES ONLY, and that is a safety boundary, not a convenience. The Fix stage's write
+# READ-ONLY STAGES BY DEFAULT, and that is a safety boundary, not a convenience. The Fix stage's write
 # confinement (R8, hook-spec.md Layer 2b) is enforced per adapter: claude by a PreToolUse guard that
 # rejects Write/Edit outside the worktree, codex by an OS-level `--sandbox workspace-write`. pi has
 # NEITHER — its tool allowlist can withhold `edit`/`write`/`bash` entirely, but it offers no hook and
 # no sandbox that could bound an absolute path once `write` is granted. A read-only stage needs no
 # such bound (no write primitive exists to confine), so pi is admitted for exactly those and refuses
-# `fix` outright rather than shipping an unconfined writer.
+# `fix` unless the host opts in (`pi_allow_fix`, pi_run below) — and then only inside the hull below.
 # The write confinement pi itself cannot provide (hook-spec.md Layer 2b): the same bwrap hull the
 # ship gate runs in (ADR 0026), wrapped around the AGENT process instead of the test command. It is
 # what turns `pi_allow_fix` from an accepted risk into a bounded one — the worktree and the stage's
@@ -1666,15 +1666,17 @@ pi_sandbox_argv() { # worktree pi_home item_dir -> fills TEST_SANDBOX_ARGV (empt
 
 pi_run() { # stage workdir item_dir
   local stage="$1" wd="$2" id="$3" prompt model provider tools rc=0 parse_rc=0
-  # The Fix stage is refused unless the HOST explicitly takes the risk (`agent.pi_allow_fix: true`,
-  # env NIGHTSHIFT_PI_ALLOW_FIX=1). What is being traded away: the other two adapters confine a
-  # Fix-stage write to the worktree by a MECHANISM — claude's PreToolUse guard rejects a Write/Edit
-  # resolving outside it, codex's OS sandbox makes the write impossible — and pi has neither. With
-  # this on, the only thing keeping a write inside the worktree is the model using relative paths.
-  # The realistic failure is not malice but a confused absolute path: a worktree named `partflow`
-  # and a live repo at ~/partflow are one keystroke apart, and such a write appears in NO diff, so
-  # the morning branch review cannot catch it. `bash` stays withheld regardless (see the profile
-  # below), so a fix can still edit files but never execute anything.
+  # The Fix stage is refused unless the HOST explicitly opts in (`agent.pi_allow_fix: true`, env
+  # NIGHTSHIFT_PI_ALLOW_FIX=1). The other two adapters confine a Fix-stage write to the worktree by a
+  # MECHANISM of their own — claude's PreToolUse guard rejects a Write/Edit resolving outside it,
+  # codex's OS sandbox makes the write impossible — and pi has neither, so the Runner supplies one:
+  # pi_sandbox_argv's bwrap hull (ADR 0032), below at launch, leaves only the worktree and the stage's
+  # agent dir writable and refuses the stage when bwrap is missing. The failure it bounds is not
+  # malice but a confused absolute path: a worktree named `partflow` and a live repo at ~/partflow
+  # are one keystroke apart, and such a write appears in NO diff, so the morning branch review
+  # cannot catch it — which is exactly what NIGHTSHIFT_PI_SANDBOX=none brings back. The hull shares
+  # the host's network, so only filesystem reach is narrowed. `bash` stays withheld regardless (see
+  # the profile below), so a fix can still edit files but never execute anything.
   local allow_fix="${NIGHTSHIFT_PI_ALLOW_FIX:-}"
   [ -n "$allow_fix" ] || { [ "${RB_PI_ALLOW_FIX:-false}" = true ] && allow_fix=1; }
   if [ "$stage" = fix ] && [ "${allow_fix:-0}" != 1 ]; then

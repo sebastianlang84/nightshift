@@ -76,11 +76,14 @@ limits:
 #   # decides, as before; an explicitly set env var still outranks this key, so a one-off hand run
 #   # needs no edit here.
 #   primary: pi
-#   # Lets pi serve the FIX stage, which it otherwise declines. Read ADR 0031 before setting this:
-#   # the other adapters keep a Fix-stage write inside the worktree by a mechanism (claude's
-#   # PreToolUse guard, codex's OS sandbox) and pi has neither, so with this on the only thing
-#   # keeping a write inside the tree is the model using relative paths. Such a write appears in NO
-#   # diff, so the morning branch review cannot catch it. `bash` stays withheld either way.
+#   # Lets pi serve the FIX stage, which it otherwise declines. Read ADR 0031 and ADR 0032 before
+#   # setting this: pi has no write confinement of its own (claude has its PreToolUse guard, codex
+#   # its OS sandbox), so the Runner wraps the pi Fix stage in the ship gate's bwrap hull — only the
+#   # worktree and the stage's own agent dir are writable. No bwrap on the host ⇒ the Fix stage is
+#   # refused, not run unconfined. NIGHTSHIFT_PI_SANDBOX=none opts out of the hull, and then a write
+#   # outside the tree appears in NO diff, so the morning branch review cannot catch it. The hull
+#   # bounds the filesystem only: it shares the host's network (the model gateway is a LAN address).
+#   # `bash` stays withheld either way.
 #   pi_allow_fix: true
 #   # Which adapter judges a fix (ADR 0031): claude | codex | pi | mock. Omitted, Review runs on the
 #   # night's own adapter — i.e. the model marks its own homework. Naming a DIFFERENT vendor here is
