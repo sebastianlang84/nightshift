@@ -109,9 +109,12 @@ git -C "$d/remote.git" for-each-ref --format='%(refname)' 'refs/heads/nightshift
 
 
 # --- 2b. red once, green on the retry: the item ships instead of dying --------
-# The marker is gitignored, so the gate's own bookkeeping never lands in the commit — and it has to
-# live in the worktree, because the sandbox (ADR 0026) gives a test_cmd nowhere else to write.
-run_night retries 'test -f .gate-marker || { touch .gate-marker; exit 1; }'
+# The marker has to survive from one gate to the next, and nothing inside the worktree does: the
+# gate purges every ignored file before it runs (ADR 0037), and the sandbox (ADR 0026) gives a
+# test_cmd nowhere else to write. So this case runs unsandboxed and keeps the marker outside the
+# tree; what it pins is the retry, which does not depend on the sandbox.
+NIGHTSHIFT_TEST_SANDBOX=none \
+  run_night retries "test -f '$TMP/retries.marker' || { touch '$TMP/retries.marker'; exit 1; }"
 d="$TMP/retries"; LEDGER="$d/state/ledger.jsonl"
 
 grep -q "gate overrules ship" "$d/err" "$d/out" || { cat "$d/err" >&2; fail "the first red suite was not reported as a retry"; }

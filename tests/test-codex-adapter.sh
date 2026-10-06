@@ -164,4 +164,9 @@ chmod +x "$TMP/ubin/codex"
   RB_CODEX_EFFORT=""
   [ -z "$(efforts neither)" ] || fail "no declared effort must pass none: $(efforts neither)"
 )
+# The Runner keeps only absolute PATH entries: it runs codex (and `env`) after `cd` into a worktree a
+# stage can write, where a relative or empty entry would resolve to a planted binary.
+left="$(PATH="bin::.:$PATH" NIGHTSHIFT_SOURCED=1 bash -c 'source "$1"; printf "%s" "$PATH"' _ "$ROOT/bin/nightshift.sh")"
+[ -n "$left" ] || { echo "FAIL: the PATH filter dropped every entry" >&2; exit 1; }
+case ":$left:" in *::*|*:[!/]*) echo "FAIL: a relative PATH entry survived: $left" >&2; exit 1 ;; esac
 echo "test-codex-adapter: ok"

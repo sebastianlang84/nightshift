@@ -8,6 +8,12 @@
 # on a DIFFERENT adapter than the rest of the night (ADR 0031) — see review_stage_agent().
 set -euo pipefail
 
+# Only absolute PATH entries. The Runner runs commands after `cd` into worktrees a stage can write,
+# where a relative entry (or an empty one, which means the current directory) would resolve to a
+# planted binary outside every sandbox.
+PATH="$(printf '%s' "$PATH" | tr ':' '\n' | grep '^/' | paste -sd: - || true)"
+export PATH
+
 NIGHTSHIFT_HOME="${NIGHTSHIFT_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # Was the adapter chosen by the CALLER, or is this the built-in default? The rulebook may name the
 # night's adapter (agent.primary), but an explicit env var has to keep winning — that is how a
@@ -93,7 +99,7 @@ warn_worktrees_in_home() {
 }
 
 # ---------------------------------------------------------------- rulebook ----
-declare -a REPO_PATHS=() REPO_MODES=() REPO_BASES=() REPO_FINDINGS=() REPO_DIMS=() REPO_TEST_NETS=() REPO_TEST_CMDS=() DIMENSIONS=()
+declare -a REPO_PATHS=() REPO_MODES=() REPO_BASES=() REPO_FINDINGS=() REPO_DIMS=() REPO_TEST_NETS=() REPO_SETUP_CMDS=() REPO_TEST_CMDS=() DIMENSIONS=()
 BASE_RESOLUTION_WARN_MISSING=1
 # shellcheck source=../lib/base_resolution.sh
 source "$NIGHTSHIFT_HOME/lib/base_resolution.sh"
@@ -125,7 +131,7 @@ log_model_selection() { # adapter env_var_name rulebook_value
 repo_id() { realpath -m -- "$1" 2>/dev/null || printf '%s' "${1%/}"; }
 
 load_rulebook() {
-  local tag a b c d e f g rb_run_branches="" parsed path
+  local tag a b c d e f g h rb_run_branches="" parsed path
   # Capture the parser's output AND its exit status. Reading it directly via
   # `done < <(python3 …)` hides a nonzero exit from `set -euo pipefail`, so a
   # mid-stream parse error (e.g. a bad `findings:` on repo #2) silently truncated
@@ -133,7 +139,7 @@ load_rulebook() {
   # run proceeded on a partial fleet. Fail closed instead: abort the whole run.
   parsed="$(python3 "$NIGHTSHIFT_HOME/lib/parse_rulebook.py" "$RULEBOOK")" \
     || { log "rulebook parse failed ($RULEBOOK) — aborting run"; exit 1; }
-  while IFS=$'\t' read -r tag a b c d e f g; do
+  while IFS=$'\t' read -r tag a b c d e f g h; do
     case "$tag" in
       prefix)                BRANCH_PREFIX="$a" ;;
       max_open)              MAX_OPEN="$a" ;;
@@ -160,7 +166,7 @@ load_rulebook() {
       primary_agent)         RB_PRIMARY_AGENT="$a" ;;
       pi_allow_fix)          RB_PI_ALLOW_FIX="$a" ;;
       dimension)             DIMENSIONS+=("$a") ;;
-      repo)                  path="$(repo_id "${a#path=}")"; REPO_PATHS+=("$path"); REPO_MODES+=("${b#mode=}"); REPO_BASES+=("${c#base=}"); REPO_FINDINGS+=("${d#findings=}"); REPO_DIMS+=("${e#dimensions=}"); REPO_TEST_NETS+=("${f#test_net=}"); REPO_TEST_CMDS+=("${g#test_cmd=}") ;;
+      repo)                  path="$(repo_id "${a#path=}")"; REPO_PATHS+=("$path"); REPO_MODES+=("${b#mode=}"); REPO_BASES+=("${c#base=}"); REPO_FINDINGS+=("${d#findings=}"); REPO_DIMS+=("${e#dimensions=}"); REPO_TEST_NETS+=("${f#test_net=}"); REPO_SETUP_CMDS+=("${g#setup_cmd=}"); REPO_TEST_CMDS+=("${h#test_cmd=}") ;;
     esac
   done <<< "$parsed"
   MAX_FINDINGS="${MAX_FINDINGS:-1}"
@@ -1504,10 +1510,31 @@ repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
   # can name the reason a stage died and spot a credential failure. Codex's stderr previously landed
   # unlabelled in the night log; per stage and per item dir it is attributable.
   events="$id/.raw_$stage"
+  # The repo's toolchain goes in FRONT of PATH for this subprocess alone (ADR 0037): under the
+  # unattended launcher /usr/bin comes first and its node is v18, which a Node 24 repo's pnpm refuses
+  # to start under. Prepended here and nowhere else, like pi_path_prefix, so the Runner's own
+  # unqualified calls keep resolving to the system dirs (R10/N4). The binary is resolved first, so
+  # the prepended directory can never decide which `codex` runs.
+  local cx_bin
+  local -a cx_env=()
+  # Anything but an absolute executable file (unresolved, a relative PATH entry that would resolve
+  # inside the worktree after the cd, a function) becomes a path that cannot exist, so it fails as
+  # a missing codex did before (127) instead of being found in the prepended directory.
+  cx_bin="$(command -v codex 2>/dev/null)" || cx_bin=""
+  case "$cx_bin" in /*) [ -x "$cx_bin" ] || cx_bin=/nonexistent/codex ;; *) cx_bin=/nonexistent/codex ;; esac
+  # pnpm records the store it installed from and, from pnpm 11 on, reinstalls before every `pnpm
+  # run`/`exec` when the store it resolves differs. Inside the gate's sandbox HOME is a separate
+  # mount, so the setup's store lands in `<worktree>/.pnpm-store`; outside it pnpm would resolve the
+  # operator's shared store, which this sandbox cannot write ("could not open its store database").
+  # So a Fix stage whose setup left a store in the worktree is pointed at that store — inside the
+  # worktree, ignored by the repo, and purged before the gate like every other ignored file.
+  [ "$stage" != fix ] || [ ! -d "$wd/.pnpm-store" ] || cx_env+=("pnpm_config_store_dir=$wd/.pnpm-store")
+  # Every variable goes through `env`, which is resolved on the Runner's PATH before the prefixed
+  # one takes effect.
   (cd "$wd" && printf '%s' "$prompt" | \
-    GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="$HOOKS_DIR" \
-    CODEX_HOME="$cx_home" \
-    codex "${args[@]}" - > "$events" 2>"$id/$stage.err") || rc=$?
+    env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="$HOOKS_DIR" \
+      CODEX_HOME="$cx_home" PATH="${NIGHTSHIFT_CODEX_PATH:+$NIGHTSHIFT_CODEX_PATH:}$PATH" \
+      ${cx_env[@]+"${cx_env[@]}"} "$cx_bin" "${args[@]}" - > "$events" 2>"$id/$stage.err") || rc=$?
   # Telemetry sidecar for run_agent — same object contract as the claude adapter. Codex's event
   # stream is no more stable than claude's JSON: a payload sits either at the top level of an event
   # or wrapped in `.msg`, so consider both for every event. Usage rides on `turn.completed` (with
@@ -1841,6 +1868,16 @@ repo_test_cmd() { # repo -> the repo's ship-gate command, or "" for a findings-o
   for i in "${!REPO_PATHS[@]}"; do
     if [ "${REPO_PATHS[$i]}" = "$repo" ]; then
       echo "${REPO_TEST_CMDS[$i]:-}"; return
+    fi
+  done
+  echo ""
+}
+
+repo_setup_cmd() { # repo -> the repo's dependency setup run before Fix, or "" for none (ADR 0037)
+  local repo="$1" i
+  for i in "${!REPO_PATHS[@]}"; do
+    if [ "${REPO_PATHS[$i]}" = "$repo" ]; then
+      echo "${REPO_SETUP_CMDS[$i]:-}"; return
     fi
   done
   echo ""
@@ -2552,15 +2589,118 @@ assert_worktree_git_sane() { # repo worktree -> 0 sane, 1 tampered (and says so)
   return 1
 }
 
-run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 blocked, 3 tampered
-  local repo="$1" wt="$2" id="$3" tcmd net trc=0 sbhome persist=0
-  tcmd=$(repo_test_cmd "$repo")
-  if [ -z "$tcmd" ]; then
-    # Only reachable for a findings-only repo, which never ships — the parser refuses a branch-fix
-    # repo with no test_cmd (ADR 0026). Kept as a guard, not as a shipping path.
-    log "  $(basename "$repo"): no test_cmd in the rulebook — shipping UNGATED"
-    return 0
+# Removes every ignored file from a worktree and reports whether anything git does not track
+# survived (ADR 0037). `-ff` also takes an ignored directory that holds its own `.git`, which a plain
+# `-f` leaves in place. A submodule path is invisible to both `clean` and `ls-files`: a worktree is
+# created with every submodule uninitialised, so such a path must still be empty — anything in it
+# was written by a stage, and the suite would run it. A failed listing counts as a survivor: this
+# check exists to fail closed.
+# A directory this account cannot read or search hides its contents from git (a warning, exit 0)
+# and from every content check, so it refuses on its own. Anything that runs in the worktree can
+# make one with a plain chmod. A failed search counts as one: this check exists to fail closed.
+has_hidden_dir() { # worktree -> 0 one exists (or the search failed), 1 none
+  local found
+  found="$(find "$1" -type d \( ! -readable -o ! -executable \) -print -quit 2>&1)" || return 0
+  [ -n "$found" ]
+}
+
+purge_ignored_files() { # worktree -> 0 nothing untracked-and-ignored left, 1 otherwise
+  local wt="$1" left
+  ! has_hidden_dir "$wt" || return 1
+  git -C "$wt" clean -ffdXq >/dev/null 2>&1 || true
+  left="$(git -C "$wt" ls-files --others --ignored --exclude-standard --directory 2>/dev/null)" || return 1
+  [ -z "$left" ] || return 1
+  submodules_empty "$wt"
+}
+
+# The worktree is created with every submodule uninitialised, so such a path must still be empty:
+# git lists neither its contents nor changes to them, and anything in it was written by something
+# that ran there. NUL-separated, so a path git would print quoted and escaped is checked by its real
+# bytes. A submodule path that is not an empty, listable directory refuses: one made unreadable is
+# not thereby empty.
+submodules_empty() { # worktree -> 0 every submodule path empty or absent, 1 otherwise
+  local wt="$1" rec sm found
+  git -C "$wt" ls-files --stage -z >/dev/null 2>&1 || return 1
+  while IFS= read -r -d '' rec; do
+    case "$rec" in 160000\ *) ;; *) continue ;; esac
+    sm="${rec#*$'\t'}"
+    [ -e "$wt/$sm" ] || [ -L "$wt/$sm" ] || continue
+    [ -d "$wt/$sm" ] && [ ! -L "$wt/$sm" ] || return 1
+    found="$(find "$wt/$sm" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" || return 1
+    [ -z "$found" ] || return 1
+  done < <(git -C "$wt" ls-files --stage -z 2>/dev/null)
+  return 0
+}
+
+# The exact bytes of everything `git add -A` would stage — tracked and un-ignored files — with each
+# entry's type and permission bits, as one digest. Bytes, not a tree id: git normalises content
+# through .gitattributes (`eol=lf` hides an LF->CRLF rewrite), and the suite runs on the bytes.
+worktree_content_id() { # worktree -> digest, or nothing on failure
+  local wt="$1"
+  git -C "$wt" ls-files -z --cached --others --exclude-standard 2>/dev/null | python3 -c '
+import hashlib, os, stat, sys
+root = sys.argv[1]
+h = hashlib.sha256()
+for p in sorted(set(x for x in sys.stdin.buffer.read().split(b"\0") if x)):
+    f = os.path.join(os.fsencode(root), p)
+    try:
+        st = os.lstat(f)
+    except FileNotFoundError:
+        h.update(b"x\0" + p + b"\0"); continue
+    h.update(b"%o\0" % st.st_mode + p + b"\0")
+    if stat.S_ISLNK(st.st_mode):
+        h.update(os.readlink(f) + b"\0")
+    elif stat.S_ISREG(st.st_mode):
+        with open(f, "rb") as fh:
+            h.update(hashlib.sha256(fh.read()).digest())
+print(h.hexdigest())
+' "$wt" 2>/dev/null
+}
+
+# The dependency setup before a Fix stage (ADR 0037): the repo's `setup_cmd`, run in the ship gate's
+# sandbox over the worktree, so a Fix stage that can execute commands (codex) finds the dependencies
+# its checks need. That stage has no network and cannot write the shared package store, so it cannot
+# install them itself. An aid, not a gate: a failed setup is logged and the Fix stage runs anyway.
+# The ship gate decides, and it purges everything this installed before it runs.
+provision_worktree() { # repo worktree item_dir -> 0 ran or skipped, 2 not hermetic, 3 .git pointer tampered
+  local repo="$1" wt="$2" id="$3" scmd rc=0 before after
+  scmd="$(repo_setup_cmd "$repo")"
+  [ -n "$scmd" ] || return 0
+  before="$(worktree_content_id "$wt")" || before=""
+  gate_exec "$repo" "$wt" "$id" "$scmd" "$id/setup.log" "dependency setup" \
+    "the Fix stage starts without it" || rc=$?
+  # From the second Fix iteration on, the worktree carries the Fix stage's own edits, so this setup
+  # runs candidate content exactly like the gate does — and the same pointer attack applies (R15).
+  if ! git_pointer_ok "$repo" "$wt"; then
+    log "  $(basename "$repo"): .git POINTER TAMPERED during the dependency setup — refusing the item"
+    return 3
   fi
+  # Whatever the setup writes outside .gitignore would be staged as part of the Fix stage's change
+  # and committed under its name, so a setup that does that is refused, as a suite that does it is
+  # refused by the gate (ADR 0027). Only ignored files may come out of it. Compared by CONTENT, not
+  # by status: from the second iteration on a file the Fix stage edited is already ` M`, and a setup
+  # rewriting it again would leave the status line unchanged. No digest on either side refuses too.
+  after="$(worktree_content_id "$wt")" || after=""
+  if [ -z "$before" ] || [ "$before" != "$after" ]; then
+    log "  $(basename "$repo"): dependency setup changed tracked or un-ignored files — NOT shipping; make it hermetic or .gitignore what it writes (see $id/setup.log)"
+    return 2
+  fi
+  if [ "$GATE_UNAVAILABLE" = 0 ] && [ "$rc" -ne 0 ]; then
+    log "  $(basename "$repo"): dependency setup failed (rc=$rc) — the Fix stage starts without it (see $id/setup.log)"
+  fi
+  return 0
+}
+
+# The ship gate's execution half (ADR 0026, ADR 0028): ONE repo command, run over the worktree in
+# the disposable bwrap sandbox with the repo's vetted egress, both torn down before it returns. The
+# gate and the dependency setup before Fix (ADR 0037) both run through here, so there is exactly one
+# sandbox for the Runner executing repository content. Output lands in `out`; the command's own
+# status is returned. GATE_UNAVAILABLE=1 (status 2) means the command never ran — no sandbox, no
+# proxy, or a sandbox that did not come up — and `out` or egress.log says which.
+GATE_UNAVAILABLE=0
+gate_exec() { # repo worktree item_dir cmd out label consequence -> the command's status
+  local repo="$1" wt="$2" id="$3" tcmd="$4" out="$5" label="$6" consequence="$7" net trc=0 sbhome persist=0
+  GATE_UNAVAILABLE=0
   net=$(repo_test_net "$repo")
 
   # A test_net repo gets its egress through the vetting proxy (ADR 0028), never through the host's
@@ -2580,14 +2720,14 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 blocked, 3 
     # the proxy listening after its socket directory is gone. bash does not promise otherwise, so the
     # process reporting its own pid is the only source that is right on every version.
     if ! read -r -t 10 -u 8 _ready egress_pid; then
-      log "  $(basename "$repo"): the egress proxy did not come up — NOT shipping (see $id/egress.log)"
+      log "  $(basename "$repo"): the egress proxy did not come up — $consequence (see $id/egress.log)"
       exec 8<&-
       # No pid to kill (that is what failed), so reap by the socket path, which mktemp made unique.
       # pkill -f takes an extended regex and the path comes from NIGHTSHIFT_WORKTREES / TMPDIR, so it
       # is escaped and anchored: a `[` or `+` in it would otherwise miss this proxy or hit a sibling's.
       pkill -f -- "egress_proxy\.py $(printf '%s' "$TEST_EGRESS_DIR/egress.sock" | sed 's/[][\\.*^$+?(){}|]/\\&/g')\$" 2>/dev/null || true
       rm -rf "$TEST_EGRESS_DIR"
-      return 2
+      GATE_UNAVAILABLE=1; return 2
     fi
   fi
   # Every exit from here on has to take the proxy with it, so it is torn down in one place.
@@ -2616,10 +2756,10 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 blocked, 3 
   if [ "$TEST_SANDBOX" != none ] && ! command -v bwrap >/dev/null 2>&1; then
     printf 'nightshift: bwrap is not installed, so the ship gate has no sandbox.\n%s\n' \
       "Install bubblewrap, or accept the risk explicitly with NIGHTSHIFT_TEST_SANDBOX=none." \
-      >"$id/tests.log"
-    log "  $(basename "$repo"): test gate cannot run — no sandbox (bwrap missing) — NOT shipping"
+      >"$out"
+    log "  $(basename "$repo"): $label cannot run — no sandbox (bwrap missing) — $consequence"
     stop_egress
-    return 2
+    GATE_UNAVAILABLE=1; return 2
   fi
 
   # HOME is disposable by default, so nothing a suite writes survives into the next night — and a
@@ -2637,9 +2777,9 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 blocked, 3 
     # that a systemd user service does not get — bin/nightshift-cron.sh explains why it is prepended
     # HERE and nowhere else: the Runner's own unqualified jq/git/python3 calls must keep resolving to
     # the system dirs (R10/N4), while this subprocess already runs the repo's package scripts anyway.
-    log "  $(basename "$repo"): test gate sandbox DISABLED (NIGHTSHIFT_TEST_SANDBOX=none) — the suite runs with this account's full reach"
+    log "  $(basename "$repo"): $label sandbox DISABLED (NIGHTSHIFT_TEST_SANDBOX=none) — it runs with this account's full reach"
     ( cd "$wt" && export PATH="${NIGHTSHIFT_TEST_PATH:+$NIGHTSHIFT_TEST_PATH:}$PATH" \
-      && timeout "$TEST_TIMEOUT" bash -c "$tcmd" </dev/null ) >"$id/tests.log" 2>&1 || trc=$?
+      && timeout "$TEST_TIMEOUT" bash -c "$tcmd" </dev/null ) >"$out" 2>&1 || trc=$?
   else
     build_test_sandbox "$wt" "$sbhome" "$net" "$id"
     # Whether the sandbox was actually BUILT cannot be read off the exit status: bubblewrap exits 1
@@ -2659,22 +2799,51 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 blocked, 3 
       --setenv NIGHTSHIFT_GATE_MEM_MB "$TEST_MEMORY_MB" \
       --setenv NIGHTSHIFT_GATE_CPU_S "$TEST_TIMEOUT" \
       --setenv NIGHTSHIFT_GATE_FSIZE_MB "$TEST_FSIZE_MB" \
-      -- /bin/bash -c "$TEST_GATE_INNER" </dev/null >"$id/tests.log" 2>&1 9>"$id/.sandbox-status" || trc=$?
+      -- /bin/bash -c "$TEST_GATE_INNER" </dev/null >"$out" 2>&1 9>"$id/.sandbox-status" || trc=$?
     # A timeout killed a sandbox that DID come up, so it is a red suite, not a construction failure.
     if [ "$trc" -ne 124 ] && ! grep -q '"exit-code"' "$id/.sandbox-status" 2>/dev/null; then
       { echo "nightshift: bubblewrap did not bring the sandbox up (rc=$trc)."
-        echo "The gate never ran, so nothing about this change has been tested."
-        echo "--- bwrap output ---"; cat "$id/tests.log" 2>/dev/null; } >"$id/.gate-refusal"
-      mv "$id/.gate-refusal" "$id/tests.log"
+        echo "The $label never ran, so nothing about this change has been tested."
+        echo "--- bwrap output ---"; cat "$out" 2>/dev/null; } >"$id/.gate-refusal"
+      mv "$id/.gate-refusal" "$out"
       rm -f "$id/.sandbox-status"
       [ "$persist" = 1 ] || rm -rf "$sbhome"
-      log "  $(basename "$repo"): test gate could not START its sandbox — NOT shipping (see $id/tests.log)"
+      log "  $(basename "$repo"): $label could not START its sandbox — $consequence (see $out)"
       stop_egress
-      return 2
+      GATE_UNAVAILABLE=1; return 2
     fi
     rm -f "$id/.sandbox-status"
   fi
   [ "$persist" = 1 ] || rm -rf "$sbhome"
+  stop_egress
+  return "$trc"
+}
+
+run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 blocked, 3 tampered
+  local repo="$1" wt="$2" id="$3" tcmd trc=0 pre_id=""
+  tcmd=$(repo_test_cmd "$repo")
+  if [ -z "$tcmd" ]; then
+    # Only reachable for a findings-only repo, which never ships — the parser refuses a branch-fix
+    # repo with no test_cmd (ADR 0026). Kept as a guard, not as a shipping path.
+    log "  $(basename "$repo"): no test_cmd in the rulebook — shipping UNGATED"
+    return 0
+  fi
+  # The suite runs on the TRACKED tree plus what the suite itself builds, never on ignored files a
+  # stage left behind (ADR 0037). Dependencies installed before Fix, or by the previous gate, sit in
+  # a worktree the Fix stage can write, and `pnpm install --frozen-lockfile` trusts a node_modules it
+  # finds rather than re-verifying it — so a patched dependency would make this gate certify itself.
+  # The worktree held no ignored file when it was created, so this restores exactly that state.
+  if ! purge_ignored_files "$wt"; then
+    printf 'nightshift: ignored files in this worktree could not be removed before the gate.\n%s\n' \
+      "The suite would run on dependencies a stage could have written. Not shipping." >"$id/tests.log"
+    log "  $(basename "$repo"): ignored files survived the pre-gate cleanup — NOT shipping (see $id/tests.log)"
+    return 2
+  fi
+  # The exact bytes the suite starts from, compared after it: git's own comparison below normalises
+  # line endings through .gitattributes, so a rewrite the suite made would not show there.
+  pre_id="$(worktree_content_id "$wt")" || pre_id=""
+  gate_exec "$repo" "$wt" "$id" "$tcmd" "$id/tests.log" "test gate" "NOT shipping" || trc=$?
+  [ "$GATE_UNAVAILABLE" = 0 ] || return 2
 
   # Checked BEFORE the exit status, because the whole point of this attack is to exit 0. A hostile
   # pointer is not a red suite to hand back to the Fix stage — nothing it can write repairs it, and
@@ -2683,7 +2852,6 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 blocked, 3 
     printf 'nightshift: this worktree'"'"'s .git no longer resolves into %s.\n%s\n' "$repo" \
       "Refusing the item: the next git command would read a gitdir the suite chose." >"$id/tests.log"
     log "  $(basename "$repo"): .git POINTER TAMPERED — refusing the item (see $id/tests.log)"
-    stop_egress
     return 3
   fi
 
@@ -2697,11 +2865,9 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 blocked, 3 
     # bind, a bad --chdir and an unknown option alike, so no exit code identifies that case.
     if [ "$trc" -eq 125 ] && [ "$TEST_SANDBOX" != none ]; then
       log "  $(basename "$repo"): test gate could not run under its resource ceilings — NOT shipping"
-      stop_egress
       return 2
     fi
     log "  $(basename "$repo"): test gate failed (rc=$trc) — see $id/tests.log"
-    stop_egress
     return 1
   fi
   # A green suite only certifies the tree the suite RAN ON. ADR 0027 commits the tree review was
@@ -2718,7 +2884,9 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 blocked, 3 
   if [ -n "$rtree" ]; then
     git -C "$wt" update-index -q --refresh >/dev/null 2>&1 || true
     if ! git -C "$wt" diff-index --quiet "$rtree" -- 2>/dev/null \
-       || [ -n "$(git -C "$wt" ls-files --others --exclude-standard 2>/dev/null | head -1)" ]; then
+       || [ -n "$(git -C "$wt" ls-files --others --exclude-standard 2>/dev/null | head -1)" ] \
+       || has_hidden_dir "$wt" || ! submodules_empty "$wt" \
+       || [ -z "$pre_id" ] || [ "$pre_id" != "$(worktree_content_id "$wt")" ]; then
       { echo "nightshift: the suite passed, but it modified the worktree while running."
         echo "The tree it tested is not the tree that would be committed (ADR 0027), so this"
         echo "green result does not apply to the branch. Not shipping."
@@ -2731,7 +2899,6 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 blocked, 3 
         echo "Make the suite hermetic, or .gitignore what it writes."
       } >"$id/tests.log"
       log "  $(basename "$repo"): the suite MODIFIED the worktree — its green does not describe the reviewed tree; NOT shipping (see $id/tests.log)"
-      stop_egress
       return 2
     fi
   fi
@@ -2740,7 +2907,6 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 blocked, 3 
   # to repair damage it has already repaired.
   rm -f "$id/tests.log"
   log "  $(basename "$repo"): test gate passed"
-  stop_egress
   return 0
 }
 
@@ -3417,7 +3583,7 @@ main() {
     log "quota fallback: $NIGHTSHIFT_QUOTA_FALLBACK_AGENT (activated only after a structured rejected quota event)"
     log_model_selection codex NIGHTSHIFT_CODEX_MODEL "$RB_CODEX_MODEL"
   fi
-  local made=0 considered=0 findings=0 repo mode cfgbase id fp fnj iter verdict wt base base_sha b summary open="" pass=0 progress ship_progress stop_reason=ok disp rfind farr n_find k fd dim explore_rc n_partial fix_rc review_rc hook_retry=0 retry_ok=0 retry_why="" frc=0 fix_cap=0
+  local made=0 considered=0 findings=0 repo mode cfgbase id fp fnj iter verdict wt base base_sha b summary open="" pass=0 progress ship_progress stop_reason=ok disp rfind farr n_find k fd dim explore_rc n_partial fix_rc prc=0 review_rc hook_retry=0 retry_ok=0 retry_why="" frc=0 fix_cap=0
   local runner_pid="$BASHPID"
   trap 'interrupted_digest TERM 143' TERM
   trap 'interrupted_digest INT 130' INT
@@ -3678,6 +3844,9 @@ main() {
         # a different outcome on purpose (ADR 0022 §3), and unlike `abandoned` it does not latch the
         # finding, so the reviewer's refusal would come back for a fresh attempt every night.
         gate=""
+        prc=0; provision_worktree "$repo" "$wt" "$fd" || prc=$?
+        if [ "$prc" -eq 3 ]; then gate=tampered; verdict=revise; break; fi
+        if [ "$prc" -eq 2 ]; then gate=blocked; verdict=revise; break; fi
         fix_rc=0
         run_agent fix "$wt" "$fd" || fix_rc=$?
         if [ -n "$AGENT_FATAL" ]; then gate=agent-fatal; verdict=""; break; fi

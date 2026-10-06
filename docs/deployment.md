@@ -36,6 +36,9 @@ ledgers diverge silently: duplicate branches, broken caps and rotation). See
    `#!/usr/bin/env node` shebang would resolve `/usr/bin/node` (too old to run it). The launcher
    therefore exports `NIGHTSHIFT_PI_PATH` — the nvm bin directory — and the Runner prepends it for
    the pi subprocess alone, the same shape as `NIGHTSHIFT_TEST_PATH` and for the same R10/N4 reason.
+   It exports the same directory as `NIGHTSHIFT_CODEX_PATH`, prepended for the codex subprocess
+   alone: codex's Fix stage runs the repo's own checks, and partflow's pnpm will not start under
+   `/usr/bin/node` (ADR 0037).
    A run started by hand from an interactive shell already has nvm on PATH and needs nothing.
    | `git` | worktrees, commits, branch pushes | run aborts |
    | `jq` | every ledger and telemetry read/write | run aborts |
@@ -120,6 +123,7 @@ agent:
 | `NIGHTSHIFT_QUOTA_FALLBACK_AGENT` | claude | unset; a structured rejected quota event aborts the night |
 | `NIGHTSHIFT_CODEX_MODEL` | codex | the rulebook's `agent.codex_model`, else no `--model` |
 | `NIGHTSHIFT_CODEX_REASONING_EFFORT` | codex | the rulebook's `agent.codex_effort`, else the CLI default |
+| `NIGHTSHIFT_CODEX_PATH` | codex | nothing is prepended, so the codex stages see `/usr/bin/node` first (ADR 0037) |
 | `NIGHTSHIFT_CODEX_STAGE_HOME` | codex | `state/codex-home` (stage isolation); empty = your own `CODEX_HOME` |
 | `NIGHTSHIFT_EMPTY_ANSWER_RETRIES` | all | `1` — a stage whose model returned nothing is retried once (ADR 0034); `0` disables it |
 | `NIGHTSHIFT_TEST_TIMEOUT` | all | the rulebook's `limits.test_timeout_seconds`, else 600s per `test_cmd` |

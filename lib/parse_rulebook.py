@@ -52,7 +52,7 @@ CODEX_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 # every setting beneath it would silently revert to its default.
 TOP_LEVEL_KEYS = ("branch_prefix", "limits", "recon", "agent", "dimensions", "repos")
 # `test_cmd` MUST stay last — see the emitter at the bottom of main(). A new field goes before it.
-REPO_KEYS = ("path", "mode", "base", "findings", "dimensions", "test_net", "test_cmd")
+REPO_KEYS = ("path", "mode", "base", "findings", "dimensions", "test_net", "setup_cmd", "test_cmd")
 # The modes the Runner actually implements. A repo whose mode is not in here is a typo, not a
 # feature request — see the validation below for why that must abort rather than be skipped.
 REPO_MODES = ("findings-only", "branch-fix")
@@ -426,6 +426,14 @@ def main(path: str) -> None:
             raise SystemExit(
                 f"repo {r.get('path', '')}: test_net must be true or false, got {test_net!r}"
             )
+        # The dependency setup the Runner runs in the gate's sandbox before every Fix stage (ADR 0037),
+        # so a Fix stage that can execute commands finds the repo's dependencies installed. Optional;
+        # it rides on the row second to last, which is why it may not contain a tab either.
+        setup_cmd = r.get("setup_cmd", "")
+        if "\t" in setup_cmd:
+            raise SystemExit(
+                f"repo {r.get('path', '')}: setup_cmd must not contain a tab"
+            )
         print(
             "repo"
             f"\tpath={r.get('path', '')}"
@@ -434,6 +442,7 @@ def main(path: str) -> None:
             f"\tfindings={findings}"
             f"\tdimensions={r.get('dimensions', '')}"
             f"\ttest_net={test_net}"
+            f"\tsetup_cmd={setup_cmd}"
             f"\ttest_cmd={test_cmd}"
         )
 

@@ -130,6 +130,11 @@ repos:
   #                              # dependencies as it runs (`npm ci`, `uv run --with-requirements`).
   #                              # Even with it on the sandbox holds no credentials, so the channel
   #                              # carries worktree content, not your SSH key — but it IS a channel.
+  #   setup_cmd: npm ci         # OPTIONAL (ADR 0037): dependency install the Runner runs in the gate's
+  #                              # sandbox (same egress as test_net) before EVERY Fix stage, so a Fix
+  #                              # stage that executes commands (codex) can run the repo's checks. It
+  #                              # may write only ignored files; the gate purges them all before it
+  #                              # runs. Useless on claude/pi nights, whose Fix stage has no shell.
   #   test_cmd: uv run pytest -q # REQUIRED for branch-fix (ADR 0022/0026): the repo's own suite, run
   #                              # in a disposable bwrap sandbox over the WORKTREE right before the
   #                              # commit, INSIDE the fix<->review loop. A red suite is a revision

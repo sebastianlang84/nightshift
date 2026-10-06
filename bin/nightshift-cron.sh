@@ -89,6 +89,10 @@ export NIGHTSHIFT_TEST_PATH="${NIGHTSHIFT_TEST_PATH-$(gate_toolchain_path)}"
 # ahead of the system dirs in the Runner's own PATH is precisely the R10/N4 hole the comment above
 # warns about, and appending it instead would leave /usr/bin/node v18 winning the shebang.
 export NIGHTSHIFT_PI_PATH="${NIGHTSHIFT_PI_PATH-$(nvm_toolchain_bin)}"
+# The codex adapter gets the same directory for the same reason (ADR 0037): its Fix stage executes the
+# repo's own checks, and partflow's pnpm refuses to start under /usr/bin/node v18. Prepended for the
+# codex subprocess alone; set it empty to opt out.
+export NIGHTSHIFT_CODEX_PATH="${NIGHTSHIFT_CODEX_PATH-$(nvm_toolchain_bin)}"
 
 # The sandbox has no $HOME, so a python package installed with `pip install --user` is invisible
 # inside a gate — the suite then fails on an import, which reads downstream as "the fix broke the
