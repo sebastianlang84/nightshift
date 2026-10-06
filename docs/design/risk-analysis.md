@@ -61,7 +61,7 @@ These are implemented and active today. Each is enforced by mechanism, not by pr
 | C6 | **Runaway caps** | Claude has `--max-turns 60` per stage. Both adapters have fix-iteration, open-branch and per-run caps, a 300-minute rulebook budget, single-instance `flock`, and a hard 5h service timeout. Codex currently has no separate per-stage turn cap. | [nightshift.sh](../../bin/nightshift.sh), rulebook, [nightshift-cron.sh](../../bin/nightshift-cron.sh), [nightshift.service](../../scheduler/nightshift.service) |
 | C7 | **Report-only for sensitive repos** | `findings-only` mode reports without ever pushing (e.g. llmstack). | `rulebook.yaml` |
 | C8 | **Change-size pressure** | Soft file/line budgets injected into explore/fix prompts (15 files / 400 lines) to keep changes reviewable. | [nightshift.sh:205-207](../../bin/nightshift.sh) |
-| C9 | **Ship-gate sandbox** | The one component that deliberately *executes* candidate content runs under `bwrap`: no `$HOME`, `/etc` by allowlist, no docker socket, no network unless the repo opts in, allowlisted environment, writable only the worktree + a throwaway HOME, rlimits. No sandbox ⇒ no ship. | `build_test_sandbox`/`run_test_gate` in [nightshift.sh](../../bin/nightshift.sh), ADR 0026 |
+| C9 | **Ship-gate sandbox** | The one component that deliberately *executes* candidate content runs under `bwrap` — the gate, and since ADR 0037 the repo's `setup_cmd` before each Fix stage: no `$HOME`, `/etc` by allowlist, no docker socket, no network unless the repo opts in, allowlisted environment, writable only the worktree + a throwaway HOME, rlimits. No sandbox ⇒ no ship. | `build_test_sandbox`/`run_test_gate` in [nightshift.sh](../../bin/nightshift.sh), ADR 0026 |
 
 **Consequence — and its limit.** The *destructive-git* class is structurally blocked: no merge, no
 push outside `nightshift/*`, no direct repo access. But "no `Bash`" was **over-read** in the first
@@ -328,7 +328,10 @@ repository's secrets before a human opens the PR. `test_net: true` was a real ho
 namespace, i.e. loopback and the LAN, not merely the internet; egress now leaves through a proxy
 that refuses every non-public destination. What remains of it is that worktree content can still
 leave through an ALLOWED destination, though
-credential-free. `RLIMIT_AS` bounds address space, not RSS. Kernel unprivileged user namespaces and
+credential-free. ADR [0037](../adr/0037-the-fix-stage-starts-from-a-provisioned-worktree.md) runs a
+repo's dependency setup through the same sandbox before each Fix stage, and makes the gate purge
+every ignored file first: dependencies the Fix stage could have patched never reach the suite.
+`RLIMIT_AS` bounds address space, not RSS. Kernel unprivileged user namespaces and
 bubblewrap are now in the trust base.*
 
 ---

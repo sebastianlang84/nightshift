@@ -17,13 +17,14 @@ unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+# A case below leaves a directory nobody can enter; rm needs it searchable again.
+trap 'chmod -R u+rwx "$TMP" 2>/dev/null; rm -rf "$TMP"' EXIT
 
 fail() { echo "test-reviewed-tree-ships: $*" >&2; exit 1; }
 
 # One throwaway fleet-of-one whose `test_cmd` is the attacker: it passes (exit 0) and, on its way
 # out, rewrites a workflow and drops an extra file. Both must be absent from the pushed branch.
-run_night() { # case, test_cmd
+run_night() { # case, test_cmd [eol]
   local case="$1" cmd="$2" d="$TMP/$1"
   mkdir -p "$d/state" "$d/runs" "$d/digests" "$d/worktrees"
   git init -q --bare "$d/remote.git"
@@ -34,6 +35,11 @@ run_night() { # case, test_cmd
   mkdir -p "$d/repo/.github/workflows"
   printf 'name: CI\non: [push]\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo honest\n' \
     > "$d/repo/.github/workflows/ci.yml"
+  [ "${3:-}" != eol ] || printf '* text eol=lf\n' > "$d/repo/.gitattributes"
+  # An uninitialised submodule: git lists neither its directory's contents nor changes to them.
+  # The empty directory keeps `add -A` below from staging the gitlink's removal.
+  [ "${3:-}" != sub ] || { mkdir "$d/repo/sub"; git -C "$d/repo" update-index --add \
+    --cacheinfo 160000,1111111111111111111111111111111111111111,sub; }
   git -C "$d/repo" -c user.name=test -c user.email=test@localhost add -A
   git -C "$d/repo" -c user.name=test -c user.email=test@localhost commit -q -m initial
   git -C "$d/repo" push -q -u origin main
@@ -102,6 +108,25 @@ git -C "$d/remote.git" show "$branch:README.md" | grep -q 'This is the demo' \
   || fail "the fix is missing from a normal ship"
 grep -q "MODIFIED the worktree" "$d/err" "$d/out" \
   && fail "a suite that changed nothing was reported as having modified the worktree"
+
+# --- 2b. edits git's own comparison cannot see are refused too ----------------
+# `eol=lf` normalises a CRLF rewrite away, and a directory the suite made unreadable hides what it
+# wrote there from git (a warning, exit 0). Either way the suite ran on bytes no reviewer saw.
+refused() { # case
+  local d="$TMP/$1"
+  jq -e 'select(.outcome=="shipped")' "$d/state/ledger.jsonl" >/dev/null 2>&1 \
+    && { cat "$d/err" >&2; fail "$1: shipped although the suite changed what it ran on"; }
+  grep -q "MODIFIED the worktree" "$d/err" \
+    || { cat "$d/err" >&2; fail "$1: the refusal does not say the suite modified the worktree"; }
+}
+run_night crlf 'sed -i "s/\$/\r/" README.md; true' eol
+refused crlf
+run_night hidden 'mkdir hid; echo payload > hid/f; chmod 000 hid; true'
+refused hidden
+run_night sub 'echo payload > sub/f; true' sub
+git -C "$TMP/sub/remote.git" ls-tree main sub | grep -q '^160000' \
+  || fail "sub: the fixture lost its gitlink, so this case proves nothing"
+refused sub
 
 # --- 3. no recorded reviewed tree means no commit -----------------------------
 # finalize must not fall back to `add -A` when the recording is missing: that fallback IS the
