@@ -380,8 +380,8 @@ printf '#!/bin/sh\ntouch %s\n' "$CO_FIRED" > "$TMP/hookwt/.githooks/post-checkou
 chmod +x "$TMP/hookwt/.githooks/post-checkout"
 ( set +u; NIGHTSHIFT_SOURCED=1 . "$ROOT/bin/nightshift.sh" >/dev/null 2>&1; set +e
   mapfile -t ha < <(worktree_hook_args "$HREPO2" "$TMP/hookwt")
-  git -C "$TMP/hookwt" "${ha[@]}" checkout -q -b guarded-co
-  git -C "$TMP/hookwt" "${ha[@]}" checkout -q --detach ) \
+  git -C "$TMP/hookwt" "${ha[@]}" checkout -q -b guarded-co \
+    && git -C "$TMP/hookwt" "${ha[@]}" checkout -q --detach ) \
   || fail "the guarded checkout did not run at all"
 [ -e "$CO_FIRED" ] && fail "a worktree-resident post-checkout hook executed for a Runner checkout"
 git -C "$TMP/hookwt" checkout -q --detach

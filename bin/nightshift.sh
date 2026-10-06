@@ -1573,7 +1573,8 @@ repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
 # NEITHER — its tool allowlist can withhold `edit`/`write`/`bash` entirely, but it offers no hook and
 # no sandbox that could bound an absolute path once `write` is granted. A read-only stage needs no
 # such bound (no write primitive exists to confine), so pi is admitted for exactly those and refuses
-# `fix` unless the host opts in (`pi_allow_fix`, pi_run below) — and then only inside the hull below.
+# `fix` unless the host opts in (`pi_allow_fix`, pi_run below) — and then only inside the hull below,
+# unless the host also turns the hull off (NIGHTSHIFT_PI_SANDBOX=none).
 # The write confinement pi itself cannot provide (hook-spec.md Layer 2b): the same bwrap hull the
 # ship gate runs in (ADR 0026), wrapped around the AGENT process instead of the test command. It is
 # what turns `pi_allow_fix` from an accepted risk into a bounded one — the worktree and the stage's
