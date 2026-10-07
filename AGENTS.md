@@ -31,6 +31,10 @@ it does not repeat architecture (CONTEXT.md/ADRs) or global rules (git, secrets,
 - The ship gate runs `test_cmd` in a **bwrap sandbox** (ADR 0026), so it can write nowhere but the worktree and sees no `$HOME` — a fixture that used to park a marker outside the tree must now keep it inside and `.gitignore` it (hence `NIGHTSHIFT_MOCK_ABANDON_IF` resolving a *relative* path against the worktree). No bwrap ⇒ `run_test_gate` returns **2** ("could not run"), which the caller refuses *without* spending another fix iteration — distinct from **1** (a red suite), which loops back. `NIGHTSHIFT_TEST_SANDBOX=none` is the documented opt-out, and why the suite still passes on a host without user namespaces.
 - The gate runs `git clean -ffdX` first (ADR 0037), so an ignored file never survives from one gate to the next — a fixture that needs state across gates must keep it outside the worktree, unsandboxed (`test-ship-test-gate.sh` case 2b).
 
+## Operator rules
+
+- Never propose a notification or alerting channel for nightshift runs; the digest file is the report.
+
 ## Before touching confinement / safety
 
 Editing an adapter in `bin/nightshift.sh` or anything in `hooks/`: read [`docs/design/hook-spec.md`](docs/design/hook-spec.md) and [`docs/design/risk-analysis.md`](docs/design/risk-analysis.md) first — the branch-only guarantee and the Fix-stage write confinement (R8) depend on those exact mechanisms.

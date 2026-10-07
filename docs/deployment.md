@@ -43,7 +43,7 @@ ledgers diverge silently: duplicate branches, broken caps and rotation). See
    | `git` | worktrees, commits, branch pushes | run aborts |
    | `jq` | every ledger and telemetry read/write | run aborts |
    | `python3` (stdlib only — nothing to install) | rulebook parsing, JSON extraction, finding probes | run aborts |
-   | `bwrap` (`apt install bubblewrap`) | sandboxing the ship gate (ADR 0026) | every `branch-fix` repo refuses to ship |
+   | `bwrap` (`apt install bubblewrap`; on Debian 11 from bullseye-backports, because 0.4.1 lacks `--clearenv` and `--size`) | sandboxing the ship gate (ADR 0026) | every `branch-fix` repo refuses to ship |
    | `gh` | opening PRs when `NIGHTSHIFT_OPEN_PR=1` | branch still pushed, no PR |
    | `codemap` | structural index handed to explore | falls back to Read/Grep/Glob |
 
@@ -88,6 +88,8 @@ ledgers diverge silently: duplicate branches, broken caps and rotation). See
    bin/schedule.sh enable      # start the nightly timer + enable linger (fires while logged out)
    bin/schedule.sh status      # confirm; also reports any drop-in overrides
    ```
+   `enable` after a pause starts a real night at once, because the timer has `Persistent=true`;
+   stop it with `systemctl --user stop nightshift.service` if that is unwanted.
 5. **Prove the wiring** without spending quota — and without touching the installation:
    ```
    bin/schedule.sh dry-run     # the real launcher + orchestrator, mock agent, throwaway sandbox
@@ -310,7 +312,7 @@ these flags, is what confines the agent (see [`docs/design/risk-analysis.md`](de
 | `runs/<date>/` | Per-item working dirs (prompts, agent output) | `NIGHTSHIFT_RUNS_DIR` |
 | `digests/<date>.md` | The morning report | `NIGHTSHIFT_DIGEST_DIR` |
 | `~/.local/state/nightshift/logs/<date>.log` | Launcher log (also in journald) | `NIGHTSHIFT_LOG_DIR` |
-| `${TMPDIR:-/tmp}/nightshift-worktrees/` | Throwaway per-item worktrees. Where `/tmp` is a RAM-backed tmpfs (the Debian 13 default), a Fix stage's dependency install can exhaust it — point this at disk outside `$HOME`, e.g. `/var/tmp/nightshift-worktrees` | `NIGHTSHIFT_WORKTREES` |
+| `${TMPDIR:-/tmp}/nightshift-worktrees/` | Throwaway per-item worktrees. Where `/tmp` is a RAM-backed tmpfs (the Debian 13 default), a Fix stage's dependency install can exhaust it — point this at disk outside `$HOME`, e.g. `/var/tmp/nightshift-worktrees`. Keep the path short: `test_net` fails with `AF_UNIX path too long` | `NIGHTSHIFT_WORKTREES` |
 | `${TMPDIR:-/tmp}/nightshift.lock` | Single-instance flock | `NIGHTSHIFT_LOCK` |
 
 The ledger IS the installation. Back it up / move it with the installation; losing it loses dedup,

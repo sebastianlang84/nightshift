@@ -28,6 +28,9 @@ yield-weighting / never-exclude with the empty-scope feedback loop (ADR 0015).
   until the branches were reviewed on 2026-09-24. Nothing was wrong with the runner — review
   throughput is the bound. Decide whether the cap, the per-night yield, or a review cadence moves.
 
+- **Warm pnpm store for the ship gate.** Bind a warm pnpm store read-only into the gate, then drop
+  `limits.test_memory_mb` from 8192 back to 4096.
+
 ## `ideas` lens — operator-supplied work items
 
 - **Add an `ideas` lens fed by a per-repo `ideas_cmd`.** Today the steward only self-selects findings; CONTEXT.md lists "general task runner" as a non-goal, and this stays true: the lens must not know any repo's schema or tooling. Contract, modelled on `test_cmd` and on the read-only structure report of the `knowledge` lens: the rulebook gains an optional per-repo `ideas_cmd`; the runner executes it outside the sandbox before Explore, expects JSONL on stdout (one object per idea: `id`, `title`, `text`, `source`), and passes the file to Explore as lens input. Repos without the key are not applicable for the lens and recon skips it. Explore needs a lens-specific prompt (`prompts/dimensions/`): an idea is a feature request, not a falsifiable defect, so the finding contract changes to "one idea → one bounded, reversible change proposal with a verify recipe", and ideas the model judges out of scope are reported as such, never silently dropped. Record the decision as an ADR before implementing. First consumer: partflow (feedback rows of type `IDEA`, exporter lives in that repo).
