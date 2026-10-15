@@ -108,6 +108,8 @@ source "$NIGHTSHIFT_HOME/lib/base_resolution.sh"
 RB_CLAUDE_MODEL="" RB_CODEX_MODEL="" RB_CODEX_EFFORT="" RB_PI_MODEL="" RB_PI_PROVIDER="" RB_PI_EXTENSIONS="" RB_MAX_VERIFY=""
 # Which adapter serves the Review stage (ADR 0031); empty = the night's own adapter, as before.
 RB_REVIEW_AGENT=""
+# Which adapters advise on every open branch each night (ADR 0038), comma-separated; empty = none.
+RB_ADVISORS=""
 # The night's own adapter as declared by the rulebook (empty = the env/default decides), and whether
 # pi may serve the write-capable Fix stage (ADR 0031 refuses it unless the host says otherwise).
 RB_PRIMARY_AGENT="" RB_PI_ALLOW_FIX="false"
@@ -163,6 +165,7 @@ load_rulebook() {
       pi_provider)           RB_PI_PROVIDER="$a" ;;
       pi_extensions)         RB_PI_EXTENSIONS="$a" ;;
       review_agent)          RB_REVIEW_AGENT="$a" ;;
+      advisors)              RB_ADVISORS="$a" ;;
       primary_agent)         RB_PRIMARY_AGENT="$a" ;;
       pi_allow_fix)          RB_PI_ALLOW_FIX="$a" ;;
       dimension)             DIMENSIONS+=("$a") ;;
@@ -1257,13 +1260,18 @@ mock_review() { # workdir item_dir
   return "${NIGHTSHIFT_MOCK_REVIEW_RC:-0}"
 }
 mock_advise() { # workdir item_dir — deterministic second-opinion from the branch's finding type
-  local _wd="$1" id="$2" type
+  local _wd="$1" id="$2" type rec
   type=$(jq -r '.type // ""' "$id/finding.json" 2>/dev/null || echo "")
-  if [ "$type" = typo ]; then
-    jq -nc '{recommendation:"merge",reason:"Typo fix; trivial, reversible, no behaviour change."}' > "$id/advice.json"
-  else
-    jq -nc '{recommendation:"do-not-merge",reason:"Non-trivial change; a human should judge intent."}' > "$id/advice.json"
-  fi
+  # NIGHTSHIFT_MOCK_ADVICE=merge,none,… overrides the verdict per advisor slot (ADVISE_SLOT, set by
+  # advise_branches); `none` writes no answer, i.e. an advisor that failed to give one; `bare` a fix
+  # verdict with no other field; `pipe` a merge whose reason holds a literal `\|`.
+  rec=$(printf '%s' "${NIGHTSHIFT_MOCK_ADVICE:-}" | cut -d, -f"${ADVISE_SLOT:-1}")
+  [ -n "$rec" ] || { [ "$type" = typo ] && rec=merge || rec=fix; }
+  [ "$rec" != none ] || return 1
+  [ "$rec" != bare ] || { jq -nc '{recommendation:"fix"}' > "$id/advice.json"; return 0; }
+  jq -nc --arg r "$rec" '{recommendation:(if $r=="pipe" then "merge" else $r end),what:"Fixes a README typo.",benefit:"Readers see correct text.",
+    reason:(if $r=="merge" then "Typo fix; trivial, reversible, no behaviour change." elif $r=="pipe" then "a\\|b" else "mock: "+$r+" verdict." end)}
+    + (if $r=="fix" then {required_fix:"mock: name the missing evidence."} else {} end)' > "$id/advice.json"
 }
 mock_verify() { # workdir item_dir — resolved iff the planted defect is gone from the target file
   local wd="$1" id="$2" file marker
@@ -3176,31 +3184,94 @@ verify_findings() {
   return 0
 }
 
-# Opt-in (NIGHTSHIFT_BRANCH_REVIEW=1): a FRESH read-only agent gives a second opinion — merge /
-# do-not-merge — on every open nightshift/* branch, written into the morning digest. It NEVER merges
-# or pushes (read-only tool profile + git-confinement hold). Prefer a different model/vendor with
-# NIGHTSHIFT_ADVISOR_AGENT (e.g. codex when the night ran on claude); the advisor's model is its own
-# adapter env (NIGHTSHIFT_CODEX_MODEL / NIGHTSHIFT_CLAUDE_MODEL). Emits a markdown section on stdout
-# ("" if disabled or no open branches).
-advise_branches() {
-  [ "${NIGHTSHIFT_BRANCH_REVIEW:-0}" = 1 ] || return 0
-  # Dynamic-scope override: run_agent reads the global NIGHTSHIFT_AGENT; a local here rebinds it for
-  # every advise call without disturbing the night's own adapter.
-  local NIGHTSHIFT_AGENT="${NIGHTSHIFT_ADVISOR_AGENT:-$NIGHTSHIFT_AGENT}"
-  local NIGHTSHIFT_QUOTA_FALLBACK_AGENT=""
-  # If the advisor runs on the adapter that just failed to authenticate, every call would die the
-  # same way and stamp "?" over every open branch in the digest. A DIFFERENT vendor is unaffected by
-  # the outage, and its second opinion on already-pushed branches is still worth having — so gate on
-  # which adapter died, not merely on the fact that one did.
-  if [ -n "$AGENT_FATAL" ] && [ "$NIGHTSHIFT_AGENT" = "$AGENT_FATAL_AGENT" ]; then
-    log "branch review: skipped — $AGENT_FATAL"
-    return 0
+# Independent branch review (ADR 0038): every advisor adapter gives a merge / fix / reject
+# recommendation on every open nightshift/* branch, combined into one table in the morning digest. It
+# NEVER merges or pushes (read-only tool profile + git-confinement hold). The advisors are
+# NIGHTSHIFT_ADVISORS if set (explicitly EMPTY switches the rulebook's list off for one run), else
+# the rulebook's agent.advisors, else the pre-0038 single-advisor opt-in NIGHTSHIFT_BRANCH_REVIEW=1
+# on NIGHTSHIFT_ADVISOR_AGENT (default: the night's adapter). "" = no branch review.
+advisor_list() {
+  local l="${NIGHTSHIFT_ADVISORS-${RB_ADVISORS:-}}"
+  if [ -z "$l" ] && [ -z "${NIGHTSHIFT_ADVISORS+set}" ] && [ "${NIGHTSHIFT_BRANCH_REVIEW:-0}" = 1 ]; then
+    l="${NIGHTSHIFT_ADVISOR_AGENT:-$NIGHTSHIFT_AGENT}"
   fi
-  local i path base branches ref name id wt rec reason out=""
+  printf '%s' "$l"
+}
+
+# The effective advisor list, normalised into ADVISORS (global array) — the ONE reading both the
+# startup validation and advise_branches use, so what was validated is what runs. Entries are
+# trimmed; an empty entry, an unknown adapter, or a repeated one (except the test adapter `mock`)
+# is refused with a message on stderr, the same rules the parser applies to agent.advisors.
+ADVISORS=()
+resolve_advisors() {
+  local raw a seen=","; raw="$(advisor_list)"; ADVISORS=()
+  [ -n "$raw" ] || return 0
+  # `read` stops at the first newline, so a multi-line value would silently drop every later advisor.
+  case "$raw" in *$'\n'*|*$'\r'*) log "invalid branch advisors: the list spans several lines"; return 1 ;; esac
+  local -a parts; IFS=, read -r -a parts <<< "$raw,"
+  for a in "${parts[@]}"; do
+    a="${a#"${a%%[![:space:]]*}"}"; a="${a%"${a##*[![:space:]]}"}"
+    case "$a" in
+      claude|codex|pi|mock) ;;
+      "") log "invalid branch advisors '$raw': empty entry"; return 1 ;;
+      *)  log "invalid branch advisor '$a' (expected claude, codex, pi, or mock)"; return 1 ;;
+    esac
+    if [ "$a" != mock ] && [[ "$seen" == *",$a,"* ]]; then
+      log "invalid branch advisors '$raw': '$a' is listed twice"; return 1
+    fi
+    seen="$seen$a,"; ADVISORS+=("$a")
+  done
+}
+
+# The model an advise stage on that adapter will request — part of the cache key, so a model change
+# re-reviews every branch. The mock has no model; each slot stands in for a distinct one.
+advisor_model() { # adapter slot
+  case "$1" in
+    claude) printf '%s' "${NIGHTSHIFT_CLAUDE_MODEL-${RB_CLAUDE_MODEL:-}}" ;;
+    codex)  printf '%s' "${NIGHTSHIFT_CODEX_MODEL-${RB_CODEX_MODEL:-}}" ;;
+    pi)     printf '%s/%s' "${NIGHTSHIFT_PI_PROVIDER-${RB_PI_PROVIDER:-}}" "${NIGHTSHIFT_PI_MODEL-${RB_PI_MODEL:-}}" ;;
+    *)      printf '%s-%s' "$1" "$2" ;;
+  esac
+}
+
+advisor_label() { # adapter -> digest column header
+  case "$1" in claude) printf 'Claude' ;; codex) printf 'GPT' ;; *) printf '%s' "$1" ;; esac
+}
+
+# An answer is a verdict only if it names one of the three; anything else — no file, prose, a
+# pre-0038 `do-not-merge` — is "?" (ADR 0034: an empty answer is not a verdict) and is never cached.
+# A verdict without its what/benefit/reason (or a `fix` without its required_fix) is incomplete,
+# and caching it would freeze an empty row for as long as the branch stays unchanged.
+valid_advice() { # file
+  jq -e 'def s(k): (.[k] | type) == "string" and (.[k] | test("\\S"));
+    (.recommendation | IN("merge","fix","reject")) and s("what") and s("benefit") and s("reason")
+    and (.recommendation != "fix" or s("required_fix"))' "$1" >/dev/null 2>&1
+}
+
+md_cell() { # text -> one markdown table cell: no newline, no unescaped pipe, backslash or backtick
+  printf '%s' "$1" | tr '\r\n' '  ' | sed -e 's/\\/\\\\/g' -e 's/|/\\|/g' -e 's/`/\\`/g'
+}
+
+ADVICE_CACHE_DIR="$STATE_DIR/advice"
+
+advise_branches() {
+  resolve_advisors || return 0
+  [ "${#ADVISORS[@]}" -gt 0 ] || return 0
+  local -a advisors=("${ADVISORS[@]}")
+  # Dynamic-scope override: run_agent reads the global NIGHTSHIFT_AGENT; a local here rebinds it per
+  # advisor without disturbing the night's own adapter. The quota fallback would swap an advisor for
+  # the very vendor it was chosen to differ from (ADR 0031), so it stays off.
+  local NIGHTSHIFT_AGENT="$NIGHTSHIFT_AGENT" NIGHTSHIFT_QUOTA_FALLBACK_AGENT="" ADVISE_SLOT=1 NIGHTSHIFT_ADVISE_BASE=""
+  local i k path base base_sha branches ref name tip stem finding id wt adapter key cache ans
+  local rec reason rf what benefit cells fixes n_missing n_merge n_reject combined head sep rows=""
+  mkdir -p "$ADVICE_CACHE_DIR"
+  # Retention: an entry older than 90 days only costs one re-review if its branch is still open.
+  find "$ADVICE_CACHE_DIR" -maxdepth 1 -name '*.json' -mtime +90 -delete 2>/dev/null || true
   for i in "${!REPO_PATHS[@]}"; do
     path="${REPO_PATHS[$i]}"; [ -d "$path/.git" ] || continue
     git -C "$path" fetch --prune -q origin 2>/dev/null || true   # --prune: drop stale refs so review skips phantom branches
     base="$(resolve_base "$path" "${REPO_BASES[$i]:-}")"
+    base_sha="$(git -C "$path" rev-parse --verify -q "$base^{commit}" 2>/dev/null)" || continue
     branches=$(git -C "$path" branch -r --no-merged "$base" 2>/dev/null | tr -d ' ' | while IFS= read -r branch; do
       case "$branch" in
         "origin/${BRANCH_PREFIX}"*) printf '%s\n' "$branch" ;;
@@ -3210,24 +3281,70 @@ advise_branches() {
     while IFS= read -r ref; do
       [ -n "$ref" ] || continue
       name="${ref#origin/}"
-      id="$RUNS_DIR/advise-$(date +%s%N)"; mkdir -p "$id"
+      tip="$(git -C "$path" rev-parse --verify -q "$ref^{commit}" 2>/dev/null)" || continue
+      stem="$RUNS_DIR/advise-$(date +%s%N)"
       # Best-effort finding context from the ledger's shipped row for this repo and branch.
-      jq -sc --arg r "$path" --arg b "$name" '([.[]|select(.outcome=="shipped" and .repo==$r and .branch==$b)]|last) // {}
+      finding=$(jq -sc --arg r "$path" --arg b "$name" '([.[]|select(.outcome=="shipped" and .repo==$r and .branch==$b)]|last) // {}
         | {summary:(.summary//""),fingerprint:(.fingerprint//""),type:(.type//""),dimension:(.dimension//"")}' \
-        "$LEDGER" 2>/dev/null > "$id/finding.json" || echo '{}' > "$id/finding.json"
-      wt="$WORKTREES_DIR/$(basename "$id")"
-      if ! setup_worktree "$path" "$wt" "$ref"; then rm -rf "$id"; continue; fi
-      local NIGHTSHIFT_ADVISE_BASE="$base"   # seen by stage_prompt via dynamic scope
-      run_agent advise "$wt" "$id" || true
-      remove_worktree "$path" "$wt"
-      rec=$(jq -r '.recommendation // "?"' "$id/advice.json" 2>/dev/null || echo "?")
-      reason=$(jq -r '.reason // ""'        "$id/advice.json" 2>/dev/null || echo "")
-      out="$out- \`$name\` ($(basename "$path")): **$rec** — $reason"$'\n'
+        "$LEDGER" 2>/dev/null) || finding='{}'
+      wt=""; cells=""; fixes=""; what=""; benefit=""; n_missing=0; n_merge=0; n_reject=0
+      for k in "${!advisors[@]}"; do
+        adapter="${advisors[$k]}"; ADVISE_SLOT=$((k + 1))
+        # Cache key (ADR 0038): repo + branch tip + base + adapter + model. Any of them moving is a
+        # different question, so an unchanged branch is not re-reviewed every night.
+        key=$(printf '%s\n' "$path" "$tip" "$base_sha" "$adapter" "$(advisor_model "$adapter" "$ADVISE_SLOT")" | sha256sum | cut -c1-32)
+        cache="$ADVICE_CACHE_DIR/$key.json"
+        id="$stem-$ADVISE_SLOT-$adapter"; mkdir -p "$id"; ans="$id/advice.json"
+        if valid_advice "$cache"; then
+          cp "$cache" "$ans"
+          log "branch review: $adapter on $name — cached ($(jq -r .recommendation "$ans"))"
+        elif [ -n "$AGENT_FATAL" ] && [ "$adapter" = "$AGENT_FATAL_AGENT" ]; then
+          # The adapter that failed to authenticate would die the same way on every branch; a
+          # DIFFERENT vendor is unaffected, so gate per adapter, not on the fact that one died.
+          log "branch review: $adapter skipped on $name — $AGENT_FATAL"
+        else
+          if [ -z "$wt" ]; then
+            wt="$WORKTREES_DIR/$(basename "$stem")"
+            setup_worktree "$path" "$wt" "$ref" || wt=FAILED
+          fi
+          if [ "$wt" != FAILED ]; then
+            printf '%s\n' "$finding" > "$id/finding.json"
+            NIGHTSHIFT_AGENT="$adapter" NIGHTSHIFT_ADVISE_BASE="$base"   # seen by stage_prompt via dynamic scope
+            run_agent advise "$wt" "$id" || true
+            if valid_advice "$ans"; then
+              cp "$ans" "$cache.tmp.$$" && mv -f "$cache.tmp.$$" "$cache"
+            fi
+          fi
+        fi
+        if valid_advice "$ans"; then
+          rec=$(jq -r .recommendation "$ans"); reason=$(jq -r '.reason // ""' "$ans")
+          [ -n "$what" ] || what=$(jq -r '.what // ""' "$ans")
+          [ -n "$benefit" ] || benefit=$(jq -r '.benefit // ""' "$ans")
+          rf=""; [ "$rec" != fix ] || rf=$(jq -r '.required_fix // ""' "$ans")
+          [ -z "$rf" ] || fixes="$fixes${fixes:+ · }$(advisor_label "$adapter"): $rf"
+          case "$rec" in merge) n_merge=$((n_merge + 1)) ;; reject) n_reject=$((n_reject + 1)) ;; esac
+        else
+          rec="?"; reason=""; n_missing=$((n_missing + 1))
+        fi
+        cells="$cells **$rec**${reason:+ — $(md_cell "$reason")} |"
+      done
+      [ -z "$wt" ] || [ "$wt" = FAILED ] || remove_worktree "$path" "$wt"
+      # Combination rule (ADR 0038): unanimous merge merges, any reject rejects, everything else
+      # needs a fix — and says so when it rests on fewer advisors than were asked.
+      if [ "$n_missing" -eq "${#advisors[@]}" ]; then combined="?"
+      elif [ "$n_reject" -gt 0 ]; then combined=reject
+      elif [ "$n_merge" -eq "${#advisors[@]}" ]; then combined=merge
+      elif [ "$n_missing" -gt 0 ]; then combined="fix ($n_missing advisor$([ "$n_missing" -eq 1 ] || echo s) missing)"
+      else combined=fix
+      fi
+      rows="$rows| $(md_cell "$(basename "$path")") | $(md_cell "$name") | $(md_cell "$what") | $(md_cell "$benefit") |$cells **$combined** | $(md_cell "$fixes") |"$'\n'
     done <<< "$branches"
   done
-  [ -n "$out" ] || return 0
-  printf '\n## Independent branch review (advisor: %s)\n_Read-only second opinion; never merges or pushes._\n\n%s' \
-    "$NIGHTSHIFT_AGENT" "$out"
+  [ -n "$rows" ] || return 0
+  head="| Repo | Branch | What | Benefit |"; sep="|---|---|---|---|"
+  for adapter in "${advisors[@]}"; do head="$head $(advisor_label "$adapter") |"; sep="$sep---|"; done
+  printf '\n## Independent branch review (advisors: %s)\n_Read-only second opinions; never merges or pushes. Recommendation: all merge → merge, any reject → reject, otherwise fix._\n\n%s Recommendation | Required fix |\n%s---|---|\n%s' \
+    "$(IFS=,; printf '%s' "${advisors[*]}" | sed 's/,/, /g')" "$head" "$sep" "$rows"
 }
 
 # ------------------------------------------------------------------- digest ----
@@ -3552,6 +3669,10 @@ main() {
     *) log "invalid review agent '$(review_stage_agent)' (expected claude, codex, pi, or mock)"
        return 2 ;;
   esac
+  # Same for NIGHTSHIFT_ADVISORS / NIGHTSHIFT_ADVISOR_AGENT: the rulebook list is parser-validated,
+  # an env typo would otherwise surface only as a "?" column in the morning.
+  local adv
+  resolve_advisors || return 2
   warn_worktrees_in_home
   pi_daily_update
   guard_state_remote_incoherence
@@ -3582,6 +3703,12 @@ main() {
   if [ "$(review_stage_agent)" != "$NIGHTSHIFT_AGENT" ]; then
     log "review stage: $(review_stage_agent) (the rest of the night runs on $NIGHTSHIFT_AGENT)"
     announce_agent_model "$(review_stage_agent)"
+  fi
+  if [ "${#ADVISORS[@]}" -gt 0 ]; then
+    log "branch advisors: $(IFS=,; printf '%s' "${ADVISORS[*]}") (ADR 0038)"
+    for adv in "${ADVISORS[@]}"; do
+      [ "$adv" = "$NIGHTSHIFT_AGENT" ] || announce_agent_model "$adv"
+    done
   fi
   if [ -n "${NIGHTSHIFT_QUOTA_FALLBACK_AGENT:-}" ]; then
     log "quota fallback: $NIGHTSHIFT_QUOTA_FALLBACK_AGENT (activated only after a structured rejected quota event)"
