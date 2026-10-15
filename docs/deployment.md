@@ -370,10 +370,14 @@ never push outside `nightshift/*` (see [`docs/design/hook-spec.md`](design/hook-
   another harvest can reorder them between commands; copy the stable `ITEM` from `todos`. Your verdict outranks the
   machine's ([ADR 0007](adr/0007-human-verdicts-outrank-machine-reconcile.md),
   [ADR 0021](adr/0021-closing-open-findings.md)).
-- **Independent branch review (opt-in):** set `NIGHTSHIFT_BRANCH_REVIEW=1` to have a fresh read-only
-  agent add a merge / do-not-merge second opinion for every open branch to the digest. Set
-  `NIGHTSHIFT_ADVISOR_AGENT` (e.g. `codex` when the night runs on `claude`) for a different vendor's
-  eyes. It never merges or pushes. Costs extra tokens, so it is off by default.
+- **Independent branch review:** set `agent.advisors` in the rulebook (e.g. `advisors: claude,codex`)
+  and every open branch gets a merge / fix / reject recommendation from each advisor every night. The
+  digest shows them as one table with a combined recommendation and the required fix
+  ([ADR 0038](adr/0038-every-open-branch-gets-two-vendors-advice.md)). Answers are cached in
+  `state/advice/` per branch tip, base, adapter and model, so an unchanged branch is not reviewed
+  again; delete that directory to force a fresh review. `NIGHTSHIFT_ADVISORS` overrides the list
+  (empty = off for one run). The older `NIGHTSHIFT_BRANCH_REVIEW=1` with `NIGHTSHIFT_ADVISOR_AGENT`
+  still runs a single advisor. It never merges or pushes.
 - **Logs:** `bin/schedule.sh logs [N]` or `journalctl --user -u nightshift.service`.
 - **Time limits:** keep `limits.max_run_minutes` below the scheduler's hard timeout (the shipped
   unit uses five hours). The application checks its budget between work items, so an in-flight

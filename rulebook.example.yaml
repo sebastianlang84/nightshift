@@ -91,6 +91,11 @@ limits:
 #   # that sets this and runs any stage on pi also gets a once-per-day `pi update` before the first
 #   # stage, because pi resolves a model against a catalog it caches on disk.
 #   review_agent: pi
+#   # Which adapters advise on every open branch each night (ADR 0038): a comma-separated list of
+#   # claude | codex | pi | mock. Each gives merge / fix / reject; the digest combines them into one
+#   # table. Omitted, no branch review runs. Two vendors is the point: one model's blind spots are
+#   # not double-checked by itself.
+#   advisors: claude,codex
 
 recon:                           # reconnaissance stage (ADR 0010): surveys each repo (docs/, compose,
   enabled: true                  # frontend, tests, CI …) and labels each dimension high/normal/low

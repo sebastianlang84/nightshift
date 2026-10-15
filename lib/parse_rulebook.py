@@ -37,6 +37,7 @@ AGENT_KEYS = (
     "pi_extensions",
     "pi_allow_fix",
     "review_agent",
+    "advisors",
 )
 # Adapters the Runner implements. `review_agent` names one of these; anything else is a typo, and
 # a typo here would silently leave Review on the night's primary adapter — the opposite of what the
@@ -358,6 +359,25 @@ def main(path: str) -> None:
             f"expected one of {', '.join(sorted(REVIEW_AGENTS))}"
         )
     print(f"review_agent\t{review_agent}")
+    # Which adapters give every open branch its nightly merge/fix/reject recommendation (ADR 0038).
+    # A comma-separated scalar (block-style only, like a repo's `dimensions`). Omitted = no branch
+    # review. Each entry names an ADAPTER and is validated like review_agent; a duplicate would ask
+    # the same model twice, which is one opinion billed as two. `mock` alone may repeat: it is the
+    # test adapter, and each of its slots stands in for a distinct model.
+    advisors_raw = agent.get("advisors", "")
+    if "advisors" in agent and not advisors_raw:
+        raise SystemExit("agent.advisors is empty — name one or more adapters, or omit the key entirely")
+    advisors = [a.strip() for a in advisors_raw.split(",")] if advisors_raw else []
+    for a in advisors:
+        if a not in REVIEW_AGENTS:
+            raise SystemExit(
+                f"agent.advisors: unknown adapter {a!r} — "
+                f"expected a comma-separated list of {', '.join(sorted(REVIEW_AGENTS))}"
+            )
+    real = [a for a in advisors if a != "mock"]
+    if len(set(real)) != len(real):
+        raise SystemExit("agent.advisors: an adapter is listed twice")
+    print(f"advisors\t{','.join(advisors)}")
     # Global review-dimension set; ORDER is the cold-start / tie priority in the Runner.
     for d in dims:
         if d not in LENSES:
