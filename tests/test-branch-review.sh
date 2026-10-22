@@ -103,6 +103,29 @@ printf '%s' "$out" | grep -qF '| **?** | **fix (1 advisor missing)** |' || fail 
 # A literal backslash-pipe in a reason survives as text and does not split the cell.
 combo pipe,merge | grep -qF '**merge** — a\\\|b |' || fail "a reason holding \\| broke the table"
 
+# Dead advisors are tracked per adapter (ADR 0038 §1), even when a DIFFERENT adapter already died in
+# the night loop and so filled run_agent's night-wide AGENT_FATAL slot.
+dead_combo() { # NIGHTSHIFT_MOCK_ADVICE -> the section, with the night's claude already dead
+  rm -rf "$TMP/state/advice"
+  ( export NIGHTSHIFT_SOURCED=1 RULEBOOK="$TMP/rulebook.yaml" NIGHTSHIFT_AGENT=mock NIGHTSHIFT_ADVISORS=mock,mock \
+      NIGHTSHIFT_MOCK_ADVICE="$1" NIGHTSHIFT_STATE_DIR="$TMP/state" NIGHTSHIFT_RUNS_DIR="$TMP/runs" \
+      NIGHTSHIFT_DIGEST_DIR="$TMP/digests" NIGHTSHIFT_WORKTREES="$TMP/worktrees"
+    source "$ROOT/bin/nightshift.sh"; load_rulebook
+    AGENT_FATAL="claude has no usable credentials (stage explore)"; AGENT_FATAL_AGENT=claude
+    advise_branches ) 2>"$TMP/err.combo"
+}
+# A second adapter that cannot authenticate is recorded and not called again.
+before=$(advise_rows)
+out="$(dead_combo noauth,merge)"
+grep -q 'branch review: mock skipped on nightshift/' "$TMP/err.combo" || fail "a second dead advisor was not skipped" "$TMP/err.combo"
+[ "$(advise_rows)" -eq $((before + 1)) ] || fail "a second dead advisor was called again ($((before + 1)) advise stages expected, got $(advise_rows))"
+printf '%s' "$out" | grep -qF '| **?** | **?** | **?** |' || fail "a dead advisor's slots were not marked missing: $out"
+# An empty answer is still retried (ADR 0034): one stage for slot 1, two for slot 2.
+before=$(advise_rows)
+out="$(dead_combo merge,empty)"
+[ "$(advise_rows)" -eq $((before + 3)) ] || fail "an empty advisor answer was not retried after another adapter died (got $(( $(advise_rows) - before )) stages)"
+printf '%s' "$out" | grep -qF '| **?** | **fix (1 advisor missing)** |' || fail "an empty advisor answer was not marked missing: $out"
+
 # Cell text cannot break the table.
 ( export NIGHTSHIFT_SOURCED=1 NIGHTSHIFT_STATE_DIR="$TMP/state" NIGHTSHIFT_RUNS_DIR="$TMP/runs"
   source "$ROOT/bin/nightshift.sh"

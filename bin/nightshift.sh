@@ -1264,10 +1264,13 @@ mock_advise() { # workdir item_dir — deterministic second-opinion from the bra
   type=$(jq -r '.type // ""' "$id/finding.json" 2>/dev/null || echo "")
   # NIGHTSHIFT_MOCK_ADVICE=merge,none,… overrides the verdict per advisor slot (ADVISE_SLOT, set by
   # advise_branches); `none` writes no answer, i.e. an advisor that failed to give one; `bare` a fix
-  # verdict with no other field; `pipe` a merge whose reason holds a literal `\|`.
+  # verdict with no other field; `pipe` a merge whose reason holds a literal `\|`; `noauth` a CLI that
+  # is not logged in and `empty` an empty answer, both left for run_agent's own detection to find.
   rec=$(printf '%s' "${NIGHTSHIFT_MOCK_ADVICE:-}" | cut -d, -f"${ADVISE_SLOT:-1}")
   [ -n "$rec" ] || { [ "$type" = typo ] && rec=merge || rec=fix; }
   [ "$rec" != none ] || return 1
+  [ "$rec" != noauth ] || { echo "mock: Not logged in" > "$id/advise.err"; return 1; }
+  [ "$rec" != empty ] || { : > "$id/advise.out"; return 1; }
   [ "$rec" != bare ] || { jq -nc '{recommendation:"fix"}' > "$id/advice.json"; return 0; }
   jq -nc --arg r "$rec" '{recommendation:(if $r=="pipe" then "merge" else $r end),what:"Fixes a README typo.",benefit:"Readers see correct text.",
     reason:(if $r=="merge" then "Typo fix; trivial, reversible, no behaviour change." elif $r=="pipe" then "a\\|b" else "mock: "+$r+" verdict." end)}
@@ -3262,6 +3265,14 @@ advise_branches() {
   # advisor without disturbing the night's own adapter. The quota fallback would swap an advisor for
   # the very vendor it was chosen to differ from (ADR 0031), so it stays off.
   local NIGHTSHIFT_AGENT="$NIGHTSHIFT_AGENT" NIGHTSHIFT_QUOTA_FALLBACK_AGENT="" ADVISE_SLOT=1 NIGHTSHIFT_ADVISE_BASE=""
+  # Dead adapters are tracked per adapter (ADR 0038 §1), not in run_agent's night-wide slot: that
+  # slot keeps only the FIRST death, so a second dead advisor went unrecorded and was called again on
+  # every branch, and a full slot also switched off every advisor's empty-answer retry (ADR 0034).
+  # Each advisor call therefore starts from an empty local slot; what it leaves there is that
+  # adapter's death alone.
+  local -A dead=()
+  [ -z "$AGENT_FATAL" ] || [ -z "$AGENT_FATAL_AGENT" ] || dead[$AGENT_FATAL_AGENT]="$AGENT_FATAL"
+  local AGENT_FATAL="" AGENT_FATAL_AGENT=""
   local i k path base base_sha branches ref name tip stem finding id wt adapter key cache ans
   local rec reason rf what benefit cells fixes n_missing n_merge n_reject combined head sep rows=""
   mkdir -p "$ADVICE_CACHE_DIR"
@@ -3298,10 +3309,10 @@ advise_branches() {
         if valid_advice "$cache"; then
           cp "$cache" "$ans"
           log "branch review: $adapter on $name — cached ($(jq -r .recommendation "$ans"))"
-        elif [ -n "$AGENT_FATAL" ] && [ "$adapter" = "$AGENT_FATAL_AGENT" ]; then
+        elif [ -n "${dead[$adapter]+x}" ]; then
           # The adapter that failed to authenticate would die the same way on every branch; a
           # DIFFERENT vendor is unaffected, so gate per adapter, not on the fact that one died.
-          log "branch review: $adapter skipped on $name — $AGENT_FATAL"
+          log "branch review: $adapter skipped on $name — ${dead[$adapter]}"
         else
           if [ -z "$wt" ]; then
             wt="$WORKTREES_DIR/$(basename "$stem")"
@@ -3310,7 +3321,12 @@ advise_branches() {
           if [ "$wt" != FAILED ]; then
             printf '%s\n' "$finding" > "$id/finding.json"
             NIGHTSHIFT_AGENT="$adapter" NIGHTSHIFT_ADVISE_BASE="$base"   # seen by stage_prompt via dynamic scope
+            AGENT_FATAL=""; AGENT_FATAL_AGENT=""
             run_agent advise "$wt" "$id" || true
+            if [ -n "$AGENT_FATAL" ]; then
+              dead[$adapter]="$AGENT_FATAL"
+              log "branch review: $adapter is dead for the rest of the review — $AGENT_FATAL"
+            fi
             if valid_advice "$ans"; then
               cp "$ans" "$cache.tmp.$$" && mv -f "$cache.tmp.$$" "$cache"
             fi
