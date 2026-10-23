@@ -22,6 +22,7 @@ repos:
     findings: 3
     dimensions: docs,tests
     test_net: true
+    test_robind: /opt/dep/.git:/srv/shared
     setup_cmd: bash scripts/setup.sh --quiet
     test_cmd: make test && ./extra check
 EOF
@@ -29,13 +30,27 @@ EOF
 actual=$(python3 "$ROOT/lib/parse_rulebook.py" "$TMP/rulebook.yaml" | grep '^repo')
 # test_cmd rides last on purpose (ADR 0022): a command contains spaces, and the Runner's
 # `read` soaks the remainder into the final variable — so it must have no field after it.
-# Every later field, test_net (ADR 0026) and setup_cmd (ADR 0037) included, goes BEFORE it.
+# Every later field, test_net and test_robind (ADR 0026) and setup_cmd (ADR 0037) included, goes
+# BEFORE it.
 expected=$(printf '%s\n' \
-  $'repo\tpath=/srv/no-base\tmode=branch-fix\tbase=\tfindings=5\tdimensions=\ttest_net=false\tsetup_cmd=\ttest_cmd=make check' \
-  $'repo\tpath=/srv/no-findings\tmode=findings-only\tbase=develop\tfindings=\tdimensions=security,infra\ttest_net=false\tsetup_cmd=\ttest_cmd=' \
-  $'repo\tpath=/srv/all-fields\tmode=branch-fix\tbase=release\tfindings=3\tdimensions=docs,tests\ttest_net=true\tsetup_cmd=bash scripts/setup.sh --quiet\ttest_cmd=make test && ./extra check')
+  $'repo\tpath=/srv/no-base\tmode=branch-fix\tbase=\tfindings=5\tdimensions=\ttest_net=false\ttest_robind=\tsetup_cmd=\ttest_cmd=make check' \
+  $'repo\tpath=/srv/no-findings\tmode=findings-only\tbase=develop\tfindings=\tdimensions=security,infra\ttest_net=false\ttest_robind=\tsetup_cmd=\ttest_cmd=' \
+  $'repo\tpath=/srv/all-fields\tmode=branch-fix\tbase=release\tfindings=3\tdimensions=docs,tests\ttest_net=true\ttest_robind=/opt/dep/.git:/srv/shared\tsetup_cmd=bash scripts/setup.sh --quiet\ttest_cmd=make test && ./extra check')
 
 [ "$actual" = "$expected" ]
+
+# A relative test_robind entry would resolve against whatever directory the Runner is in — reject it.
+cat > "$TMP/relative-robind.yaml" <<'EOF2'
+repos:
+  - path: /srv/rel
+    mode: branch-fix
+    test_robind: /opt/ok:dep/.git
+    test_cmd: make test
+EOF2
+if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/relative-robind.yaml" >/dev/null 2>"$TMP/stderr"; then
+  echo "test-rulebook-parser: a relative test_robind entry must be rejected" >&2; exit 1
+fi
+grep -q "test_robind entries must be absolute paths" "$TMP/stderr"
 
 # A tab inside test_cmd would split the field and shift everything after it — reject it.
 cat > "$TMP/tabbed.yaml" <<EOF

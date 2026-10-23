@@ -138,6 +138,10 @@ repos:
   #                              # dependencies as it runs (`npm ci`, `uv run --with-requirements`).
   #                              # Even with it on the sandbox holds no credentials, so the channel
   #                              # carries worktree content, not your SSH key — but it IS a channel.
+  #   test_robind: /home/me/dev/lib/.git  # OPTIONAL (ADR 0026): `:`-separated absolute paths bound
+  #                              # READ-ONLY into THIS repo's gate sandbox, which otherwise sees nothing
+  #                              # under $HOME. For a local checkout the lockfile names as
+  #                              # `git+file:///…`, bind its `.git` only. $HOME or an ancestor is refused.
   #   setup_cmd: npm ci         # OPTIONAL (ADR 0037): dependency install the Runner runs in the gate's
   #                              # sandbox (same egress as test_net) before EVERY Fix stage, so a Fix
   #                              # stage that executes commands (codex) can run the repo's checks. It

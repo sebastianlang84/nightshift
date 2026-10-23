@@ -139,8 +139,11 @@ this fleet needs `node` from nvm and `uv` from `~/.local/bin` in the same gate) 
 node install additionally gets its prefix bound, gated on the directory holding a `node` binary
 **and** the prefix holding a node-modules tree — both conditions, because either one alone mounts
 `~/.local`, which is npm's global prefix on this host.
-Anything else is named by the host in `NIGHTSHIFT_TEST_SANDBOX_ROBIND`, and a bind that would
-re-expose `$HOME` — `/`, `/home`, `$HOME` itself — is refused with a log line rather than mounted.
+Anything else is named by the host in `NIGHTSHIFT_TEST_SANDBOX_ROBIND`, or — for what only one
+repo's suite needs, such as a local checkout its lockfile names as `git+file:///…` — in that repo's
+rulebook `test_robind` (added 2026-10-24, when market-digest's gate could not reach
+`~/dev/valuelens`). A bind that would re-expose `$HOME` — `/`, `/home`, `$HOME` itself — is refused
+with a log line rather than mounted, from either list.
 
 **Confining the gate while it runs is not sufficient, and that was nearly the whole story.** The
 sandbox contains the suite for its lifetime; `finalize` then runs `checkout -b`, `add -A` and

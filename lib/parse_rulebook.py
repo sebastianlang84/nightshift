@@ -53,7 +53,7 @@ CODEX_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 # every setting beneath it would silently revert to its default.
 TOP_LEVEL_KEYS = ("branch_prefix", "limits", "recon", "agent", "dimensions", "repos")
 # `test_cmd` MUST stay last — see the emitter at the bottom of main(). A new field goes before it.
-REPO_KEYS = ("path", "mode", "base", "findings", "dimensions", "test_net", "setup_cmd", "test_cmd")
+REPO_KEYS = ("path", "mode", "base", "findings", "dimensions", "test_net", "test_robind", "setup_cmd", "test_cmd")
 # The modes the Runner actually implements. A repo whose mode is not in here is a typo, not a
 # feature request — see the validation below for why that must abort rather than be skipped.
 REPO_MODES = ("findings-only", "branch-fix")
@@ -446,6 +446,21 @@ def main(path: str) -> None:
             raise SystemExit(
                 f"repo {r.get('path', '')}: test_net must be true or false, got {test_net!r}"
             )
+        # Extra paths bound READ-ONLY into THIS repo's gate sandbox (ADR 0026), `:`-separated like the
+        # host-wide NIGHTSHIFT_TEST_SANDBOX_ROBIND. Per repo because the usual case is one repo's
+        # dependency on a local checkout (`git+file:///…`), and the host-wide knob would show that
+        # checkout to every other repo's suite too. Absolute paths only: a relative one would resolve
+        # against whatever directory the Runner happens to be in.
+        test_robind = r.get("test_robind", "")
+        for p in test_robind.split(":"):
+            if p and not p.startswith("/"):
+                raise SystemExit(
+                    f"repo {r.get('path', '')}: test_robind entries must be absolute paths, got {p!r}"
+                )
+        if "\t" in test_robind:
+            raise SystemExit(
+                f"repo {r.get('path', '')}: test_robind must not contain a tab"
+            )
         # The dependency setup the Runner runs in the gate's sandbox before every Fix stage (ADR 0037),
         # so a Fix stage that can execute commands finds the repo's dependencies installed. Optional;
         # it rides on the row second to last, which is why it may not contain a tab either.
@@ -462,6 +477,7 @@ def main(path: str) -> None:
             f"\tfindings={findings}"
             f"\tdimensions={r.get('dimensions', '')}"
             f"\ttest_net={test_net}"
+            f"\ttest_robind={test_robind}"
             f"\tsetup_cmd={setup_cmd}"
             f"\ttest_cmd={test_cmd}"
         )

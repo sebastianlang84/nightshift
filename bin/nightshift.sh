@@ -99,7 +99,7 @@ warn_worktrees_in_home() {
 }
 
 # ---------------------------------------------------------------- rulebook ----
-declare -a REPO_PATHS=() REPO_MODES=() REPO_BASES=() REPO_FINDINGS=() REPO_DIMS=() REPO_TEST_NETS=() REPO_SETUP_CMDS=() REPO_TEST_CMDS=() DIMENSIONS=()
+declare -a REPO_PATHS=() REPO_MODES=() REPO_BASES=() REPO_FINDINGS=() REPO_DIMS=() REPO_TEST_NETS=() REPO_TEST_ROBINDS=() REPO_SETUP_CMDS=() REPO_TEST_CMDS=() DIMENSIONS=()
 BASE_RESOLUTION_WARN_MISSING=1
 # shellcheck source=../lib/base_resolution.sh
 source "$NIGHTSHIFT_HOME/lib/base_resolution.sh"
@@ -133,7 +133,7 @@ log_model_selection() { # adapter env_var_name rulebook_value
 repo_id() { realpath -m -- "$1" 2>/dev/null || printf '%s' "${1%/}"; }
 
 load_rulebook() {
-  local tag a b c d e f g h rb_run_branches="" parsed path
+  local tag a b c d e f g h i rb_run_branches="" parsed path
   # Capture the parser's output AND its exit status. Reading it directly via
   # `done < <(python3 …)` hides a nonzero exit from `set -euo pipefail`, so a
   # mid-stream parse error (e.g. a bad `findings:` on repo #2) silently truncated
@@ -141,7 +141,7 @@ load_rulebook() {
   # run proceeded on a partial fleet. Fail closed instead: abort the whole run.
   parsed="$(python3 "$NIGHTSHIFT_HOME/lib/parse_rulebook.py" "$RULEBOOK")" \
     || { log "rulebook parse failed ($RULEBOOK) — aborting run"; exit 1; }
-  while IFS=$'\t' read -r tag a b c d e f g h; do
+  while IFS=$'\t' read -r tag a b c d e f g h i; do
     case "$tag" in
       prefix)                BRANCH_PREFIX="$a" ;;
       max_open)              MAX_OPEN="$a" ;;
@@ -169,7 +169,7 @@ load_rulebook() {
       primary_agent)         RB_PRIMARY_AGENT="$a" ;;
       pi_allow_fix)          RB_PI_ALLOW_FIX="$a" ;;
       dimension)             DIMENSIONS+=("$a") ;;
-      repo)                  path="$(repo_id "${a#path=}")"; REPO_PATHS+=("$path"); REPO_MODES+=("${b#mode=}"); REPO_BASES+=("${c#base=}"); REPO_FINDINGS+=("${d#findings=}"); REPO_DIMS+=("${e#dimensions=}"); REPO_TEST_NETS+=("${f#test_net=}"); REPO_SETUP_CMDS+=("${g#setup_cmd=}"); REPO_TEST_CMDS+=("${h#test_cmd=}") ;;
+      repo)                  path="$(repo_id "${a#path=}")"; REPO_PATHS+=("$path"); REPO_MODES+=("${b#mode=}"); REPO_BASES+=("${c#base=}"); REPO_FINDINGS+=("${d#findings=}"); REPO_DIMS+=("${e#dimensions=}"); REPO_TEST_NETS+=("${f#test_net=}"); REPO_TEST_ROBINDS+=("${g#test_robind=}"); REPO_SETUP_CMDS+=("${h#setup_cmd=}"); REPO_TEST_CMDS+=("${i#test_cmd=}") ;;
     esac
   done <<< "$parsed"
   MAX_FINDINGS="${MAX_FINDINGS:-1}"
@@ -1911,6 +1911,13 @@ repo_test_net() { # repo -> 1 if this repo's gate sandbox gets network egress, e
   echo 0
 }
 
+repo_test_robind() { # repo -> this repo's extra read-only gate binds, `:`-separated (rulebook test_robind)
+  local repo="$1" i
+  for i in "${!REPO_PATHS[@]}"; do
+    [ "${REPO_PATHS[$i]}" = "$repo" ] && { printf '%s' "${REPO_TEST_ROBINDS[$i]:-}"; return; }
+  done
+}
+
 repo_dimensions() { # repo -> candidate dimensions, space-separated, in priority order (ADR 0010)
   # Per-repo `dimensions:` (comma-separated) overrides the global set. This IS the candidate set and
   # nothing downstream shrinks it: the human rulebook is the only exclusion authority (ADR 0015);
@@ -2362,8 +2369,8 @@ _test_robind() { # path -> append a read-only bind, refusing anything that would
 # its network reach stays exactly as wide as it already is today, and narrowing it is tracked
 # separately in OPEN-QUESTIONS.md. The ship gate never passes `host`, and a caller that does gets
 # no egress proxy — the two are alternatives, not layers.
-build_test_sandbox() { # worktree sandbox_home net(0|1|host) item_dir -> fills TEST_SANDBOX_ARGV
-  local wt="$1" sbhome="$2" net="$3" id="$4" p
+build_test_sandbox() { # worktree sandbox_home net(0|1|host) item_dir [robind] -> fills TEST_SANDBOX_ARGV
+  local wt="$1" sbhome="$2" net="$3" id="$4" robind="${5:-}" p
   local -a extra=()
   TEST_SANDBOX_ARGV=(
     bwrap
@@ -2449,6 +2456,10 @@ build_test_sandbox() { # worktree sandbox_home net(0|1|host) item_dir -> fills T
   done
   # Host-declared extras — a warmed dependency cache, a shared toolchain, a runtime outside /usr.
   IFS=: read -r -a extra <<<"${NIGHTSHIFT_TEST_SANDBOX_ROBIND:-}"
+  for p in ${extra[@]+"${extra[@]}"}; do _test_robind "$p"; done
+  # Repo-declared extras (rulebook `test_robind`) — what only THIS repo's suite needs, typically a
+  # local checkout its lockfile names as `git+file:///…`. Same refusals as the host-wide list.
+  IFS=: read -r -a extra <<<"$robind"
   for p in ${extra[@]+"${extra[@]}"}; do _test_robind "$p"; done
   # The ONLY writable paths: the worktree (which is what is about to be committed) and a HOME.
   TEST_SANDBOX_ARGV+=( --bind "$wt" "$wt" --bind "$sbhome" "$sbhome" --chdir "$wt" )
@@ -2795,7 +2806,7 @@ gate_exec() { # repo worktree item_dir cmd out label consequence -> the command'
     ( cd "$wt" && export PATH="${NIGHTSHIFT_TEST_PATH:+$NIGHTSHIFT_TEST_PATH:}$PATH" \
       && timeout "$TEST_TIMEOUT" bash -c "$tcmd" </dev/null ) >"$out" 2>&1 || trc=$?
   else
-    build_test_sandbox "$wt" "$sbhome" "$net" "$id"
+    build_test_sandbox "$wt" "$sbhome" "$net" "$id" "$(repo_test_robind "$repo")"
     # Whether the sandbox was actually BUILT cannot be read off the exit status: bubblewrap exits 1
     # for a missing bind source, a bad --chdir and an unknown option alike, and it also propagates
     # the child's own status, so no value is unambiguous. `--json-status-fd` is: bwrap writes an

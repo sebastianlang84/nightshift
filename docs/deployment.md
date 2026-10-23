@@ -169,7 +169,10 @@ operationally:
 - **A suite that needs something from outside `/usr` must have it bound in.** Every entry of
   `NIGHTSHIFT_TEST_PATH` is bound read-only *and* put on the gate's `PATH` — it is a `:`-separated
   list, so the fleet's `node` (nvm) and `uv` (`~/.local/bin`) travel together. Anything a suite needs
-  but does not execute from `PATH` goes in `NIGHTSHIFT_TEST_SANDBOX_ROBIND`. A bind that would
+  but does not execute from `PATH` goes in `NIGHTSHIFT_TEST_SANDBOX_ROBIND` — or, when only one repo
+  needs it, in that repo's rulebook `test_robind`, so no other repo's gate sees it. The usual case
+  is a local checkout named as `git+file:///…` in a lockfile: bind its `.git` directory only, which
+  is all `git fetch` reads and keeps untracked files such as a `.env` out. A bind that would
   re-expose `$HOME` is refused with a log line. `nightshift-cron.sh` fills that variable with the
   operator's **python user site-packages** (`python3 -m site --user-site`) when it exists, because a
   `pip install --user` package is otherwise invisible in a gate; the bind is read-only and adds

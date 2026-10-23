@@ -60,7 +60,7 @@ NIGHTSHIFT_SOURCED=1 . "$ROOT/bin/nightshift.sh" >/dev/null 2>&1
 set +e
 TEST_TIMEOUT="${GATE_TIMEOUT:-60}"; TEST_MEMORY_MB=4096; TEST_MAX_PROCS=2048; TEST_FSIZE_MB="${GATE_FSIZE_MB:-2048}"
 REPO_PATHS=("$REPO"); REPO_MODES=(branch-fix)
-REPO_TEST_NETS=("${GATE_NET:-false}"); REPO_TEST_CMDS=("$GATE_CMD; exit 1")
+REPO_TEST_NETS=("${GATE_NET:-false}"); REPO_TEST_ROBINDS=("${GATE_ROBIND:-}"); REPO_TEST_CMDS=("$GATE_CMD; exit 1")
 run_test_gate "$REPO" "$WT" "$ID"; echo "GATE_RC=$?"
 cat "$ID/tests.log" 2>/dev/null
 # The probe's LAST command decides its exit status, and the caller assigns that under `set -e`:
@@ -179,6 +179,17 @@ grep -q 'REFUSING read-only bind /' <<<"$out" \
 mkdir -p "$TMP/dep"; echo "dependency" > "$TMP/dep/marker"
 out="$(gate "cat '$TMP/dep/marker'" NIGHTSHIFT_TEST_SANDBOX_ROBIND="$TMP/dep")"
 grep -q 'dependency' <<<"$out" || { echo "$out" >&2; fail "NIGHTSHIFT_TEST_SANDBOX_ROBIND did not bind a legitimate path"; }
+
+# The repo's own `test_robind` (rulebook) binds the same way, read-only, and only for that repo's
+# gate — the shape a suite needs for a `git+file:///…` dependency on a local checkout.
+mkdir -p "$TMP/repodep"; echo "repo-dependency" > "$TMP/repodep/marker"
+out="$(gate "cat '$TMP/repodep/marker'; echo x > '$TMP/repodep/written' 2>&1 || echo WRITE-REFUSED")"
+grep -q 'repo-dependency' <<<"$out" && { echo "$out" >&2; fail "a path no test_robind names was visible in the gate"; }
+out="$(gate "cat '$TMP/repodep/marker'; echo x > '$TMP/repodep/written' 2>&1 || echo WRITE-REFUSED" GATE_ROBIND="$TMP/repodep")"
+grep -q 'repo-dependency' <<<"$out" || { echo "$out" >&2; fail "the repo's test_robind did not bind its path"; }
+grep -q 'WRITE-REFUSED' <<<"$out" && [ ! -e "$TMP/repodep/written" ] || { echo "$out" >&2; fail "a test_robind path was WRITABLE from the gate"; }
+out="$(gate 'ls ~/.ssh /home 2>&1; echo done' GATE_ROBIND="${HOME:-/home}")"
+grep -q 'REFUSING read-only bind' <<<"$out" || { echo "$out" >&2; fail "a test_robind containing \$HOME was not refused"; }
 
 # --- 7. writable: the worktree, and nothing outside it -----------------------
 out="$(gate "echo fix > gate-wrote.txt; echo escape > /usr/gate-escaped 2>&1; echo escape > /etc/gate-escaped 2>&1; echo escape > '$TMP/gate-escaped' 2>&1")"
