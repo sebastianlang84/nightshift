@@ -3278,6 +3278,10 @@ advise_branches() {
   mkdir -p "$ADVICE_CACHE_DIR"
   # Retention: an entry older than 90 days only costs one re-review if its branch is still open.
   find "$ADVICE_CACHE_DIR" -maxdepth 1 -name '*.json' -mtime +90 -delete 2>/dev/null || true
+  # "Open" is ADR 0025's, as in open_branch_count: a branch the ledger has settled (dropped, wontfix,
+  # squash-merged...) is decided even if its ref survives, and advising on it would bill every
+  # advisor again each time its base moves.
+  refresh_settled_branches
   for i in "${!REPO_PATHS[@]}"; do
     path="${REPO_PATHS[$i]}"; [ -d "$path/.git" ] || continue
     git -C "$path" fetch --prune -q origin 2>/dev/null || true   # --prune: drop stale refs so review skips phantom branches
@@ -3292,6 +3296,7 @@ advise_branches() {
     while IFS= read -r ref; do
       [ -n "$ref" ] || continue
       name="${ref#origin/}"
+      branch_is_settled "$path" "$name" && continue
       tip="$(git -C "$path" rev-parse --verify -q "$ref^{commit}" 2>/dev/null)" || continue
       stem="$RUNS_DIR/advise-$(date +%s%N)"
       # Best-effort finding context from the ledger's shipped row for this repo and branch.
