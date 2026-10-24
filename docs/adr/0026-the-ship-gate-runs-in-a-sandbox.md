@@ -143,7 +143,8 @@ Anything else is named by the host in `NIGHTSHIFT_TEST_SANDBOX_ROBIND`, or — f
 repo's suite needs, such as a local checkout its lockfile names as `git+file:///…` — in that repo's
 rulebook `test_robind` (added 2026-10-24, when market-digest's gate could not reach
 `~/dev/valuelens`). A bind that would re-expose `$HOME` — `/`, `/home`, `$HOME` itself — is refused
-with a log line rather than mounted, from either list.
+with a log line rather than mounted, from either list. A declared path that does not exist is
+logged too: dropped silently, it would surface only as a red suite handed back to Fix.
 
 **Confining the gate while it runs is not sufficient, and that was nearly the whole story.** The
 sandbox contains the suite for its lifetime; `finalize` then runs `checkout -b`, `add -A` and
