@@ -2349,19 +2349,20 @@ _test_robind() { # path [declared] -> append a read-only bind, refusing anything
   local p="$1" declared="${2:-}" rp
   [ -n "$p" ] || return 0
   rp="$(realpath -m -- "$p" 2>/dev/null || printf '%s' "$p")"
+  # A path someone DECLARED (NIGHTSHIFT_TEST_SANDBOX_ROBIND, rulebook test_robind) that is not there
+  # is a typo or a moved checkout, under /usr as much as anywhere. Dropped quietly, it surfaces only
+  # as a red suite — which loops back into Fix as a regression to repair, every night, for a host
+  # fault no stage can see.
+  if [ ! -e "$rp" ]; then
+    [ -n "$declared" ] && log "  test sandbox: read-only bind $p does not exist — not bound"
+    return 0
+  fi
   case "$rp" in /usr|/usr/*) return 0 ;; esac   # already bound whole
   # `/`, `/home`, `$HOME` — a bind of any ancestor of $HOME hands the suite ~/.ssh and the gh token
   # back, i.e. exactly the reach this sandbox exists to remove. Refuse it out loud; a silently
   # widened sandbox is worse than none, because the ADR says it is closed.
   if [ "$rp" = / ] || { [ -n "${HOME:-}" ] && { [ "$rp" = "$HOME" ] || [ "${HOME#"$rp"/}" != "$HOME" ]; }; }; then
     log "  test sandbox: REFUSING read-only bind $p — it contains \$HOME"
-    return 0
-  fi
-  # A path someone DECLARED (NIGHTSHIFT_TEST_SANDBOX_ROBIND, rulebook test_robind) that is not there
-  # is a typo or a moved checkout. Dropped quietly, it surfaces only as a red suite — which loops
-  # back into Fix as a regression to repair, every night, for a host fault no stage can see.
-  if [ ! -e "$rp" ]; then
-    [ -n "$declared" ] && log "  test sandbox: read-only bind $p does not exist — not bound"
     return 0
   fi
   TEST_SANDBOX_ARGV+=( --ro-bind "$rp" "$rp" )

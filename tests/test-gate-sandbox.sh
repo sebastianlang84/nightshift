@@ -198,6 +198,9 @@ grep -q "read-only bind $TMP/no-such-dep does not exist" <<<"$out" \
 out="$(gate 'echo missing-checked' NIGHTSHIFT_TEST_SANDBOX_ROBIND="$TMP/no-such-hostdep")"
 grep -q "read-only bind $TMP/no-such-hostdep does not exist" <<<"$out" \
   || { echo "$out" >&2; fail "a NIGHTSHIFT_TEST_SANDBOX_ROBIND path that does not exist was dropped without a log line"; }
+out="$(gate 'echo missing-checked' GATE_ROBIND=/usr/local/nightshift-no-such-dep)"
+grep -q "read-only bind /usr/local/nightshift-no-such-dep does not exist" <<<"$out" \
+  || { echo "$out" >&2; fail "a declared bind under /usr that does not exist was dropped without a log line"; }
 
 # --- 7. writable: the worktree, and nothing outside it -----------------------
 out="$(gate "echo fix > gate-wrote.txt; echo escape > /usr/gate-escaped 2>&1; echo escape > /etc/gate-escaped 2>&1; echo escape > '$TMP/gate-escaped' 2>&1")"
