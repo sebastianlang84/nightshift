@@ -182,4 +182,16 @@ git -C "$TMP/repo" push -q origin 'nightshift/a|b'
 git -C "$TMP/repo" checkout -q main
 combo merge,merge | grep -qF '| nightshift/a\|b |' || fail "a branch name holding | broke the table"
 
+# A branch the ledger has settled is not open (ADR 0025), even though its ref survives unmerged:
+# no advisor is asked about it and it has no row, while the still-open branch keeps its own.
+typo=$(git --git-dir="$TMP/remote.git" for-each-ref --format='%(refname:lstrip=2)' 'refs/heads/nightshift/*' | grep -vF 'a|b')
+[ -n "$typo" ] || fail "typo branch not found on the remote"
+jq -nc --arg r "$TMP/repo" --arg b "$typo" '{repo:$r,branch:$b,outcome:"verdict",verdict:"dropped",ts:"2026-10-23T00:00:00+00:00"}' \
+  >> "$TMP/state/ledger.jsonl"
+before=$(advise_rows)
+out="$(combo merge,merge)"
+printf '%s' "$out" | grep -qF "| $typo |" && fail "a dropped branch was still advised on: $out"
+printf '%s' "$out" | grep -qF '| nightshift/a\|b |' || fail "the open branch lost its row beside a settled one: $out"
+[ "$(advise_rows)" -eq $((before + 2)) ] || fail "a settled branch was billed an advise stage (got $(( $(advise_rows) - before )) stages, expected 2)"
+
 echo "test-branch-review: ok"
