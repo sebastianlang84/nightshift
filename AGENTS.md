@@ -36,6 +36,7 @@ it does not repeat architecture (CONTEXT.md/ADRs) or global rules (git, secrets,
 ## Operator rules
 
 - Never propose a notification or alerting channel for nightshift runs; the digest file is the report.
+- Open `nightshift/*` branches are reviewed here, not merged here (Sebastian, 2026-10-27). Write the recommendation per branch to `digests/<date>-branch-review.md`, then file one `kb` task per target repo (`--repo <repo> --todo`) with the verdicts, any required correction, and the urgent request to merge as a merge commit and delete the merged remote branches and their worktrees right after. The board routes it to that repo's session; this one only merges branches of this repo when the board hands it that task.
 
 ## Before touching confinement / safety
 
