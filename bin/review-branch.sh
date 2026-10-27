@@ -33,6 +33,10 @@ RULEBOOK="${RULEBOOK:-$NIGHTSHIFT_HOME/rulebook.yaml}"
 
 PREFIX="nightshift/"
 declare -a REPO_PATHS=() REPO_BASES=()
+# The same normalization as the Runner and harvest: base_for_repo matches paths as strings, so a
+# trailing slash, a relative path or a symlink would otherwise miss the rulebook's `base:` and
+# review a gitflow branch against main.
+repo_id() { realpath -m -- "$1" 2>/dev/null || printf '%s' "${1%/}"; }
 # shellcheck source=../lib/base_resolution.sh
 source "$NIGHTSHIFT_HOME/lib/base_resolution.sh"
 load_rulebook() {
@@ -44,7 +48,7 @@ load_rulebook() {
   while IFS=$'\t' read -r tag a b c d e; do
     case "$tag" in
       prefix) PREFIX="$a" ;;
-      repo)   REPO_PATHS+=("${a#path=}"); REPO_BASES+=("${c#base=}") ;;
+      repo)   REPO_PATHS+=("$(repo_id "${a#path=}")"); REPO_BASES+=("${c#base=}") ;;
     esac
   done <<< "$parsed"
 }
@@ -224,7 +228,7 @@ review_repo() { # repo [branchref]
 REVIEW_RC=0   # set to 1 by any UNKNOWN verdict; the run continues, the exit status reports it
 load_rulebook
 if [ "$#" -ge 1 ]; then
-  review_repo "$1" "${2:-}"
+  review_repo "$(repo_id "$1")" "${2:-}"
 else
   for repo in "${REPO_PATHS[@]}"; do review_repo "$repo"; done
 fi
