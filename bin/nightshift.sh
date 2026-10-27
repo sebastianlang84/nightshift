@@ -2345,10 +2345,18 @@ open_pr() { # repo wt branch item_dir base -> echoes PR url ("" if none)
 TEST_SANDBOX="${NIGHTSHIFT_TEST_SANDBOX:-bwrap}"
 declare -a TEST_SANDBOX_ARGV=()
 
-_test_robind() { # path -> append a read-only bind, refusing anything that would re-expose $HOME
-  local p="$1" rp
+_test_robind() { # path [declared] -> append a read-only bind, refusing anything that would re-expose $HOME
+  local p="$1" declared="${2:-}" rp
   [ -n "$p" ] || return 0
   rp="$(realpath -m -- "$p" 2>/dev/null || printf '%s' "$p")"
+  # A path someone DECLARED (NIGHTSHIFT_TEST_SANDBOX_ROBIND, rulebook test_robind) that is not there
+  # is a typo or a moved checkout, under /usr as much as anywhere. Dropped quietly, it surfaces only
+  # as a red suite — which loops back into Fix as a regression to repair, every night, for a host
+  # fault no stage can see.
+  if [ ! -e "$rp" ]; then
+    [ -n "$declared" ] && log "  test sandbox: read-only bind $p does not exist — not bound"
+    return 0
+  fi
   case "$rp" in /usr|/usr/*) return 0 ;; esac   # already bound whole
   # `/`, `/home`, `$HOME` — a bind of any ancestor of $HOME hands the suite ~/.ssh and the gh token
   # back, i.e. exactly the reach this sandbox exists to remove. Refuse it out loud; a silently
@@ -2357,7 +2365,6 @@ _test_robind() { # path -> append a read-only bind, refusing anything that would
     log "  test sandbox: REFUSING read-only bind $p — it contains \$HOME"
     return 0
   fi
-  [ -e "$rp" ] || return 0
   TEST_SANDBOX_ARGV+=( --ro-bind "$rp" "$rp" )
 }
 
@@ -2456,11 +2463,11 @@ build_test_sandbox() { # worktree sandbox_home net(0|1|host) item_dir [robind] -
   done
   # Host-declared extras — a warmed dependency cache, a shared toolchain, a runtime outside /usr.
   IFS=: read -r -a extra <<<"${NIGHTSHIFT_TEST_SANDBOX_ROBIND:-}"
-  for p in ${extra[@]+"${extra[@]}"}; do _test_robind "$p"; done
+  for p in ${extra[@]+"${extra[@]}"}; do _test_robind "$p" declared; done
   # Repo-declared extras (rulebook `test_robind`) — what only THIS repo's suite needs, typically a
   # local checkout its lockfile names as `git+file:///…`. Same refusals as the host-wide list.
   IFS=: read -r -a extra <<<"$robind"
-  for p in ${extra[@]+"${extra[@]}"}; do _test_robind "$p"; done
+  for p in ${extra[@]+"${extra[@]}"}; do _test_robind "$p" declared; done
   # The ONLY writable paths: the worktree (which is what is about to be committed) and a HOME.
   TEST_SANDBOX_ARGV+=( --bind "$wt" "$wt" --bind "$sbhome" "$sbhome" --chdir "$wt" )
   # Punch the pointer file back out of that writable area — ORDER MATTERS, bwrap applies binds in

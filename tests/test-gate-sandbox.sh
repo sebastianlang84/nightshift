@@ -190,6 +190,17 @@ grep -q 'repo-dependency' <<<"$out" || { echo "$out" >&2; fail "the repo's test_
 grep -q 'WRITE-REFUSED' <<<"$out" && [ ! -e "$TMP/repodep/written" ] || { echo "$out" >&2; fail "a test_robind path was WRITABLE from the gate"; }
 out="$(gate 'ls ~/.ssh /home 2>&1; echo done' GATE_ROBIND="${HOME:-/home}")"
 grep -q 'REFUSING read-only bind' <<<"$out" || { echo "$out" >&2; fail "a test_robind containing \$HOME was not refused"; }
+# A declared bind that does not exist (a typo, a moved checkout) is named in the log, from either
+# list — silently dropped, it reads as a red suite and is handed back to Fix as a regression.
+out="$(gate 'echo missing-checked' GATE_ROBIND="$TMP/no-such-dep")"
+grep -q "read-only bind $TMP/no-such-dep does not exist" <<<"$out" \
+  || { echo "$out" >&2; fail "a test_robind that does not exist was dropped without a log line"; }
+out="$(gate 'echo missing-checked' NIGHTSHIFT_TEST_SANDBOX_ROBIND="$TMP/no-such-hostdep")"
+grep -q "read-only bind $TMP/no-such-hostdep does not exist" <<<"$out" \
+  || { echo "$out" >&2; fail "a NIGHTSHIFT_TEST_SANDBOX_ROBIND path that does not exist was dropped without a log line"; }
+out="$(gate 'echo missing-checked' GATE_ROBIND=/usr/local/nightshift-no-such-dep)"
+grep -q "read-only bind /usr/local/nightshift-no-such-dep does not exist" <<<"$out" \
+  || { echo "$out" >&2; fail "a declared bind under /usr that does not exist was dropped without a log line"; }
 
 # --- 7. writable: the worktree, and nothing outside it -----------------------
 out="$(gate "echo fix > gate-wrote.txt; echo escape > /usr/gate-escaped 2>&1; echo escape > /etc/gate-escaped 2>&1; echo escape > '$TMP/gate-escaped' 2>&1")"
