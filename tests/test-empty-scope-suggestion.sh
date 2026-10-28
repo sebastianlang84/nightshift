@@ -59,4 +59,8 @@ grep -q "Suggested rulebook exclusions" "$digest" \
   || { echo "digest did not suggest an exclusion after 3 out-of-scope passes" >&2; cat "$digest" >&2; exit 1; }
 grep -q "correctness" "$digest" || { echo "suggestion did not name the dimension" >&2; exit 1; }
 
+# ADR 0039: the digest counts each empty pass as "nothing found" for its lens.
+grep -qF -- "- correctness: passes 3 · nothing found 3 (100%)" "$digest" \
+  || { echo "digest did not count the three empty passes" >&2; grep -A3 'Nothing found' "$digest" >&2; exit 1; }
+
 echo "test-empty-scope-suggestion: ok"

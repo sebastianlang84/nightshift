@@ -58,6 +58,10 @@ Verdict semantics:
 - "revise": claim true but the fix is wrong-scoped or introduces risk.
 - "abandon": claim false, unfalsifiable taste, or you cannot even locate what it
   refers to (a first-contact reviewer that cannot find the thing does not ship it).
+  Also abandon, with a reason beginning `no-affected-party:`, when the claim names no
+  caller, user path or reader that the defect reaches on current code, or the one it
+  names does not reach it (ADR 0039): a correct change to something nobody hits is
+  still a regression risk with no benefit.
 
 Output ONLY a JSON object, nothing else:
 {"verdict": "ship|revise|abandon", "proof": "verified|unproven",

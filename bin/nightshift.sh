@@ -1062,7 +1062,8 @@ $(tail -n 100 "$id/tests.log" | fence_safe)
 Emit UP TO ${NIGHTSHIFT_FINDINGS_N:-1} finding(s) this pass — the top of your ranked shortlist, each a
 DISTINCT root cause (the repeated-inconsistency rule still collapses twins into ONE finding). Rank them
 so the most valuable is first; the runner ships in that order and truncates at the cap. Fewer is fine —
-never pad. If nothing clears the value bar, return found:false with an empty findings array."
+never pad. If nothing clears the value bar, return found:false with an empty findings array — a valid
+result, not a failed pass (ADR 0039)."
   fi
   if [ "$stage" = explore ] && [ "${NIGHTSHIFT_DIMENSION:-}" = general ]; then
     prompt="$prompt
@@ -3498,6 +3499,21 @@ write_digest() { # made open status [advice]
       | if length==0 then empty else
           "\n## Suggested rulebook exclusions (ADR 0015)\n"
           + (map("- `\(.[0].repo)` × `\(.[0].dimension)` — 3 consecutive out-of-scope passes; consider dropping this lens for this repo in rulebook.yaml `dimensions:`") | join("\n"))
+        end' "$LEDGER" 2>/dev/null || true
+    # ADR 0039: "nothing found" is a result, not a failure. Show how often each lens reports it, so a
+    # lens that never comes back empty is visible as one that may be manufacturing findings. A pass is
+    # one explore item; its finding rows carry the item id plus an -fN suffix. `harvest.sh retract`
+    # names only `empty` rows by their exact item, so the retraction filter never meets an -fN id.
+    [ -f "$LEDGER" ] && jq -rs '
+      [.[]|select(.outcome=="retracted")|.item] as $void
+      | [.[] | select(.dimension!=null and .item!=null and ([.item]|inside($void)|not)
+                      and (.outcome=="empty" or .outcome=="finding" or .outcome=="shipped" or .outcome=="abandoned"))
+             | {d:.dimension, p:(.item|sub("-f[0-9]+$";"")), e:(.outcome=="empty")}]
+      | group_by(.d)
+      | map({d:.[0].d, n:(map(.p)|unique|length), e:(map(select(.e)|.p)|unique|length)})
+      | if length==0 then empty else
+          "\n## Nothing found, by dimension (all-time)\n"
+          + (map("- \(.d): passes \(.n) · nothing found \(.e) (\((100*.e/.n)|floor)%)") | join("\n"))
         end' "$LEDGER" 2>/dev/null || true
     # ADR 0015: rulebook/recon contradictions. A lens the human narrowed OUT of a repo's configured
     # set that recon still sees signal for — a hand-exclusion never re-evaluates on its own, so flag it.
