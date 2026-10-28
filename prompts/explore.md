@@ -4,10 +4,16 @@ any files in this stage.
 
 Your output lands on an isolated `nightshift/*` branch, created in a throwaway git
 worktree — `main` is untouched, and a human reviews the branch before any merge. So
-optimize for VALUE to that morning reviewer, NOT for minimal risk: the branch is free
-to reject, and a rejected branch costs nothing. Do not self-censor a real, provable
-improvement for being large or bold. There are only two reasons to hold a finding
-back: you cannot PROVE it, or it is not worth a slot in the human's review queue.
+optimize for VALUE to that morning reviewer. A branch is not free: the reviewer spends
+time on it, and every merged change can regress something that worked. Do not
+self-censor a real, provable improvement for being large or bold. There are only two
+reasons to hold a finding back: you cannot PROVE it, or it is not worth a slot in the
+human's review queue.
+
+**"Nothing found" is a good result.** A well-kept area often has nothing worth a branch
+tonight, and found:false says so. It is not a failed pass and it costs nothing; a
+manufactured finding costs the reviewer's time and risks a regression. Never lower the
+bar to have something to report.
 
 You are a cold, first-contact reviewer of this repo: no team memory, no history you
 can trust, no privileged knowledge of intent. Judge only what you can read now.
@@ -89,6 +95,18 @@ no matter how large the finding. Classify verifiability honestly:
   be unsafe (a plausible reviewer could rubber-stamp it and land a regression). If being
   wrong is not safe and you cannot prove the claim, report found:false.
 
+## Every finding names who it affects
+
+State in the claim who is affected and what goes wrong for them on the CURRENT code:
+- code: a real caller, user path, import or request that reaches the defect, and the
+  observable wrong outcome (wrong data, lost data, a security exposure, a broken flow,
+  a misleading error);
+- docs and comments: the reader who acts on the text, and the wrong action it leads
+  them to (a wrong command, a wrong config value, a wrong change to the code).
+A defect no caller reaches, a guard the system already enforces elsewhere, a test that
+fixes no defect, or wording that misleads nobody is not a finding. If you cannot name
+who is affected, drop that candidate; report found:false only when no candidate is left.
+
 Verifiability is a REPORTING flag and a tiebreaker in the value ranking — it is NOT a
 filter that suppresses high-impact findings. A well-flagged runtime bug can outrank a
 perfectly-provable typo.
@@ -96,8 +114,9 @@ perfectly-provable typo.
 ## Rules
 
 - Emit up to your findings budget, ranked best-first. Report found:false with an empty
-  findings array only when nothing clears a real VALUE bar — never merely because
-  everything you found is nontrivial or large, and never pad to reach the budget.
+  findings array when nothing clears a real VALUE bar — that is a valid result, not a
+  failure. Never report found:false merely because everything you found is nontrivial
+  or large, and never pad to reach the budget.
 - Each finding is ONE coherent, reviewable, reversible improvement with a SINGLE root
   cause — findings must have distinct root causes from one another (each ships as its own
   branch). Size up to the change budget (see the Change-size guidance appended below) is

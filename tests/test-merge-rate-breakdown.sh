@@ -57,4 +57,8 @@ grep -q "Merge-rate by finding type" "$digest" || { echo "digest missing finding
 grep -q "Merge-rate by verifiability" "$digest" || { echo "digest missing verifiability breakdown" >&2; exit 1; }
 grep -qE "typo: shipped 1 . merged 1" "$digest" || { echo "type breakdown wrong" >&2; grep -A3 'finding type' "$digest" >&2; exit 1; }
 
+# ADR 0039: a pass that shipped a finding is a pass with something found.
+grep -qF -- "- docs: passes 1 · nothing found 0 (0%)" "$digest" \
+  || { echo "digest miscounted a pass with a finding" >&2; grep -A3 'Nothing found' "$digest" >&2; exit 1; }
+
 echo "test-merge-rate-breakdown: ok"
