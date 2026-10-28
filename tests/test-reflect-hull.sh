@@ -65,7 +65,10 @@ esac
 EOF
 chmod +x "$TMP/bin/pi"
 
+# The hull reads pi_extensions from the rulebook, so the checkout's own ignored rulebook.yaml would
+# decide the run; the example declares none.
 run() {
+  RULEBOOK="$ROOT/rulebook.example.yaml" \
   PATH="$TMP/bin:$PATH" NIGHTSHIFT_PI_PATH="$TMP/bin" PI_CODING_AGENT_DIR="$TMP/pi-agent" \
   NIGHTSHIFT_REFLECT_CLAUDE_DIR="$TMP/claude/projects" \
   NIGHTSHIFT_REFLECT_CODEX_DIR="$TMP/codex/sessions" \
