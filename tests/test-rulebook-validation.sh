@@ -287,6 +287,22 @@ grep -q "path=/srv/quoted repo.*mode=branch-fix.*test_cmd=printf ok" "$TMP/stdou
   exit 1
 }
 
+# Text after a closing quote used to be dropped as if it were a comment, so a ship-gate command whose
+# first word is quoted became that word alone: `"cd" services/api && make test` ran a bare `cd`,
+# which always passes. Only a `# comment` may follow the quote; anything else is refused.
+printf 'repos:\n  - path: /x\n    mode: branch-fix\n    test_cmd: "cd" services/api && make test\n' > "$TMP/trailing.yaml"
+if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/trailing.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
+  echo "parser accepted text after a closing quote: $(grep '^repo' "$TMP/stdout")" >&2
+  exit 1
+fi
+grep -q 'unexpected text after closing quote' "$TMP/stderr"
+printf 'repos:\n  - path: /x\n    mode: branch-fix\n    test_cmd: "make test #2" # the gate\n' > "$TMP/trailing-comment.yaml"
+python3 "$ROOT/lib/parse_rulebook.py" "$TMP/trailing-comment.yaml" > "$TMP/stdout"
+grep -q 'test_cmd=make test #2$' "$TMP/stdout" || {
+  echo "a comment after a quoted value was not dropped: $(grep '^repo' "$TMP/stdout")" >&2
+  exit 1
+}
+
 printf 'repos:\n' > "$TMP/empty-repos.yaml"
 if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/empty-repos.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
   echo "parser accepted an empty fleet" >&2
