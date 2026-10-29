@@ -10,10 +10,11 @@ half), plus 0029 (depth evidence and real-model replay). This document is the ma
 v1 explored each repo generically and took ONE finding per repo per pass, so output skewed to
 trivial doc drift and one mini branch a night. v2 is an **aim + throughput** upgrade, not a
 safety change: the safety architecture (throwaway worktree per item · fixes only on
-`nightshift/*` · push-confinement hook · **human merge gate, no auto-merge/deploy** · everything
-in git · findings-only repos never push) means the blast radius of a bad, bold, or large finding
-is exactly one branch a human rejects at zero cost. The only scarce resource is the human's
-morning review budget — governed by the open-branch cap.
+`nightshift/*` · push-confinement hook · **reviewed merge gate (human until ADR 0040, then cross-vendor review), no deploy by nightshift** · everything
+in git · findings-only repos never push) meant the blast radius of a bad, bold, or large finding
+was exactly one branch a human rejects at zero cost. Since ADR 0040 a bad change the cross-vendor
+review and the tests both miss lands in `main`; the open-branch cap now bounds review quota, not a
+human's morning.
 
 ## The loop (v2)
 

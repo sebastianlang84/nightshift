@@ -4,8 +4,9 @@ Autonomous overnight steward for code repositories. Given a set of repos it is a
 touch, nightshift reviews and fixes code while you sleep — self-selecting what to work on,
 remembering what it already did, and staying inside configurable rules and a time/quota budget.
 
-**Status: operational, human-gated.** The scheduler runs the implemented v1/v2 pipeline, but output
-remains isolated on `nightshift/*` branches and is never auto-merged. A deterministic **mock** mode
+**Status: operational.** The scheduler runs the implemented v1/v2 pipeline; output lands on isolated
+`nightshift/*` branches, which an operator-side job merges after a cross-vendor review and green tests
+([ADR 0040](docs/adr/0040-reviewed-branches-merge-without-a-human.md)). A deterministic **mock** mode
 exercises the full loop end-to-end against a throwaway sandbox — see
 [`docs/design/prototype.md`](docs/design/prototype.md). Run `bin/setup-sandbox.sh` and then the isolated
 `RULEBOOK=… NIGHTSHIFT_STATE_DIR=… bash bin/nightshift.sh` command it prints (it no longer overwrites your

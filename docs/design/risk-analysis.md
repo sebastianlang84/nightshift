@@ -57,7 +57,7 @@ These are implemented and active today. Each is enforced by mechanism, not by pr
 | C2 | **Repo never touched directly** | Every work item runs in a throwaway `git worktree --detach` under `$TMPDIR`, removed `--force` after. Edits land there, not in the real checkout. | [nightshift.sh:312-315](../../bin/nightshift.sh) |
 | C3 | **Push confinement (Layer 1)** | `hooks/pre-push` checks git's already-**resolved** refs: rejects any ref outside `nightshift/*`, deletes, tag pushes, and non-fast-forward updates. Every bypass spelling (`+main`, `:branch`, `--all`, `--mirror`, `--force`) is resolved by git before the hook sees it. | [pre-push](../../hooks/pre-push) |
 | C4 | **Can't disable Layer 1 (Layer 2, Claude only)** | `core.hooksPath` is injected into both adapters. Claude also has a `PreToolUse` guard denying bypass flags and writes to project settings that a later stage would execute as hooks. Codex has no equivalent tool hook here; its sandbox is the primary agent boundary, while the Runner's final push supplies the hook independently. | [pretooluse-guard.sh](../../hooks/pretooluse-guard.sh), [nightshift.sh](../../bin/nightshift.sh) |
-| C5 | **Never merges** | Output is `nightshift/*` branches; PR creation is optional and currently disabled. A human reviews before any merge. | ADR 0004, `rulebook.yaml` |
+| C5 | **Never merges** | Output is `nightshift/*` branches; PR creation is optional and currently disabled. An operator-side job outside nightshift merges a branch after a cross-vendor review and green tests (ADR 0040). | ADR 0004, ADR 0040, `rulebook.yaml` |
 | C6 | **Runaway caps** | Claude has `--max-turns 60` per stage. Both adapters have fix-iteration, open-branch and per-run caps, a 300-minute rulebook budget, single-instance `flock`, and a hard 5h service timeout. Codex currently has no separate per-stage turn cap. | [nightshift.sh](../../bin/nightshift.sh), rulebook, [nightshift-cron.sh](../../bin/nightshift-cron.sh), [nightshift.service](../../scheduler/nightshift.service) |
 | C7 | **Report-only for sensitive repos** | `findings-only` mode reports without ever pushing (e.g. llmstack). | `rulebook.yaml` |
 | C8 | **Change-size pressure** | Soft file/line budgets injected into explore/fix prompts (15 files / 400 lines) to keep changes reviewable. | [nightshift.sh:205-207](../../bin/nightshift.sh) |
@@ -453,4 +453,6 @@ chain and R6 — now half-built, since N8 supplies the mechanism. Until M1 + M2 
 unattended operation on the shared host still carries an understood exfiltration gap and single-tier
 containment on an over-privileged account — kept bounded, in the daytime-testing phase, by attention
 rather than by architecture. **No autonomous landing** (auto-merge of any kind) may be enabled while
-R1/R2 stand.
+R1/R2 stand — the operator lifted this condition on 2026-10-29 with R1/R2 still standing
+([ADR 0040](../adr/0040-reviewed-branches-merge-without-a-human.md)); the cross-vendor review is now the
+gate a hostile change has to pass.

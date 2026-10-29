@@ -27,7 +27,7 @@ then leave the working tree exactly as you found it and say why in your final me
 complete and correct outcome — it is recorded as abandoned, not as a failure, and nothing about
 tonight counts it against you. On a commit retry the earlier version already passed review, so
 leaving that tree as it is ends the item as commit-failed instead. A forced, half-understood or padded change is worse than none: it
-costs a human the review either way, and it teaches the next night the wrong lesson.
+costs a review either way, and it teaches the next night the wrong lesson.
 
 If something about YOUR OWN working conditions got in the way — a tool you needed and did not
 have, an instruction here that contradicts what the repository actually does, a check you could

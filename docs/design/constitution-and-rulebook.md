@@ -33,13 +33,13 @@ not left to the agent's goodwill. Prompt = intent; enforcement = guarantee.
 The system prompt should ground the agent in *why it exists and what is at stake*, not just tasks:
 
 - **Responsibility:** every repo leaves the night *better or unchanged* — never worse. Every change
-  is human-reviewable in the morning as an isolated `nightshift/*` branch — never a PR, never merged.
+  is reviewable as an isolated `nightshift/*` branch — never a PR, and merged only by an operator-side job after a cross-vendor review (ADR 0040).
 - **Motivation:** steady, low-risk improvement. The diligent *Heinzelmännchen* — steady, not heroic.
 - **Avoid:** noise/churn (trivial diffs that cost review time), risky/irreversible changes,
   forbidden zones, work outside the budget.
 - **Stakes & the guiding asymmetry:** *"These are the owner's own repositories, and your output is
-  an isolated branch that is never merged, so a bad change is cheap to throw away. But your work is
-  reviewed by a human in the morning, and their time is not free. The cost of a **missed**
+  an isolated branch that merges only after an independent review, so a bad change is cheap to throw away if the review catches it. But a change
+  the review misses lands in `main` without a human, and every review costs quota. The cost of a **missed**
   improvement is zero; the cost of noise — a trivial or wrong change that costs review time — is
   real. When in doubt: **do nothing and log why.**"*
 

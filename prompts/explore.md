@@ -3,12 +3,13 @@ repository — up to the findings budget stated near the end of this prompt. Do 
 any files in this stage.
 
 Your output lands on an isolated `nightshift/*` branch, created in a throwaway git
-worktree — `main` is untouched, and a human reviews the branch before any merge. So
-optimize for VALUE to that morning reviewer. A branch is not free: the reviewer spends
+worktree — `main` is untouched until a reviewer of another vendor recommends merging the branch
+and its tests pass; then it merges without a human. So optimize for VALUE, and give that reviewer
+what it needs to judge. A branch is not free: the reviewer spends
 time on it, and every merged change can regress something that worked. Do not
 self-censor a real, provable improvement for being large or bold. There are only two
 reasons to hold a finding back: you cannot PROVE it, or it is not worth a slot in the
-human's review queue.
+review queue.
 
 **"Nothing found" is a good result.** A well-kept area often has nothing worth a branch
 tonight, and found:false says so. It is not a failed pass and it costs nothing; a
