@@ -93,6 +93,24 @@ grep -q 'json-repair: dropped 3 trailing comma' "$TMP/err" || {
   cat "$TMP/err" >&2; exit 1;
 }
 
+# A balanced brace pair in the prose before the verdict (`${HOME}`) is a complete candidate too, and
+# no repair makes it JSON. It must not use up the repair pass: the verdict behind it, damaged only by
+# a slip, is still repaired — for a trailing comma and for a swapped closer alike.
+printf '%s\n' 'see ${HOME} first' '{"found":false,"findings":[],}' |
+  python3 "$ROOT/lib/extract_json.py" > "$TMP/prose-comma" 2> "$TMP/err" || {
+  echo "test-json-extraction: a prose brace pair took the repair pass from the verdict" >&2
+  cat "$TMP/err" >&2; exit 1;
+}
+jq -e '.found == false and .findings == []' "$TMP/prose-comma" >/dev/null
+grep -q 'json-repair: dropped 1 trailing comma' "$TMP/err"
+printf '%s\n' 'set {x} aside' '{"found":false,"findings":[]]' |
+  python3 "$ROOT/lib/extract_json.py" > "$TMP/prose-swap" 2> "$TMP/err" || {
+  echo "test-json-extraction: a prose brace pair took the repair pass from the verdict" >&2
+  cat "$TMP/err" >&2; exit 1;
+}
+jq -e '.found == false and .findings == []' "$TMP/prose-swap" >/dev/null
+grep -q 'json-repair: swapped 1' "$TMP/err"
+
 # Both repairs in one candidate are reported as both, so the night log names every edit made to the
 # artifact that reaches the ledger.
 printf '%s\n' '{"found":true,"coverage":{"invariants":{"a":"checked"],},"findings":[]}' |
