@@ -598,12 +598,33 @@ claude_quota_rejected() { # raw_file -> 0 if the CLI reported a REJECTED rate li
   return 0
 }
 
+# Codex reports a spent weekly window as a failed TURN, not as a rate-limit event: exit 1, nothing in
+# stderr, and no structured code — only the CLI's own message. Observed 2026-10-28, when the routed
+# Review stage hit it three times and each item was logged as a retryable stage failure while Fix
+# kept building branches nobody could review (runs/2026-10-28, codex-cli 0.165.0):
+#   {"type":"turn.failed","error":{"message":"You’ve hit your usage limit. Visit https://chatgpt.com/
+#    settings/usage to purchase more credits or try again at Nov 2nd, 2026 7:14 AM."}}
+# The wording is matched, but only inside the CLI's own `turn.failed` and `error` events (the stream
+# carries both; either alone counts, so a run cut off between them is still caught); the model's own
+# text travels in item events and never reaches this check. It runs only for a stage that failed.
+codex_quota_rejected() { # raw_file -> 0 if the CLI failed the turn on its usage limit; echoes reset time
+  local f="$1" msg when
+  [ -s "$f" ] || return 1
+  msg=$(jq -rR 'fromjson? | select(type == "object")
+                | if .type == "turn.failed" then .error.message? elif .type == "error" then .message? else empty end
+                | strings' "$f" 2>/dev/null | grep -i 'usage limit' | tail -n 1) || return 1
+  [ -n "$msg" ] || return 1
+  when=$(printf '%s' "$msg" | sed -nE 's/.*try again at (.+[^.])\.?$/\1/p' | sed -E 's/([0-9])(st|nd|rd|th),/\1,/')
+  # A reset time we cannot parse is still a rejection — report the CLI's words rather than nothing.
+  # (An empty string must not reach `date -d`, which reads it as today's midnight.)
+  [ -n "$when" ] && date -d "$when" '+%Y-%m-%d %H:%M %Z' 2>/dev/null || printf '%s' "${when:-an unknown time}"
+  return 0
+}
+
 agent_quota_rejected() { # raw_file -> 0 if THIS adapter's own output says the account is out of quota
   case "$NIGHTSHIFT_AGENT" in
     claude) claude_quota_rejected "$1" ;;
-    # codex: no verified signature yet. Guessing one would produce a fatal abort on a healthy night,
-    # which is worse than the miss it would fix — leave it unclaimed until an observed run shows the
-    # shape, the same standard AGENT_AUTH_RE was held to.
+    codex)  codex_quota_rejected "$1" ;;
     *) return 1 ;;
   esac
 }

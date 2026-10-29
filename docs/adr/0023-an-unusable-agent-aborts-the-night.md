@@ -94,6 +94,18 @@ aborts before derived repo state is written. Credential failures and ordinary st
 switch vendors. This is host opt-in; unset keeps the original abort behavior.
 Regression coverage: [`tests/test-agent-quota-fallback.sh`](../../tests/test-agent-quota-fallback.sh).
 
+### Amendment 2026-10-30 — Codex's usage limit is recognised too
+
+On 2026-10-28 the routed Codex reviewer had spent its weekly window. Codex reports that as a failed
+turn — exit 1, empty stderr, `{"type":"turn.failed","error":{"message":"You’ve hit your usage
+limit. … try again at Nov 2nd, 2026 7:14 AM."}}` — with no structured code, so nothing matched it:
+each Review was a retryable stage failure, and Fix kept building three branches no reviewer could
+pass. `codex_quota_rejected` now reads that shape. It matches the wording, which the Claude detector
+avoids, but only inside the CLI's own `turn.failed` and `error` events; model text travels in item
+events and is never read. The reset time comes from the message, or reads "an unknown time". A
+routed reviewer keeps no fallback (ADR 0031), so the night aborts.
+Regression coverage: [`tests/test-codex-quota-abort.sh`](../../tests/test-codex-quota-abort.sh).
+
 ### Amendment 2026-08-24 — the signatures read the CLI, not the repo
 
 The asymmetry above held; the channel it was applied to did not. `AGENT_AUTH_RE` is prose, and it was

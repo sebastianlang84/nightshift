@@ -141,7 +141,9 @@ agent:
 `NIGHTSHIFT_QUOTA_FALLBACK_AGENT=codex` makes a rejected Claude quota event retry that same stage
 once through the Codex adapter, then keeps the rest of the night on Codex. The rejected attempt and
 the retry are separate `runs.jsonl` rows, and the raw quota event is retained in the item directory.
-Credentials and ordinary stage failures do not trigger the fallback. Configure its model and effort
+Credentials and ordinary stage failures do not trigger the fallback. A Codex usage-limit failure,
+whether Codex runs the night or only the routed Review, has no fallback and aborts the night with
+its reset time (ADR 0023). Configure its model and effort
 through the normal Codex settings, for example `agent.codex_model: gpt-6.1-sol` plus
 `agent.codex_effort: medium` (or `NIGHTSHIFT_CODEX_REASONING_EFFORT=medium` for a one-off run).
 
