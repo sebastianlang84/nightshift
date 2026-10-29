@@ -21,9 +21,10 @@ staff's `nightshift-merge` job on beelink (`~/chief/nightshift-merge`, hourly us
 each branch it
 
 1. probes the merge for a conflict;
-2. has the branch read by the vendor that did **not** write the fix (`runs.jsonl` names the fix
-   stage's adapter), through the `using-harnesses` review script;
-3. on a merge recommendation only, runs the rulebook's `test_cmd` on the merge result;
+2. has Codex and Opus review the branch, blind first and then in exchange rounds in which each
+   answers every point of the other, until both agree with no point open (the operator's rule
+   for a decided matter, 2026-10-29), through the `using-harnesses` review script;
+3. on an agreed merge recommendation only, runs the rulebook's `test_cmd` on the merge result;
 4. green: merges as a merge commit, pushes without force, deletes the branch, fast-forwards the
    deployed checkout. Anything else: one kb task to the repo, no merge.
 
@@ -33,9 +34,9 @@ changes is only who closes the branch: the job instead of a human.
 
 ## Consequences
 
-- A bad change no longer costs one rejected branch; it lands in `main` unless the cross-vendor
-  review or the tests catch it. The review is the one gate, so the Explore and Fix prompts now say
-  that a reviewer of another vendor, not a human, reads the branch.
+- A bad change no longer costs one rejected branch; it lands in `main` unless the Codex/Opus
+  cross-review or the tests catch it. The review is the one gate, so the Explore and Fix prompts now say
+  that two reviewers of different vendors, not a human, read the branch.
 - The risk analysis's condition "no autonomous landing while R1/R2 stand" is lifted by the
   operator's decision, not by closing R1/R2. They stand; a merged change that exfiltrates on the
   next `test_cmd` or deployment is the residual the review has to catch.

@@ -91,7 +91,7 @@ ledger and branch-first workflow ([ADR 0004](docs/adr/0004-v1-scope-branch-isola
 ## Non-goals (current)
 
 - nightshift itself never merges. Its output is isolated `nightshift/*` branches; an operator-side
-  job reviews them with the other vendor and merges them
+  job has Codex and Opus cross-review them and merges them
   ([ADR 0040](docs/adr/0040-reviewed-branches-merge-without-a-human.md)). Opening a PR per branch is an opt-in convenience requiring per-host
   API credentials — off by default; the branch itself is the deliverable
   ([ADR 0004](docs/adr/0004-v1-scope-branch-isolated-steward.md)).
