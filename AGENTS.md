@@ -1,45 +1,67 @@
 # nightshift — agent guide
 
-Autonomous overnight code steward (bash + first-party CLI adapters). **What & why → [`CONTEXT.md`](CONTEXT.md);
-first read → [`README.md`](README.md).** This file is orientation + the operational facts that live nowhere else;
-it does not repeat architecture (CONTEXT.md/ADRs) or global rules (git, secrets, sub-agents, ADR discipline).
+Read [README.md](README.md) first.
+Architecture and terminology: [CONTEXT.md](CONTEXT.md).
+Operations: [docs/deployment.md](docs/deployment.md).
 
-## Where things are (router)
+## Navigation
 
-- **Orchestrator:** [`bin/nightshift.sh`](bin/nightshift.sh) — the night loop: harvest → verify (close open findings) → recon → explore → fix↔review↔`test_cmd` gate (a red suite loops back into Fix, ADR 0022) → finalize (push `nightshift/*`).
-- **Peers:** `harvest.sh` (reconcile branches, probe findings, `todos`/`close`) · `review-branch.sh` (mechanical branch review) · `schedule.sh` (systemd timer) · `nightshift-cron.sh` (unattended launcher) · `reflect.sh` (the reflection job, ADR 0035 — started by hand, never on a timer).
-- **lib/:** `parse_rulebook.py` · `extract_json.py` · `validate_explore.py` (ADR 0029 depth receipt) · `recon_signals.sh` · `probe_findings.py` (finding freshness, ADR 0021) · `ledger_epochs.py` (batch ISO→epoch behind the ledger indexes) · `extract_session.py` + `check_citations.py` + `build_judge_input.py` (the reflection job, ADR 0035 — not part of the night loop). **prompts/** one per stage, plus `prompts/reflection/` for the job that is not one. **hooks/** `pre-push` + `pretooluse-guard.sh` (the confinement).
-- **Decisions → [`docs/adr/`](docs/adr/) · Design → [`docs/design/`](docs/design/) · Open questions → [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) · Backlog → [`todo.md`](todo.md) · Operations → [`docs/deployment.md`](docs/deployment.md).**
+1. Runner: `bin/nightshift.sh`; supporting commands: `bin/`.
+2. Stage prompts: `prompts/`; reflection prompts: `prompts/reflection/`.
+3. Decisions: `docs/adr/`; designs: `docs/design/`.
+4. Backlog: `todo.md`; unresolved design choices: `OPEN-QUESTIONS.md`.
 
-## Test & verify (documented nowhere else)
+## Verification
 
-- There is no test runner — the suite IS `tests/*.sh`, and every test must pass before a commit. Run it so a red suite reaches the exit status: `(rc=0; for t in tests/*.sh; do bash "$t" || { echo "FAIL $t"; rc=1; }; done; exit $rc)`. Never judge the suite by a bare `for … done` (its status is the LAST test's, so an earlier failure reads as green) or by a `|| break` form (`break` succeeds and runs last, so *every* failure reads as green). [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs the same tests on every push to `main` and every PR, accumulating `rc` the same way — that accumulation, not the loop, is what makes a failure a failure. A `nightshift/*` branch is covered by the PR trigger, not the push one; the ship gate has already run this suite against it before the push.
-- `lib/check_docs.py` refuses docs that name something absent (dead links, missing ADRs, moved files, line citations past EOF). It runs in the suite, in CI, and — activate with `git config core.hooksPath .githooks` — in [`.githooks/pre-commit`](.githooks/pre-commit) (0.05s). Not to be confused with `hooks/`, which is the agent confinement.
-- Tests run `NIGHTSHIFT_AGENT=mock` with isolated `NIGHTSHIFT_STATE_DIR` / `RUNS_DIR` / `DIGEST_DIR` / `WORKTREES` against a throwaway bare-remote sandbox — never the live state.
-- Every test starts with `unset GIT_CONFIG_COUNT`. A Fix stage inherits the Layer 1 pre-push hook through `GIT_CONFIG_*`, and that hook rejects the `main` push every fixture remote starts with — so without the line the suite cannot run inside a Fix stage on this repo. CI runs the suite with that env set, so a new test without the line fails there.
-- **`systemctl --user` ignores `XDG_CONFIG_HOME`.** It talks to the operator's live session bus wherever the unit files sit, so a test that exercises `schedule.sh` must stub `systemctl` on `PATH` (`test-scheduler-overrides.sh` does) — otherwise `uninstall` disarms the real nightly timer. The ADR 0022 ship gate runs this suite in a worktree, which would make that a nightly occurrence.
+1. Before committing, run every shell test from the repo root:
 
-## Gotchas
+   `(rc=0; for t in tests/*.sh; do bash "$t" || { echo "FAIL $t"; rc=1; }; done; exit $rc)`
 
-- **The timer's checkout is the deployment.** The timer runs `bin/nightshift-cron.sh` from the checkout its unit names (`systemctl --user cat nightshift.service`; `~/dev/nightshift` on beelink, `~/nightshift` on the pidso host), so a push to `origin/main` from a worktree changes nothing until that checkout's `main` is fast-forwarded (`git -C <checkout> merge --ff-only origin/main`). Do that after every push; from 2026-10-15 to 2026-10-23 the nightly run lagged ten commits behind (ADR 0037, ADR 0038) because nobody did.
+2. The suite checks documentation references; `python3 lib/check_docs.py .` runs this check alone.
+   Development hook setup: [Working on nightshift itself](docs/deployment.md#working-on-nightshift-itself).
+   `.githooks/` contains development hooks; `hooks/` confines agents.
+3. Keep test state separate from live state.
+   Integration fixtures use `NIGHTSHIFT_AGENT=mock` and throwaway remotes.
+   For these runs, override `NIGHTSHIFT_STATE_DIR`, `NIGHTSHIFT_RUNS_DIR`, `NIGHTSHIFT_DIGEST_DIR` and `NIGHTSHIFT_WORKTREES`.
+4. Start shell tests with `unset GIT_CONFIG_COUNT` to remove inherited Git confinement settings.
+5. Tests exercising `bin/schedule.sh` must stub `systemctl` on `PATH`.
+   `XDG_CONFIG_HOME` isolates unit files, not the live user session bus.
+   See `tests/test-scheduler-overrides.sh`.
 
-- `lib/parse_rulebook.py` parses a **block-style YAML subset only** — no flow `{…}` / `[…]`. The top level and every mapping section's key set are **closed** (`TOP_LEVEL_KEYS` / `LIMIT_KEYS` / `RECON_KEYS` / `AGENT_KEYS` / `REPO_KEYS`): an unknown key aborts the parse, and the run with it, instead of the knob silently reverting to a default. So a new knob must be added to its tuple, or every rulebook that uses it is refused — including `rulebook.example.yaml`, which the suite parses for exactly that reason.
-- Mock findings are triggered by **target-file content** (`teh`, `retrun`, `AMBIGUOUS`, `FROB`) — that is how tests plant deterministic defects. The mock reviewer otherwise always ships; `NIGHTSHIFT_MOCK_ABANDON_IF=<path>` makes it `abandon` once that path exists, which is how a test reaches the give-up verdict mid-loop.
-- Runner functions are unit-testable via `NIGHTSHIFT_SOURCED=1 source bin/nightshift.sh` (defines functions without running the night).
-- `state/findings-probe.json` is **derived** state (ADR 0021), rewritten by harvest and the verify phase — never hand-edit it; the ledger is the record. The dashboard reads it through the same read-only mount, so it must stay world-readable.
-- A stage can report on the HARNESS by leaving `.nightshift-note` in its worktree: `collect_agent_note` moves it to `state/agent-notes.md` (deduplicated, attributed) and deletes it before anything can commit it, and the digest shows that night's notes. One way only — no stage ever reads them back, because an agent's note may quote the repository it was reading, and a note fed into a later stage lets a line in some repo address the Runner. In practice only Fix can use it: the read-only profiles have no write tool, which is the whole point of them.
-- A Fix stage that changes nothing is recorded as `abandoned`, not `commit-failed` — the prompt tells it to stop rather than force a change it cannot stand behind, and that way out must not read as a malfunction. A commit the target repo's own hooks reject gets one Fix retry with the hook's output (ADR 0036) and is `commit-failed` if that does not ship. `NIGHTSHIFT_MOCK_FIX_NOOP=1` reaches the first path in a test; `NIGHTSHIFT_MOCK_FIX_HEEDS_HOOK=1` makes the mock Fix answer a hook's `NEED=…` demand, read from the Fix prompt, on the retry.
-- The rulebook's per-repo `test_cmd` rides **last** on the parser's `repo` TSV row on purpose (ADR 0022): a command contains spaces and the Runner's `read` soaks the remainder into the final variable, so any new repo field must be inserted *before* it (`test_net` and `setup_cmd` are).
-- The ship gate runs `test_cmd` in a **bwrap sandbox** (ADR 0026), so it can write nowhere but the worktree and sees no `$HOME` — a fixture that used to park a marker outside the tree must now keep it inside and `.gitignore` it (hence `NIGHTSHIFT_MOCK_ABANDON_IF` resolving a *relative* path against the worktree). No bwrap ⇒ `run_test_gate` returns **2** ("could not run"), which the caller refuses *without* spending another fix iteration — distinct from **1** (a red suite), which loops back. `NIGHTSHIFT_TEST_SANDBOX=none` is the documented opt-out, and why the suite still passes on a host without user namespaces.
-- The gate runs `git clean -ffdX` first (ADR 0037), so an ignored file never survives from one gate to the next — a fixture that needs state across gates must keep it outside the worktree, unsandboxed (`test-ship-test-gate.sh` case 2b).
+## Parser and state
 
-## Operator rules
+1. `lib/parse_rulebook.py` accepts a block-style YAML subset; flow mappings and lists are unsupported.
+   Register new keys in the corresponding allowed-key tuple.
+   Keep `test_cmd` last in the emitted repo TSV row; insert new fields before it.
+2. `state/findings-probe.json` is derived from the ledger; never edit it manually.
+   Keep it world-readable for the dashboard.
+3. `.nightshift-note` reports harness problems through `state/agent-notes.md` and the digest.
+   The runner removes notes before committing; never feed collected notes into later stages.
 
-- Never propose a notification or alerting channel for nightshift runs; the digest file is the report.
-- Open `nightshift/*` branches are reviewed and merged automatically (Sebastian, 2026-10-29; [ADR 0040](docs/adr/0040-reviewed-branches-merge-without-a-human.md)): the chief's hourly job `~/chief/nightshift-merge` has Codex and Opus cross-review each branch until they agree, runs `test_cmd`, merges as a merge commit, deletes the branch and fast-forwards this checkout. A branch it does not merge arrives as a kb task labelled `nightshift-merge` for the target repo; act on that task, do not relay it.
+## Ship gate and confinement
 
-## Before touching confinement / safety
+1. Before changing adapters in `bin/nightshift.sh` or files in `hooks/`, read
+   [hook-spec.md](docs/design/hook-spec.md) and [risk-analysis.md](docs/design/risk-analysis.md).
+2. Fix confinement differs by adapter: Claude uses `hooks/pretooluse-guard.sh`,
+   Codex uses `--sandbox workspace-write`, and Pi uses a bwrap filesystem sandbox.
+   Pi's sandbox shares the host network; see [ADR 0032](docs/adr/0032-the-pi-fix-stage-is-sandboxed.md).
+3. The ship gate normally runs `test_cmd` in bwrap without the operator's home.
+   The worktree, sandbox home and temporary filesystems are writable.
+   Missing bwrap blocks shipping without a Fix retry.
+   `NIGHTSHIFT_TEST_SANDBOX=none` disables the gate sandbox.
+   `NIGHTSHIFT_PI_SANDBOX=none` disables Pi's Fix sandbox; otherwise missing bwrap blocks Pi Fix.
+4. The gate removes ignored files with `git clean -ffdX` before each run.
+   Sandbox details: `docs/deployment.md`.
 
-Editing an adapter in `bin/nightshift.sh` or anything in `hooks/`: read [`docs/design/hook-spec.md`](docs/design/hook-spec.md) and [`docs/design/risk-analysis.md`](docs/design/risk-analysis.md) first — the branch-only guarantee and the Fix-stage write confinement (R8) depend on those exact mechanisms.
+## Operations
 
-R8 is enforced per adapter, by three different mechanisms: claude by `hooks/pretooluse-guard.sh` (a Claude Code `PreToolUse` hook — it does **nothing** for the other two adapters), codex by its own `--sandbox workspace-write`, and pi by `pi_sandbox_argv`, which wraps the agent process in the ship gate's bwrap hull ([ADR 0032](docs/adr/0032-the-pi-fix-stage-is-sandboxed.md)). The pi hull keeps the host's network on purpose (`--share-net`): the ADR 0028 egress proxy allows public addresses only and this host's model gateway is a LAN address, so isolating the namespace would stop the stage working rather than narrow it. Only its filesystem reach is bounded. `NIGHTSHIFT_PI_SANDBOX=none` opts out; no bwrap means the pi fix stage refuses to run at all.
+1. Never propose a notification or alerting channel for nightshift runs; the digest file is the report.
+2. Run `bin/reflect.sh` manually, never on a timer; see ADR 0035.
+3. Identify the timer's checkout with `systemctl --user cat nightshift.service`.
+   After pushing `main` from another checkout, update the timer's checkout on `main`:
+   `git -C <checkout> fetch origin main`
+   `git -C <checkout> merge --ff-only origin/main`
+4. An operator-side job handles automatic branch review and merging:
+   [ADR 0040](docs/adr/0040-reviewed-branches-merge-without-a-human.md).
+   The runner itself only pushes `nightshift/*`.
+   Handle tasks for this repo labelled `nightshift-merge` in this session; do not pass them on.
