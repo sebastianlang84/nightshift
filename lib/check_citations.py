@@ -94,9 +94,12 @@ def load_turns(paths):
 
 def check_quote(quote, turns):
     """-> (ok, reason, elided). `reason` is empty when ok."""
+    # The generator is a cheap model; a malformed quote is its finding's problem, never the run's.
+    if not isinstance(quote, dict):
+        return False, "quote is not an object", False
     tid = quote.get("turn")
     text = quote.get("text")
-    if not tid or not isinstance(text, str) or not text.strip():
+    if not isinstance(tid, str) or not tid or not isinstance(text, str) or not text.strip():
         return False, "quote is missing a turn id or its text", False
     turn = turns.get(tid)
     if turn is None:
@@ -121,8 +124,10 @@ def check_quote(quote, turns):
 
 
 def check_ordering(claim, turns):
+    if not isinstance(claim, dict):
+        return False, "ordering claim is not an object"
     a, b = claim.get("before"), claim.get("after")
-    if not a or not b:
+    if not isinstance(a, str) or not isinstance(b, str) or not a or not b:
         return False, "ordering claim is missing a turn id"
     ta, tb = turns.get(a), turns.get(b)
     if ta is None:
@@ -172,13 +177,20 @@ def check_finding(finding, turns, seen_ids=None):
     quotes = finding.get("quotes") or []
     if not quotes:
         return None, reasons + ["finding cites no evidence"]
+    # A string would be iterated by character and a dict by key — neither is a list of citations.
+    if not isinstance(quotes, list):
+        return None, reasons + ["quotes is not a list"]
+    ordering = finding.get("ordering") or []
+    if not isinstance(ordering, list):
+        reasons.append("ordering is not a list")
+        ordering = []
     elided = False
     for q in quotes:
         ok, reason, was_elided = check_quote(q, turns)
         elided = elided or was_elided
         if not ok:
             reasons.append(reason)
-    for claim in finding.get("ordering") or []:
+    for claim in ordering:
         ok, reason = check_ordering(claim, turns)
         if not ok:
             reasons.append(reason)
