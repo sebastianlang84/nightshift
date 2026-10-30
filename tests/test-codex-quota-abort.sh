@@ -50,6 +50,20 @@ esac
 [ "$NIGHTSHIFT_AGENT" = claude ] || { echo "the night's adapter changed to $NIGHTSHIFT_AGENT" >&2; exit 1; }
 grep -q 'FATAL: codex is out of quota' "$TMP/err" || { echo "log does not name the quota abort" >&2; exit 1; }
 
+# The digest names the reviewer that died, not the night's adapter, and gives the reset time as the
+# remedy — the operator must not be sent to re-authenticate a healthy Claude CLI.
+MAX_OPEN=3
+write_digest 0 0 agent_unavailable 2>> "$TMP/err"
+abort_line="$(grep '^- \*\*ABORTED:' "$DIGEST_DIR/$NIGHT.md")" \
+  || { echo "digest has no ABORTED line" >&2; cat "$DIGEST_DIR/$NIGHT.md" >&2; exit 1; }
+case "$abort_line" in
+  *'the `codex` agent could not run'*'run the night again after 2026-11-02 07:14'*) ;;
+  *) echo "ABORTED line does not name codex and its reset: $abort_line" >&2; exit 1 ;;
+esac
+case "$abort_line" in
+  *claude*|*re-authenticate*) echo "ABORTED line blames claude or prescribes a login: $abort_line" >&2; exit 1 ;;
+esac
+
 # 2. Only the CLI's failed turn counts. A failed turn for another reason, or the words in the
 #    model's own output, leave the night running.
 printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"this repo handles a usage limit"}}' \

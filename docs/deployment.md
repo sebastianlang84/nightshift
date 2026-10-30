@@ -393,11 +393,13 @@ never push outside `nightshift/*` (see [`docs/design/hook-spec.md`](design/hook-
   partial progress without claiming the interrupted stage completed. SIGKILL cannot be handled.
   Keep dependency-install errors visible in `test_cmd`: use `npm ci --no-audit --no-fund`, without
   `--silent`, so a failed install leaves a useful `tests.log` for the next Fix iteration.
-- **An aborted night (exit 3):** the night stopped because the agent CLI could not authenticate
-  ([ADR 0023](adr/0023-an-unusable-agent-aborts-the-night.md)). The digest says `ABORTED` instead of
-  reporting a clean fleet, the day's log carries a `FATAL:` line naming the stage, and the systemd
-  unit is marked failed. Nothing was recorded — no recon caches, no `empty` ledger rows — so there is
-  no state to clean up. Log in to the agent CLI again (`claude` / `codex login`), then re-run:
+- **An aborted night (exit 3):** the night stopped because an agent CLI could not authenticate or
+  was out of quota ([ADR 0023](adr/0023-an-unusable-agent-aborts-the-night.md)). The digest says
+  `ABORTED`, names the adapter that died (which may be a routed reviewer rather than the night's
+  agent) and the cause, the day's log carries a `FATAL:` line naming the stage, and the systemd unit
+  is marked failed. Nothing was recorded — no recon caches, no `empty` ledger rows — so there is no
+  state to clean up. For a credentials abort, log in to that CLI again (`claude` / `codex login`);
+  for a quota abort, wait until the reset time the digest gives. Then re-run:
   ```
   bin/nightshift-cron.sh          # same launcher the timer uses (honours the single-instance lock)
   ```

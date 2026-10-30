@@ -3448,7 +3448,19 @@ write_digest() { # made open status [advice]
     # An aborted night must announce itself in the ONE artifact the operator actually reads in the
     # morning. Without this the digest of a credential outage is indistinguishable from a clean
     # fleet: same "shipped: 0", same empty tables, no reason given.
-    [ "$status" = agent_unavailable ] && echo "- **ABORTED: the \`$NIGHTSHIFT_AGENT\` agent could not run** — ${AGENT_FATAL:-no usable credentials}. Nothing below reflects the state of the code: re-authenticate the CLI and run the night again. No recon caches or \`empty\` rows were written."
+    # Name the adapter that DIED, not the night's: a routed Codex reviewer runs under a `local`
+    # NIGHTSHIFT_AGENT that is gone by now. And give the remedy for the cause run_agent found — a
+    # spent quota is not fixed by logging in again, only by waiting for the reset.
+    if [ "$status" = agent_unavailable ]; then
+      local dead="${AGENT_FATAL_AGENT:-$NIGHTSHIFT_AGENT}" remedy resets
+      case "$AGENT_FATAL" in
+        *" is out of quota until "*)
+          resets="${AGENT_FATAL#* is out of quota until }"; resets="${resets% (stage *}"
+          remedy="run the night again after $resets — the CLI is logged in, its quota is spent" ;;
+        *) remedy="re-authenticate the \`$dead\` CLI and run the night again" ;;
+      esac
+      echo "- **ABORTED: the \`$dead\` agent could not run** — ${AGENT_FATAL:-no usable credentials}. Nothing below reflects the state of the code: $remedy. No recon caches or \`empty\` rows were written."
+    fi
     # Outage continuity — see aborted_streak(). Printed on BOTH paths: while the outage lasts it
     # counts up, and the night that finally completes reports the gap once before it disappears.
     local n_ab newest oldest last_ok span
