@@ -18,8 +18,9 @@ yield-weighting / never-exclude with the empty-scope feedback loop (ADR 0015).
 ## Active security work
 
 - **PR API credential:** automatic PR opening stays disabled. Before re-enabling it, scan the
-  model-derived PR title/body for secrets and re-issue the machine's `gh` credential without
-  `admin:public_key` (risk-analysis R12/N6). Credential rotation is an operator action.
+  model-derived PR title/body for secrets (risk-analysis R12/N6). The svrllm `gh` credential no
+  longer has `admin:public_key` (re-issued 2026-10-30); on beelink, check the token's scopes with
+  `gh auth status` before enabling PRs there. Credential rotation is an operator action.
 
 ## Operations
 

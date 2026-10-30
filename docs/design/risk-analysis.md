@@ -29,8 +29,11 @@ orchestrated by a "dumb" launcher fired from a systemd **user** timer with linge
 original threat analysis targeted Claude; adapter-specific differences are explicit below.
 
 - **Identity:** runs as the interactive user `wasti`. That account is a member of the `docker`
-  and `sudo` groups and can read the user's SSH private keys, the `gh` OAuth token
-  (scopes incl. `repo`, `admin:public_key`), and any secrets its group membership grants.
+  and `sudo` groups and can read the user's SSH private keys, the `gh` OAuth token, and any
+  secrets its group membership grants. The token's scopes: on svrllm (account `sewasti`)
+  re-issued 2026-10-30 to `repo`, `read:org`, `gist` (measured with `gh auth status`); the
+  beelink token carried `repo`, `admin:public_key` when this section was written and has not been
+  re-measured since.
 - **Reach of that account (if any confinement layer failed):** `docker` group membership is
   equivalent to host root (`docker run -v /:/host …`). The host is shared with other services
   (partflow, llmstack, open-webui, dashboard). So the *theoretical* blast radius of a full
@@ -239,15 +242,16 @@ core containment. C4 also carries an unverified prototype assumption (its PreToo
 *Residual: re-label, don't remove.* Addressed by [N7](#n7)/[M5](#m5).
 
 ### R12 — `gh` token over-scope + PR body as unscanned exfil channel <a id="r12"></a>
-The `gh` token carries `admin:public_key` and `repo` (§1). If exfiltrated (R1/R8), an attacker can
-register SSH keys on the account — persistence beyond this repo. Separately, `open_pr` builds the PR
+A `gh` token with `admin:public_key` (§1), if exfiltrated (R1/R8), lets an attacker register SSH
+keys on the account — persistence beyond this repo. The svrllm token no longer has that scope
+(2026-10-30); the beelink token is not re-measured. Separately, `open_pr` builds the PR
 title/body from model-derived `summary`/`worknote`/`proof` and sends it via the **GitHub API**, not
 `git push` ([nightshift.sh:383](../../bin/nightshift.sh)) — so a diff-content scanner (M3/N6) as
 scoped to commits would never see it. The host currently enforces `NIGHTSHIFT_OPEN_PR=0`, matching
 the code default ([nightshift.sh:17](../../bin/nightshift.sh)).
 
-*Residual: the API-text channel is inactive while PRs are off; the over-scoped credential and the
-missing scanner still block re-enabling it.* Addressed by [N6](#n6).
+*Residual: the API-text channel is inactive while PRs are off; the missing scanner still blocks
+re-enabling it, and on beelink the unverified token scope does too.* Addressed by [N6](#n6).
 
 ### R13 — Predictable state paths in world-writable `/tmp` <a id="r13"></a>
 `LOCK` and `WORKTREES_DIR` default under `/tmp` ([nightshift-cron.sh:21](../../bin/nightshift-cron.sh),
@@ -407,7 +411,8 @@ with `mkdir -m 700`. Removes the shared-`/tmp` DoS and symlink surface without r
 ### N6 — Extend secret-scanning beyond the diff; drop token scope <a id="n6"></a>
 **Addresses R12.** Scope M3's content scan to the PR body / worknote / digest text, not only the
 committed diff (the `gh` API path never touches pre-push). Re-issue the `gh` token without
-`admin:public_key` — the PR flow needs only `repo` / pull-request scope.
+`admin:public_key` — the PR flow needs only `repo` / pull-request scope. Done on svrllm
+2026-10-30 (`repo`, `read:org`, `gist`); beelink not re-measured.
 
 ### N8 — Sandbox the ship gate <a id="n8"></a>
 **Closes R15. Implemented** — ADR [0026](../adr/0026-the-ship-gate-runs-in-a-sandbox.md).
