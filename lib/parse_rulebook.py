@@ -72,13 +72,18 @@ def quoted_val(raw: str) -> str:
     """Scalar that may be quoted, so its value may legitimately contain `#`.
 
     `val()` splits on ` #` before it knows whether it is inside quotes, which
-    truncates `"gpt-5 #2"` to `"gpt-5`. Anything after the closing quote is a
-    comment. An unterminated quote is a typo, not a value — say so."""
+    truncates `"gpt-5 #2"` to `"gpt-5`. Only a `# comment` may follow the closing
+    quote: anything else would be dropped, and `test_cmd: "cd" sub && make test`
+    would become a ship gate that runs a bare `cd` and always passes. That and an
+    unterminated quote are typos, not values — say so."""
     s = raw.strip()
     if s[:1] in ("'", '"'):
         end = s.find(s[0], 1)
         if end == -1:
             raise SystemExit(f"unterminated quoted value: {s}")
+        rest = s[end + 1 :].strip()
+        if rest and not rest.startswith("#"):
+            raise SystemExit(f"unexpected text after closing quote: {s}")
         return s[1:end]
     return val(raw)
 
