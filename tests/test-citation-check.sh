@@ -167,6 +167,38 @@ assert not order("2026-09-15", "2026-09-16")
 assert not order("not a time", "2026-09-15T21:00:00Z")
 PY
 
+# --- malformed evidence drops its finding, not the run -------------------------
+# The generator is deliberately a cheap model. A quote or ordering entry of the wrong shape — a bare
+# string, a string or dict where the list belongs, a list where a turn id belongs — must be refused
+# like any other unresolved evidence, not crash the checker and take the whole day's reflection with
+# it. The sound finding in the same file proves the run went on.
+cat > "$TMP/malformed.json" <<EOF
+{"findings": [
+ {$(req quote-string-elem), "quotes":["hat nightshift gearbeitet?"]},
+ {$(req quote-number-elem), "quotes":[42]},
+ {$(req quote-string),      "quotes":"hat nightshift gearbeitet?"},
+ {$(req quote-dict),        "quotes":{"turn":"sa:aaaaaaaa","text":"hat nightshift gearbeitet?"}},
+ {$(req quote-list-turn),   "quotes":[{"turn":["sa:aaaaaaaa"],"text":"hat nightshift gearbeitet?"}]},
+ {$(req order-dict),        "quotes":[{"turn":"sa:aaaaaaaa","text":"hat nightshift gearbeitet?"}],
+                            "ordering":{"before":"sa:aaaaaaaa","after":"sa:dddddddd"}},
+ {$(req order-string),      "quotes":[{"turn":"sa:aaaaaaaa","text":"hat nightshift gearbeitet?"}],
+                            "ordering":"sa:aaaaaaaa before sa:dddddddd"},
+ {$(req order-string-elem), "quotes":[{"turn":"sa:aaaaaaaa","text":"hat nightshift gearbeitet?"}],
+                            "ordering":["sa:aaaaaaaa"]},
+ {$(req order-list-turn),   "quotes":[{"turn":"sa:aaaaaaaa","text":"hat nightshift gearbeitet?"}],
+                            "ordering":[{"before":["sa:aaaaaaaa"],"after":"sa:dddddddd"}]},
+ {$(req sound),             "quotes":[{"turn":"sa:aaaaaaaa","text":"hat nightshift gearbeitet?"}]}
+]}
+EOF
+python3 "$CHECK" --findings "$TMP/malformed.json" --turns "$TMP/a.turns" "$TMP/b.turns" \
+  --out "$TMP/result.json" >/dev/null \
+  || fail "one malformed quote or ordering entry crashed the checker — it must drop that finding only"
+for fid in quote-string-elem quote-number-elem quote-string quote-dict quote-list-turn \
+           order-dict order-string order-string-elem order-list-turn; do
+  expect_dropped "$fid" "malformed evidence is unresolved evidence"
+done
+expect_kept sound "a sound finding beside malformed ones must still resolve"
+
 # --- a checker that cannot read its inputs fails loudly ----------------------
 if python3 "$CHECK" --findings "$TMP/findings.json" --turns "$TMP/nonexistent.turns" \
      --out "$TMP/x.json" >/dev/null 2>&1; then
