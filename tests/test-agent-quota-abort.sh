@@ -107,6 +107,11 @@ stages=$(jq -s 'length' "$TMP/state/runs.jsonl")
 digest="$(find "$TMP/digests" -name '*.md' | head -1)"
 [ -n "$digest" ] || { echo "no digest written" >&2; exit 1; }
 grep -q 'ABORTED' "$digest" || { echo "digest does not announce the abort" >&2; cat "$digest" >&2; exit 1; }
+# A spent quota is not a login problem: the remedy is the reset time, not re-authentication.
+grep -q 'run the night again after ' "$digest" \
+  || { echo "digest does not give the quota reset as the remedy" >&2; cat "$digest" >&2; exit 1; }
+grep -q 're-authenticate' "$digest" \
+  && { echo "digest prescribes re-authentication for a quota abort" >&2; cat "$digest" >&2; exit 1; }
 
 # 7. A rate_limit_event that was ALLOWED is a normal night and must not abort anything. 167 of the
 #    stage outputs on this machine carry one; treating the event type as the signal would have
