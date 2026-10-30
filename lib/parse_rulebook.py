@@ -81,8 +81,15 @@ def quoted_val(raw: str) -> str:
         end = s.find(s[0], 1)
         if end == -1:
             raise SystemExit(f"unterminated quoted value: {s}")
-        rest = s[end + 1 :].strip()
-        if rest and not rest.startswith("#"):
+        # In a double-quoted YAML scalar every backslash starts an escape, and this subset
+        # decodes none: `"true \" # x\" && false"` would end at the escaped quote and run
+        # `true \`. Refuse rather than read a value YAML would read differently.
+        if s[0] == '"' and "\\" in s[1:end + 1]:
+            raise SystemExit(f"escape sequences in double-quoted values are not supported: {s}")
+        # A comment needs whitespace before its `#`, as in val(): `"true"#x && false` is
+        # not a comment, and dropping it would leave a gate that runs `true`.
+        rest = s[end + 1 :]
+        if rest.strip() and not (rest[:1] in " \t" and rest.lstrip().startswith("#")):
             raise SystemExit(f"unexpected text after closing quote: {s}")
         return s[1:end]
     return val(raw)

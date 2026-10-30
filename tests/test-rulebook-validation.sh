@@ -296,6 +296,21 @@ if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/trailing.yaml" >"$TMP/stdout" 2>"
   exit 1
 fi
 grep -q 'unexpected text after closing quote' "$TMP/stderr"
+# A `#` right behind the quote is text, not a comment: a comment needs whitespace before it.
+printf 'repos:\n  - path: /x\n    mode: branch-fix\n    test_cmd: "true"#suffix && false\n' > "$TMP/adjacent-hash.yaml"
+if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/adjacent-hash.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
+  echo "parser took an adjacent # for a comment: $(grep '^repo' "$TMP/stdout")" >&2
+  exit 1
+fi
+grep -q 'unexpected text after closing quote' "$TMP/stderr"
+# An escaped quote is not the closing one, and the subset decodes no escapes: refuse, never cut the
+# command at the escape (`"true \" # x\" && false"` used to become `true \`, which passes).
+printf 'repos:\n  - path: /x\n    mode: branch-fix\n    test_cmd: "true \\" # literal quote\\" && false"\n' > "$TMP/escaped.yaml"
+if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/escaped.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
+  echo "parser cut a quoted value at an escaped quote: $(grep '^repo' "$TMP/stdout")" >&2
+  exit 1
+fi
+grep -q 'escape sequences in double-quoted values are not supported' "$TMP/stderr"
 printf 'repos:\n  - path: /x\n    mode: branch-fix\n    test_cmd: "make test #2" # the gate\n' > "$TMP/trailing-comment.yaml"
 python3 "$ROOT/lib/parse_rulebook.py" "$TMP/trailing-comment.yaml" > "$TMP/stdout"
 grep -q 'test_cmd=make test #2$' "$TMP/stdout" || {

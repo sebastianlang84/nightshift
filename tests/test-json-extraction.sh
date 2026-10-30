@@ -62,6 +62,26 @@ if printf '%s\n' '{"verdict":"ship"],"caveats":["not reviewed"]}' |
 fi
 [ ! -s "$TMP/truncated-prefix" ]
 
+# Nor may the search go on inside that object. A later nested object — valid as written, or valid
+# after a repair — is a fragment of the broken verdict, not a verdict of its own.
+for broken in '{"verdict":"ship"],"a":{},"x":{"found":false,"findings":[]}}' \
+              '{"verdict":"ship"],"a":{},"nested":{"found":false,"findings":[],}}'; do
+  if printf '%s\n' "$broken" |
+    python3 "$ROOT/lib/extract_json.py" > "$TMP/continued" 2> "$TMP/err"; then
+    echo "test-json-extraction: a nested fragment escaped a continued broken object: $broken" >&2
+    exit 1
+  fi
+  [ ! -s "$TMP/continued" ]
+done
+# But the broken object still ends where its own closer is, so a verdict AFTER it is found — prose
+# with interval notation (`(0,1], y`) reads exactly like that shape.
+printf '%s\n' 'Domain {(x,y) | x in (0,1], y in [0,1]}.' '{"found":false,"findings":[]}' |
+  python3 "$ROOT/lib/extract_json.py" > "$TMP/after-broken" 2> "$TMP/err" || {
+  echo "test-json-extraction: a verdict after bracketed prose was refused" >&2
+  cat "$TMP/err" >&2; exit 1;
+}
+jq -e '.found == false and .findings == []' "$TMP/after-broken" >/dev/null
+
 # Repair has a ceiling. Past it the output is garbled enough that "the model meant this" is a guess.
 if printf '%s\n' '{"a":{"b":{"c":{"d":1],"e":2],"f":3],"g":4]}' |
   python3 "$ROOT/lib/extract_json.py" > "$TMP/garbled" 2> "$TMP/err"; then

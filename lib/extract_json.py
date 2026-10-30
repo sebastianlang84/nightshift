@@ -60,18 +60,28 @@ def scan(text, start, repair=False):
         elif c in "}]":
             if not stack:
                 break                      # a closer with nothing open: not our object
+            if (len(stack) == 1 and c != CLOSER[stack[0]]
+                    and text[i + 1 :].lstrip().startswith(",")):
+                # An outer mismatch is complete only when it really ends the candidate.
+                # `{"a":1],"b":2}` is not a misspelled final closer: returning at `]` would
+                # silently discard the rest of the object and manufacture valid JSON, so no
+                # repair is attempted. Nor may the scan pop the outer opener and go on: with
+                # the stack empty, the next balanced pair (`"c":{…}`) would end the candidate
+                # inside the object and hand the search a nested fragment. The opener stays
+                # open, the candidate ends at its real closer, and the stray closer keeps it
+                # from parsing — so a verdict after it (prose like `{x in (0,1], y}`) is
+                # still found.
+                if repair:
+                    return None, (swaps, commas), i
+                out.append(c)
+                continue
             want = CLOSER[stack.pop()]
             if c != want:
                 if not repair:
                     out.append(c)          # reproduce the damage; the caller will see it
-                    # An outer mismatch is complete only when it really ends the candidate.
-                    # `{"a":1],"b":2}` is not a misspelled final closer: returning at `]`
-                    # would silently discard the rest of the object and manufacture valid JSON.
-                    if not stack and not text[i + 1 :].lstrip().startswith(","):
+                    if not stack:
                         return "".join(out), (swaps, commas), i
                     continue
-                if not stack and text[i + 1 :].lstrip().startswith(","):
-                    return None, (swaps, commas), i
                 c = want
                 swaps += 1
                 if swaps > MAX_SWAPS:
