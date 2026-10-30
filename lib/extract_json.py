@@ -120,7 +120,7 @@ def repair_syntax(text, start):
 def main() -> None:
     text = sys.stdin.read()
     start = text.find("{")
-    first_complete = -1
+    malformed = []
     while start != -1:
         cand, _, end = scan(text, start)
         if cand is None:
@@ -131,15 +131,18 @@ def main() -> None:
             # The outer candidate is complete but malformed. Its nested objects are not
             # independent stage verdicts; accepting one changes the schema and launders
             # a partial answer. Remember it for the repair pass, then resume only AFTER it.
-            if first_complete < 0:
-                first_complete = start
+            malformed.append(start)
             start = text.find("{", end + 1)
             continue
         sys.stdout.write(cand)
         return
 
-    if first_complete >= 0:
-        cand, (swaps, commas) = repair_syntax(text, first_complete)
+    # Every malformed candidate gets its turn, in order. Prose before the verdict can
+    # hold a balanced brace pair of its own (`${HOME}`, `{x}`) that no repair turns
+    # into JSON; letting that fragment take the only turn would refuse the verdict
+    # behind it for a slip the repair exists to mend.
+    for complete in malformed:
+        cand, (swaps, commas) = repair_syntax(text, complete)
         if cand is not None:
             # Loud on purpose: the artifact that reaches the ledger is not byte-for-byte
             # what the model wrote, and the night log says so.
