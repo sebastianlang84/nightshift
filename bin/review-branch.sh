@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# nightshift branch reviewer (read-only) — the reliable merge-decision routine.
+# nightshift branch reviewer — the reliable merge-decision routine.
 #
 # WHY THIS EXISTS
 # A `git diff <base>..<branch>` (TWO-dot) is a trap for reviewing a steward branch:
@@ -13,7 +13,9 @@
 # both of which are independent of how far <base> has moved. It also reports the drift
 # explicitly, previews the real merge, and flags files changed-but-not-described.
 #
-# It is READ-ONLY: it never checks out, merges, deletes, or pushes. It prints the exact
+# It changes nothing you own: it never checks out, merges, deletes a branch, or pushes. Its one
+# write is `git fetch --prune origin`, which refreshes the repo's remote-tracking refs (and drops
+# those whose branch origin has deleted) so no verdict rests on a stale ref. It prints the exact
 # commands for you to run once you have judged the packet.
 #
 #   review-branch.sh                        # every managed repo, every open nightshift/* branch
