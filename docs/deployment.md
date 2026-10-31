@@ -122,7 +122,7 @@ agent:
 | `NIGHTSHIFT_CLAUDE_MODEL` | claude | the rulebook's `agent.claude_model`, else no `--model` |
 | `NIGHTSHIFT_CLAUDE_FLAGS` | claude | `--dangerously-skip-permissions --max-turns 60` |
 | `NIGHTSHIFT_CLAUDE_SETTING_SOURCES` | claude | `--setting-sources project,local` (stage isolation) |
-| `NIGHTSHIFT_QUOTA_FALLBACK_AGENT` | claude | unset; a structured rejected quota event aborts the night |
+| `NIGHTSHIFT_QUOTA_FALLBACK_AGENT` | claude | unset; an agent that cannot reach its model twice in a row aborts the night |
 | `NIGHTSHIFT_CODEX_MODEL` | codex | the rulebook's `agent.codex_model`, else no `--model` |
 | `NIGHTSHIFT_CODEX_REASONING_EFFORT` | codex | the rulebook's `agent.codex_effort`, else the CLI default |
 | `NIGHTSHIFT_CODEX_PATH` | codex | nothing is prepended, so the codex stages see `/usr/bin/node` first (ADR 0037) |
@@ -138,12 +138,13 @@ agent:
 | `NIGHTSHIFT_TEST_FSIZE_MB` | all | the rulebook's `limits.test_fsize_mb`, else 2048 (`RLIMIT_FSIZE`) |
 | `NIGHTSHIFT_TEST_MAX_PROCS` | all | the rulebook's `limits.test_max_procs`, else 2048 (`RLIMIT_NPROC`) |
 
-`NIGHTSHIFT_QUOTA_FALLBACK_AGENT=codex` makes a rejected Claude quota event retry that same stage
-once through the Codex adapter, then keeps the rest of the night on Codex. The rejected attempt and
-the retry are separate `runs.jsonl` rows, and the raw quota event is retained in the item directory.
-Credentials and ordinary stage failures do not trigger the fallback. A Codex usage-limit failure,
-whether Codex runs the night or only the routed Review, has no fallback and aborts the night with
-its reset time (ADR 0023). Configure its model and effort
+`NIGHTSHIFT_QUOTA_FALLBACK_AGENT=codex` takes over when Claude could not reach its model two stages
+in a row — each failed within 30 s with no tokens counted, which is how a spent quota or an outage
+looks from any CLI (ADR 0023). The second stage is retried once through the Codex adapter, and the
+rest of the night stays on Codex. The failed attempts and the retry are separate `runs.jsonl` rows,
+and the failed attempt's raw output is kept in the item directory as `.raw_<stage>.claude-wall`.
+Credentials and ordinary stage failures do not trigger the fallback. A routed reviewer has no
+fallback: when it cannot reach its model twice in a row, the night aborts. Configure its model and effort
 through the normal Codex settings, for example `agent.codex_model: gpt-6.1-sol` plus
 `agent.codex_effort: medium` (or `NIGHTSHIFT_CODEX_REASONING_EFFORT=medium` for a one-off run).
 
@@ -394,12 +395,14 @@ never push outside `nightshift/*` (see [`docs/design/hook-spec.md`](design/hook-
   Keep dependency-install errors visible in `test_cmd`: use `npm ci --no-audit --no-fund`, without
   `--silent`, so a failed install leaves a useful `tests.log` for the next Fix iteration.
 - **An aborted night (exit 3):** the night stopped because an agent CLI could not authenticate or
-  was out of quota ([ADR 0023](adr/0023-an-unusable-agent-aborts-the-night.md)). The digest says
+  could not reach its model two stages in a row — usually a spent quota
+  ([ADR 0023](adr/0023-an-unusable-agent-aborts-the-night.md)). The digest says
   `ABORTED`, names the adapter that died (which may be a routed reviewer rather than the night's
   agent) and the cause, the day's log carries a `FATAL:` line naming the stage, and the systemd unit
   is marked failed. Nothing was recorded — no recon caches, no `empty` ledger rows — so there is no
   state to clean up. For a credentials abort, log in to that CLI again (`claude` / `codex login`);
-  for a quota abort, wait until the reset time the digest gives. Then re-run:
+  otherwise the `FATAL:` line names the stage's raw output, where the CLI says why — for a spent
+  quota, wait until the reset it gives. Then re-run:
   ```
   bin/nightshift-cron.sh          # same launcher the timer uses (honours the single-instance lock)
   ```

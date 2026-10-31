@@ -92,19 +92,29 @@ adapter, Nightshift records and preserves the rejected attempt, retries the same
 that adapter, and keeps later stages on it. If the fallback fails, the existing fatal path still
 aborts before derived repo state is written. Credential failures and ordinary stage failures never
 switch vendors. This is host opt-in; unset keeps the original abort behavior.
-Regression coverage: [`tests/test-agent-quota-fallback.sh`](../../tests/test-agent-quota-fallback.sh).
+Regression coverage: [`tests/test-agent-wall-fallback.sh`](../../tests/test-agent-wall-fallback.sh). (Since 2026-10-31 the trigger is the wall rule below, not the event.)
 
-### Amendment 2026-10-30 — Codex's usage limit is recognised too
+### Amendment 2026-10-31 — one test for every adapter
 
-On 2026-10-28 the routed Codex reviewer had spent its weekly window. Codex reports that as a failed
-turn — exit 1, empty stderr, `{"type":"turn.failed","error":{"message":"You’ve hit your usage
-limit. … try again at Nov 2nd, 2026 7:14 AM."}}` — with no structured code, so nothing matched it:
-each Review was a retryable stage failure, and Fix kept building three branches no reviewer could
-pass. `codex_quota_rejected` now reads that shape. It matches the wording, which the Claude detector
-avoids, but only inside the CLI's own `turn.failed` and `error` events; model text travels in item
-events and is never read. The reset time comes from the message, or reads "an unknown time". A
-routed reviewer keeps no fallback (ADR 0031), so the night aborts.
-Regression coverage: [`tests/test-codex-quota-abort.sh`](../../tests/test-codex-quota-abort.sh).
+The quota abort first read one CLI's structured event (Claude's `rate_limit_event`, 2026-08-21); a
+Codex signature followed on 2026-10-30 after the routed Codex reviewer spent its weekly window on
+2026-10-28 unnoticed. On 2026-10-31 Claude's own signature missed as well: the CLI now reports a
+spent five-hour window as an `is_error` result with `api_error_status` 429, and seven stages walked
+into it. A signature per CLI misses every new shape until it has cost a night.
+
+Both signatures are replaced by one rule that reads only what every adapter already writes: a stage
+that **failed within 30 seconds and whose token counters show no request** did not reach its model.
+Two such stages in a row on the same adapter make that adapter unusable for the night — the
+configured fallback takes over, or the night aborts. A stage that succeeds or spends tokens restarts
+the count; an adapter refusing to run (status 2) and the mock agent never count. The first such
+stage already records nothing derived (no recon negative cache), so the second stage costs a few
+seconds and no state. In `runs.jsonl` up to 2026-10-31, all 46 failures of that kind fell in seven
+nights where the agent was blocked from the first stage on; none occurred in a healthy night. No
+reset time is parsed any more; the digest points to the stage's raw output, which carries the CLI's
+own message.
+Regression coverage: [`tests/test-agent-wall-abort.sh`](../../tests/test-agent-wall-abort.sh),
+[`tests/test-agent-wall-fallback.sh`](../../tests/test-agent-wall-fallback.sh),
+[`tests/test-agent-wall-reviewer.sh`](../../tests/test-agent-wall-reviewer.sh).
 
 ### Amendment 2026-08-24 — the signatures read the CLI, not the repo
 
@@ -173,8 +183,8 @@ both still caught. Regression coverage:
   silence, since the stage failure itself is now logged either way. `AGENT_AUTH_RE` is the single
   place to extend — but extending it is only safe because `agent_diagnosis` now bounds what it may
   read. A signature added to match the CLI will otherwise match the fleet's source code as well.
-- Credential failures abort. A structured rejected quota event either switches to the configured
-  fallback or aborts; timeouts and transient API errors remain per-stage best-effort because they
+- Credential failures abort. Two stages in a row that could not reach the model (amendment
+  2026-10-31) either switch to the configured fallback or abort; timeouts and transient API errors remain per-stage best-effort because they
   are local and retryable.
 - `NIGHTSHIFT_ADVISOR_AGENT` is gated on *which* adapter died, not on the fact that one did: an
   advisor on a different vendor is unaffected by the outage and still gives a usable second opinion

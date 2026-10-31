@@ -23,7 +23,7 @@ the night's expensive model does the work.
 `agent.review_agent` in the rulebook (env override `NIGHTSHIFT_REVIEW_AGENT`) names it; omitted, the
 Review stage runs on the night's own adapter exactly as before. The mechanism is the dynamic-scope
 rebinding `advise_branches` already uses — `run_review_stage` rebinds `NIGHTSHIFT_AGENT` for that one
-call — so every helper that reads it (the diagnosis filter, the quota detector, the adapter name in
+call — so every helper that reads it (the diagnosis filter, the wall count, the adapter name in
 `runs.jsonl`) sees the adapter that actually ran.
 
 The quota fallback is deliberately *not* carried into a routed reviewer. That route is `claude ->

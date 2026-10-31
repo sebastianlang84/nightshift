@@ -2,9 +2,9 @@
 set -euo pipefail
 unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
-# An explicitly configured second adapter takes over after Claude reports a rejected quota event.
-# The rejected attempt remains telemetry/evidence, the same stage is retried once, and later stages
-# stay on the fallback instead of probing the spent Claude window again.
+# An explicitly configured second adapter takes over once Claude could not reach its model twice in
+# a row (ADR 0023). The failed attempts remain telemetry/evidence, the second stage is retried once
+# on the fallback, and later stages stay there instead of probing the spent Claude window again.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
@@ -30,9 +30,13 @@ JSON
   return 1
 }
 
+CODEX_SLOW_FAIL=""
 codex_run() {
   local stage="$1" id="$3"
   codex_calls=$((codex_calls + 1))
+  if [ -n "$CODEX_SLOW_FAIL" ]; then   # fails without counters after longer than the wall bound
+    AGENT_WALL_SECONDS=-1; printf 'not json\n' > "$id/$stage.out"; : > "$id/$stage.err"; return 1
+  fi
   [ "$NIGHTSHIFT_CODEX_MODEL" = gpt-6.1-sol ]
   [ "$NIGHTSHIFT_CODEX_REASONING_EFFORT" = medium ]
   : > "$id/$stage.err"
@@ -42,31 +46,51 @@ codex_run() {
   return 0
 }
 
+# The first wall is not yet a verdict on the adapter: the stage fails and Claude stays.
+mkdir -p "$TMP/item-0"
 set +e
-run_agent explore "$TMP/wd" "$TMP/item" 2> "$TMP/err"
+run_agent recon "$TMP/wd" "$TMP/item-0" 2> "$TMP/err"
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || { echo "the first wall reported success" >&2; exit 1; }
+[ "$NIGHTSHIFT_AGENT" = claude ] && [ "$codex_calls" -eq 0 ] \
+  || { echo "one wall already switched to the fallback" >&2; cat "$TMP/err" >&2; exit 1; }
+
+set +e
+run_agent explore "$TMP/wd" "$TMP/item" 2>> "$TMP/err"
 rc=$?
 set -e
 [ "$rc" -eq 0 ] || { echo "Codex fallback failed with exit $rc" >&2; cat "$TMP/err" >&2; exit 1; }
 
-[ "$claude_calls" -eq 1 ] || { echo "expected one Claude attempt, got $claude_calls" >&2; exit 1; }
+[ "$claude_calls" -eq 2 ] || { echo "expected two Claude attempts, got $claude_calls" >&2; exit 1; }
 [ "$codex_calls" -eq 1 ] || { echo "expected one Codex retry, got $codex_calls" >&2; exit 1; }
 [ "$NIGHTSHIFT_AGENT" = codex ] || { echo "night did not stay on Codex fallback" >&2; exit 1; }
 [ "$RUN_AGENT_ROUTE" = 'claude -> codex' ] || { echo "agent route not recorded: $RUN_AGENT_ROUTE" >&2; exit 1; }
 [ -z "$AGENT_FATAL" ] || { echo "successful fallback still marked the night fatal: $AGENT_FATAL" >&2; exit 1; }
 grep -q 'switching the rest of the night to codex' "$TMP/err" \
   || { echo "fallback was not announced" >&2; cat "$TMP/err" >&2; exit 1; }
-grep -q 'rate_limit_event' "$TMP/item/.raw_explore.claude-quota" \
-  || { echo "rejected Claude evidence was not preserved" >&2; exit 1; }
+grep -q 'rate_limit_event' "$TMP/item/.raw_explore.claude-wall" \
+  || { echo "the failed Claude attempt's evidence was not preserved" >&2; exit 1; }
 
-jq -se 'length==2
-        and .[0].model=="claude" and .[0].exit==1
-        and .[1].model=="codex" and .[1].exit==0 and .[1].model_id=="gpt-6.1-sol"' \
+jq -se 'length==3
+        and .[0].model=="claude" and .[0].exit==1 and .[1].model=="claude" and .[1].exit==1
+        and .[2].model=="codex" and .[2].exit==0 and .[2].model_id=="gpt-6.1-sol"' \
   "$TMP/state/runs.jsonl" >/dev/null \
   || { echo "fallback telemetry is incomplete" >&2; cat "$TMP/state/runs.jsonl" >&2; exit 1; }
 
 mkdir -p "$TMP/item-2"
 run_agent review "$TMP/wd" "$TMP/item-2" 2>> "$TMP/err"
-[ "$claude_calls" -eq 1 ] || { echo "later stage probed Claude quota again" >&2; exit 1; }
+[ "$claude_calls" -eq 2 ] || { echo "later stage probed Claude quota again" >&2; exit 1; }
 [ "$codex_calls" -eq 2 ] || { echo "later stage did not stay on Codex" >&2; exit 1; }
 
-echo "test-agent-quota-fallback: ok"
+# A fallback retry that fails without reaching the model keeps the wall the switch was made on, so
+# Recon records nothing derived from that stage.
+NIGHTSHIFT_AGENT=claude; RUN_AGENT_ROUTE=""; AGENT_WALL_STREAK[claude]=1; AGENT_LAST_WALLED=0
+saved_bound=$AGENT_WALL_SECONDS; CODEX_SLOW_FAIL=1
+mkdir -p "$TMP/item-3"
+run_agent recon "$TMP/wd" "$TMP/item-3" 2>> "$TMP/err" || true
+AGENT_WALL_SECONDS=$saved_bound; CODEX_SLOW_FAIL=""
+[ "$NIGHTSHIFT_AGENT" = codex ] || { echo "the second wall did not switch to the fallback" >&2; exit 1; }
+[ "$AGENT_LAST_WALLED" = 1 ] || { echo "the fallback retry cleared the wall it was switched on" >&2; exit 1; }
+
+echo "test-agent-wall-fallback: ok"

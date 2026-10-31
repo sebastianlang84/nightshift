@@ -124,7 +124,10 @@ cat > "$d/bin/claude" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 r='{"found":true,"coverage":{"files":["README.md"],"entrypoints":["README -> rendered docs"],"checks":["checked typo"],"invariants":{"config_domain":"not-applicable: no config","semantic_sets":"not-applicable: no set","artifact_identity":"checked: README bytes","failure_translation":"checked: partial result","lifecycle":"not-applicable: no lifecycle"},"unresolved":[]},"findings":[{"file":"README.md","type":"typo","line_window":"L1-L3","claim":"README contains teh","verify":"search README for teh","verifiability":"static","disposition":"fix","summary":"fix typo","rank":1,"confidence":1.0}]}';
-jq -nc --arg r "$r" '{type:"result",subtype:"error_max_turns",is_error:true,result:$r}'
+# The real result object always carries the CLI's counters (it does even for a spent quota, as zeros);
+# without them the stage would look like one that never reached the model (ADR 0023, 2026-10-31).
+jq -nc --arg r "$r" '{type:"result",subtype:"error_max_turns",is_error:true,result:$r,
+  total_cost_usd:1.9,usage:{input_tokens:52000,output_tokens:3100}}'
 exit 1
 EOF
 chmod +x "$d/bin/claude"

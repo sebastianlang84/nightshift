@@ -520,8 +520,8 @@ AGENT_AUTH_RE='not logged in|/login|authentication_failed|invalid api key|unauth
 # So the raw stream is no longer searched whole. claude's is a JSON event array in which the CLI's
 # own verdict is the `result` event; the assistant/user/system events are the model's work, i.e.
 # the repo's words. codex's shape is unverified here (no codex night has run), so its raw passes
-# through unfiltered rather than through a guess — the same standard the quota detector was held
-# to. A raw stream that is not a parseable event array is not model output either, and passes
+# through unfiltered rather than through a guess — a CLI signature is claimed only once a run has
+# shown it. A raw stream that is not a parseable event array is not model output either, and passes
 # through whole: that is the shape of the 2026-08-05 outage, where the CLI printed one line.
 agent_diagnosis() { # raw_file -> what the CLI said about the run, on stdout
   local f="$1" n
@@ -566,67 +566,32 @@ agent_credentials_failed() { # errfile rawfile -> 0 if the CLI's own output repo
 # Second, adapter-independent riddle-out, and the one that covers codex too: a stage that reached
 # the API cannot have failed to authenticate. The adapters write .usage_$stage from the CLI's own
 # counters, so a non-zero token count is the CLI's receipt for a completed request.
-agent_reached_the_api() { # usage_file -> 0 if the run spent tokens
+agent_reached_the_api() { # usage_file -> 0 if the run spent tokens or money
   local f="$1"
   [ -s "$f" ] || return 1
+  # A CLI may report the bill without the token split (Claude's turn-ceiling result carries
+  # `total_cost_usd`), and a billed request reached the model just the same.
   [ "$(jq -r '(((.output_tokens? // 0) + (.input_tokens? // 0)
-               + (.cache_read_tokens? // 0)) > 0) // false' "$f" 2>/dev/null)" = true ]
+               + (.cache_read_tokens? // 0) + (.cost_usd? // 0)) > 0) // false' "$f" 2>/dev/null)" = true ]
 }
 
-# Quota exhaustion is the same class of event as a bad credential (ADR 0023): the agent could not
-# run, so nothing it "returned" is evidence about the code. It arrives differently, though — the CLI
-# exits 0, emits no result, and says why in a STRUCTURED event rather than in prose. Matching the
-# structure instead of the wording is the point: the sentence the CLI prints for a spent five-hour
-# window is not stable across versions, the event shape is.
-#
-# Observed 2026-08-21, when this went unrecognised and five explore lenses plus one recon were spent
-# against a wall in 21 seconds, each recorded as "no parseable JSON":
-#   {"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1787293200,
-#    "rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"out_of_credits"}}
-claude_quota_rejected() { # raw_file -> 0 if the CLI reported a REJECTED rate limit; echoes reset time
-  local f="$1" resets
-  [ -s "$f" ] || return 1
-  resets=$(jq -r '
-      (if type=="array" then . else [.] end)
-      | map(select((.type? // "") == "rate_limit_event")
-            | .rate_limit_info? // {}
-            | select((.status? // "") == "rejected"))
-      | last | (.resetsAt // empty) | tostring' "$f" 2>/dev/null) || return 1
-  [ -n "$resets" ] && [ "$resets" != null ] || return 1
-  # An epoch we cannot format is still a rejection — report the raw value rather than nothing.
-  date -d "@$resets" '+%Y-%m-%d %H:%M %Z' 2>/dev/null || printf '%s' "$resets"
-  return 0
-}
+# An agent that cannot reach its model — spent quota, an outage, a CLI that dies on start — is the
+# same class of event as a bad credential (ADR 0023): nothing it "returned" is evidence about the
+# code. Every CLI reports it differently and the reports drift: Claude's spent five-hour window was
+# a `rate_limit_event` on 2026-08-21 and an `is_error` result with `api_error_status` 429 on
+# 2026-10-31; Codex's weekly limit on 2026-10-28 was a `turn.failed` event in prose. A signature per
+# CLI misses each new shape until it has cost a night, so the test reads the one receipt every
+# adapter writes instead: the stage failed quickly and its token counters (.usage_<stage>) show no
+# request. In runs.jsonl up to 2026-10-31 all 46 such failures fell in seven nights where the agent
+# was blocked from the first stage on, and none in a healthy night; failures without tokens that ran
+# longer (7 of 61-300 s, 2 over 300 s) were real stages, hence the time bound.
+AGENT_WALL_LIMIT=2        # this many such failures in a row make the adapter unusable for the night
+AGENT_WALL_SECONDS=30     # a stage that ran longer did reach something, whatever its counters say
+declare -gA AGENT_WALL_STREAK=()   # adapter -> consecutive failures that never reached the model
+AGENT_LAST_WALLED=0       # 1 = the latest stage was such a failure: record nothing derived from it
 
-# Codex reports a spent weekly window as a failed TURN, not as a rate-limit event: exit 1, nothing in
-# stderr, and no structured code — only the CLI's own message. Observed 2026-10-28, when the routed
-# Review stage hit it three times and each item was logged as a retryable stage failure while Fix
-# kept building branches nobody could review (runs/2026-10-28, codex-cli 0.165.0):
-#   {"type":"turn.failed","error":{"message":"You’ve hit your usage limit. Visit https://chatgpt.com/
-#    settings/usage to purchase more credits or try again at Nov 2nd, 2026 7:14 AM."}}
-# The wording is matched, but only inside the CLI's own `turn.failed` and `error` events (the stream
-# carries both; either alone counts, so a run cut off between them is still caught); the model's own
-# text travels in item events and never reaches this check. It runs only for a stage that failed.
-codex_quota_rejected() { # raw_file -> 0 if the CLI failed the turn on its usage limit; echoes reset time
-  local f="$1" msg when
-  [ -s "$f" ] || return 1
-  msg=$(jq -rR 'fromjson? | select(type == "object")
-                | if .type == "turn.failed" then .error.message? elif .type == "error" then .message? else empty end
-                | strings' "$f" 2>/dev/null | grep -i 'usage limit' | tail -n 1) || return 1
-  [ -n "$msg" ] || return 1
-  when=$(printf '%s' "$msg" | sed -nE 's/.*try again at (.+[^.])\.?$/\1/p' | sed -E 's/([0-9])(st|nd|rd|th),/\1,/')
-  # A reset time we cannot parse is still a rejection — report the CLI's words rather than nothing.
-  # (An empty string must not reach `date -d`, which reads it as today's midnight.)
-  [ -n "$when" ] && date -d "$when" '+%Y-%m-%d %H:%M %Z' 2>/dev/null || printf '%s' "${when:-an unknown time}"
-  return 0
-}
-
-agent_quota_rejected() { # raw_file -> 0 if THIS adapter's own output says the account is out of quota
-  case "$NIGHTSHIFT_AGENT" in
-    claude) claude_quota_rejected "$1" ;;
-    codex)  codex_quota_rejected "$1" ;;
-    *) return 1 ;;
-  esac
+agent_hit_a_wall() { # usage_file elapsed_seconds -> 0 if the failed stage never reached the model
+  ! agent_reached_the_api "$1" && [ "$2" -le "$AGENT_WALL_SECONDS" ]
 }
 
 # How many EXTRA attempts a stage gets after the model returns nothing at all (ADR 0034). One, so a
@@ -656,10 +621,6 @@ preserve_stage_attempt() { # stage item_dir label — keep one attempt's evidenc
   for f in "$id/.raw_$stage" "$id/$stage.err" "$id/.usage_$stage"; do
     [ ! -e "$f" ] || mv "$f" "$f.$label"
   done
-}
-
-preserve_quota_attempt() { # stage item_dir adapter — keep the rejected provider evidence
-  preserve_stage_attempt "$1" "$2" "$3-quota"
 }
 
 # An EMPTY answer: the file exists and holds no non-whitespace text. Existence is half the test —
@@ -731,8 +692,13 @@ collect_agent_note() { # stage workdir repo -> move a stage's note into the note
 }
 
 run_agent() { # stage workdir item_dir [attempt]
-  local stage="$1" workdir="$2" item_dir="$3" attempt="${4:-1}" start end status=0 resets="" usage='{}'
-  local attempt_agent="$NIGHTSHIFT_AGENT" fallback="${NIGHTSHIFT_QUOTA_FALLBACK_AGENT:-}"
+  local stage="$1" workdir="$2" item_dir="$3" attempt="${4:-1}" start end status=0 usage='{}'
+  local attempt_agent="$NIGHTSHIFT_AGENT" fallback="${NIGHTSHIFT_QUOTA_FALLBACK_AGENT:-}" walls=0
+  # A retry of this stage — empty-answer or fallback, both called from below with _run_agent_retry
+  # set in this scope — inherits the first attempt's wall: only an attempt that reaches the model
+  # clears it, or a failed retry would let Recon negative-cache the wall after all.
+  [ -n "${_run_agent_retry:-}" ] || AGENT_LAST_WALLED=0
+  local _run_agent_retry=1
   clear_stage_artifacts "$stage" "$item_dir"
   start=$(date +%s)
   case "$NIGHTSHIFT_AGENT" in
@@ -746,6 +712,11 @@ run_agent() { # stage workdir item_dir [attempt]
   # gate — so a note survives a stage that failed, which is when it is most likely to exist. The
   # repo name comes from the item dir the Runner already writes, not from a global.
   collect_agent_note "$stage" "$workdir" "$(cat "$item_dir/repo" 2>/dev/null || true)"
+  # A stage that succeeded or spent tokens proves the adapter reaches its model; its wall count restarts.
+  if [ "$status" -eq 0 ] || agent_reached_the_api "$item_dir/.usage_$stage"; then
+    AGENT_WALL_STREAK[$attempt_agent]=0
+    AGENT_LAST_WALLED=0
+  fi
   # A non-zero stage is reported as a FAILURE, not absorbed into "found nothing". The exit code has
   # always been recorded in runs.jsonl, but nothing ever read it back out — so a stage that could not
   # run at all was indistinguishable, in the night log and in the digest, from one that ran and had
@@ -767,29 +738,38 @@ run_agent() { # stage workdir item_dir [attempt]
       log "FATAL: $AGENT_FATAL — aborting the night rather than recording a clean fleet."
       log "FATAL: re-authenticate the $NIGHTSHIFT_AGENT CLI, then run bin/nightshift.sh again."
     fi
-    if [ -z "$AGENT_FATAL" ] && resets=$(agent_quota_rejected "$rawf"); then
+    # Status 2 is an adapter refusing to run (a missing sandbox, an unpermitted tool) — a configuration
+    # verdict reported on its own, not a wall. The mock agent reaches no model and counts nothing.
+    if [ -z "$AGENT_FATAL" ] && [ "$status" -ne 2 ] && [ "$attempt_agent" != mock ] \
+       && agent_hit_a_wall "$item_dir/.usage_$stage" "$(( $(date +%s) - start ))"; then
+      walls=$(( ${AGENT_WALL_STREAK[$attempt_agent]:-0} + 1 ))
+      AGENT_WALL_STREAK[$attempt_agent]=$walls
+      AGENT_LAST_WALLED=1
+      log "  stage $stage: $attempt_agent did not reach its model ($walls in a row) — its answer is in $rawf"
+    fi
+    if [ "$walls" -ge "$AGENT_WALL_LIMIT" ]; then
       if { [ "$fallback" = claude ] || [ "$fallback" = codex ]; } \
          && [ "$fallback" != "$attempt_agent" ]; then
-        # Keep both attempts in runs.jsonl. The rejected provider's raw event is renamed before the
-        # retry clears the canonical stage paths, so the morning still has the exact quota evidence.
-        if [ "$attempt_agent" != mock ] && [ -s "$item_dir/.usage_$stage" ]; then
+        # Keep both attempts in runs.jsonl. The failed attempt's raw output is renamed before the
+        # retry clears the canonical stage paths, so the morning still has the provider's own words.
+        if [ -s "$item_dir/.usage_$stage" ]; then
           usage=$(jq -c 'if type=="object" then . else {} end' "$item_dir/.usage_$stage" 2>/dev/null || true)
           [ -n "$usage" ] || usage='{}'
         fi
         end=$(date +%s)
         append_run "$stage" "$attempt_agent" "$start" "$((end - start))" "$status" \
           "$(basename "$item_dir")" "$usage"
-        preserve_quota_attempt "$stage" "$item_dir" "$attempt_agent"
+        preserve_stage_attempt "$stage" "$item_dir" "$attempt_agent-wall"
         NIGHTSHIFT_AGENT="$fallback"
         RUN_AGENT_ROUTE="$RUN_PRIMARY_AGENT -> $fallback"
-        log "  stage $stage: $attempt_agent quota rejected until $resets — switching the rest of the night to $fallback"
+        log "  stage $stage: $attempt_agent could not reach its model $walls stages in a row — switching the rest of the night to $fallback"
         run_agent "$stage" "$workdir" "$item_dir"
         return $?
       fi
-      AGENT_FATAL="$attempt_agent is out of quota until $resets (stage $stage)"
+      AGENT_FATAL="$attempt_agent could not reach its model $walls stages in a row (stage $stage)"
       AGENT_FATAL_AGENT="$attempt_agent"
       log "FATAL: $AGENT_FATAL — aborting the night rather than spending every remaining lens on the same wall."
-      log "FATAL: re-run bin/nightshift.sh after $resets."
+      log "FATAL: check that the $attempt_agent CLI is logged in and has quota left ($rawf says why), then run bin/nightshift.sh again."
     fi
     # An EMPTY answer is not a verdict (ADR 0034). The provider accepted the turn, billed it, and
     # returned no text — observed 2026-09-11, when partflow's first explore lens came back with a
@@ -849,7 +829,7 @@ review_stage_agent() {
 
 # Run the Review stage on that adapter. Same dynamic-scope override advise_branches uses: run_agent
 # reads the global NIGHTSHIFT_AGENT, so a `local` rebinds it for this call alone and every helper it
-# reaches (agent_diagnosis, agent_quota_rejected, the telemetry adapter name) sees the adapter that
+# reaches (agent_diagnosis, the wall count, the telemetry adapter name) sees the adapter that
 # actually ran.
 run_review_stage() { # workdir item_dir
   local ra; ra="$(review_stage_agent)"
@@ -860,7 +840,7 @@ run_review_stage() { # workdir item_dir
   fi
   # The quota fallback route is claude -> codex and belongs to the NIGHT's adapter. Carrying it into
   # a deliberately-chosen reviewer would silently swap the reviewer for the very vendor the routing
-  # exists to differ from, so the reviewer keeps its own quota verdict instead.
+  # exists to differ from, so a reviewer that cannot reach its model aborts the night instead.
   local NIGHTSHIFT_AGENT="$ra" NIGHTSHIFT_QUOTA_FALLBACK_AGENT=""
   run_agent review "$1" "$2"
 }
@@ -2196,7 +2176,8 @@ ensure_recon() { # repo -> refresh cache if missing / configured base changed / 
   # CLI, not about the repo, and caching it would be wrong twice: the negative cache asserts "recon
   # found nothing here" and its backoff then suppresses the retry for 6h, so the operator's fix does
   # not take effect on the next run either. Leave the cache untouched and let main() end the night.
-  if [ -n "$AGENT_FATAL" ]; then
+  # The same holds for the first of the failures that make an agent unusable, before it is fatal.
+  if [ -n "$AGENT_FATAL" ] || [ "$AGENT_LAST_WALLED" = 1 ]; then
     log "  $(basename "$repo"): recon skipped — agent unavailable (cache left untouched)"
     return 0
   fi
@@ -3449,14 +3430,13 @@ write_digest() { # made open status [advice]
     # morning. Without this the digest of a credential outage is indistinguishable from a clean
     # fleet: same "shipped: 0", same empty tables, no reason given.
     # Name the adapter that DIED, not the night's: a routed Codex reviewer runs under a `local`
-    # NIGHTSHIFT_AGENT that is gone by now. And give the remedy for the cause run_agent found — a
-    # spent quota is not fixed by logging in again, only by waiting for the reset.
+    # NIGHTSHIFT_AGENT that is gone by now. And give the remedy for the cause run_agent found — an
+    # agent that could not reach its model may be logged in with its quota spent, so name both.
     if [ "$status" = agent_unavailable ]; then
-      local dead="${AGENT_FATAL_AGENT:-$NIGHTSHIFT_AGENT}" remedy resets
+      local dead="${AGENT_FATAL_AGENT:-$NIGHTSHIFT_AGENT}" remedy
       case "$AGENT_FATAL" in
-        *" is out of quota until "*)
-          resets="${AGENT_FATAL#* is out of quota until }"; resets="${resets% (stage *}"
-          remedy="run the night again after $resets — the CLI is logged in, its quota is spent" ;;
+        *" could not reach its model "*)
+          remedy="check that the \`$dead\` CLI is logged in and has quota left — the stage's raw output in the night log says which — and run the night again" ;;
         *) remedy="re-authenticate the \`$dead\` CLI and run the night again" ;;
       esac
       echo "- **ABORTED: the \`$dead\` agent could not run** — ${AGENT_FATAL:-no usable credentials}. Nothing below reflects the state of the code: $remedy. No recon caches or \`empty\` rows were written."
@@ -3773,8 +3753,8 @@ main() {
   if [ -z "$MAX_RUN_SECONDS" ] && [ -n "${RB_MAX_RUN_MINUTES:-}" ]; then
     MAX_RUN_SECONDS=$(( RB_MAX_RUN_MINUTES * 60 ))
   fi
-  # Announce the configured route before verify_findings makes the first agent call. A quota
-  # fallback there changes NIGHTSHIFT_AGENT for the rest of the process, so logging afterwards
+  # Announce the configured route before verify_findings makes the first agent call. A fallback
+  # there changes NIGHTSHIFT_AGENT for the rest of the process, so logging afterwards
   # would mislabel the fallback as the primary.
   log "agent=$NIGHTSHIFT_AGENT prefix=$BRANCH_PREFIX · cap: max $MAX_OPEN undecided ${BRANCH_PREFIX} branches · run ceiling $MAX_RUN_BRANCHES · fix iters $MAX_FIX_ITER"
   announce_agent_model() { # adapter
@@ -3799,7 +3779,7 @@ main() {
     done
   fi
   if [ -n "${NIGHTSHIFT_QUOTA_FALLBACK_AGENT:-}" ]; then
-    log "quota fallback: $NIGHTSHIFT_QUOTA_FALLBACK_AGENT (activated only after a structured rejected quota event)"
+    log "quota fallback: $NIGHTSHIFT_QUOTA_FALLBACK_AGENT (activated only after the night's agent could not reach its model $AGENT_WALL_LIMIT stages in a row)"
     log_model_selection codex NIGHTSHIFT_CODEX_MODEL "$RB_CODEX_MODEL"
   fi
   local made=0 considered=0 findings=0 repo mode cfgbase id fp fnj iter verdict wt base base_sha b summary open="" pass=0 progress ship_progress stop_reason=ok disp rfind farr n_find k fd dim explore_rc n_partial fix_rc prc=0 review_rc hook_retry=0 retry_ok=0 retry_why="" frc=0 fix_cap=0
