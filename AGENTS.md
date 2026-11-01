@@ -65,3 +65,11 @@ Operations: [docs/deployment.md](docs/deployment.md).
    [ADR 0040](docs/adr/0040-reviewed-branches-merge-without-a-human.md).
    The runner itself only pushes `nightshift/*`.
    Handle tasks for this repo labelled `nightshift-merge` in this session; do not pass them on.
+5. Every status reply about nightshift includes an overview table (Sebastian, 2026-11-02).
+   One row per repo and night item: what was found or changed, and whether it is open, reviewed,
+   merged or dropped.
+   Take state from the digests, the ledger, origin's branches and the board, not from memory.
+6. Every status reply also includes a clutter check across all managed repos.
+   It covers leftover `nightshift/*` branches on origin and locally, worktrees, stashes,
+   and nightshift's own worktree and run directories.
+   Remove what the git hook and standing approval allow; request curator approval for the rest.
