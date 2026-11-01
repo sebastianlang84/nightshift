@@ -61,4 +61,35 @@ review link  "$TMP/link";        check link  "symlinked path"
 rulebook "$TMP/repo/"
 review rbslash "$TMP/repo";      check rbslash "rulebook path with trailing slash"
 
+# A main-base branch: the printed merge recipe must work in a repo that holds only the remote-tracking
+# ref. The Runner deletes its local nightshift/* branch after pushing, so a recipe that merged the bare
+# `nightshift/<name>` failed with "not something we can merge" — after `checkout main` had already run,
+# and before the push and the branch deletion, which nothing else ever does.
+m() { git -C "$TMP/mrepo" -c user.name=test -c user.email=test@localhost "$@"; }
+git init -q --bare "$TMP/mremote.git"
+git init -q -b main "$TMP/mrepo"
+m remote add origin "$TMP/mremote.git"
+printf 'base\n' > "$TMP/mrepo/README.md"; m add -A; m commit -q -m initial; m push -q -u origin main
+m checkout -q -b nightshift/y main
+printf 'y\n' > "$TMP/mrepo/y.txt"; m add -A; m commit -q -m "fix: y.txt"; m push -q origin nightshift/y
+m checkout -q main
+m branch -q -D nightshift/y   # what the Runner does after pushing
+cat > "$TMP/rulebook.yaml" <<YAML
+branch_prefix: nightshift/
+repos:
+  - path: $TMP/mrepo
+    mode: findings-only
+YAML
+review main "$TMP/mrepo"
+[ "$(cat "$TMP/rc.main")" -eq 0 ] || fail "main base: review exited non-zero" main
+grep -q '^base: origin/main$' "$TMP/out.main" || fail "main base: auto-detected base was not origin/main" main
+recipe=$(sed -n 's/^  merge : //p' "$TMP/out.main")
+[ -n "$recipe" ] || fail "main base: no merge recipe printed" main
+( export GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@localhost GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@localhost \
+         GIT_MERGE_AUTOEDIT=no
+  eval "$recipe" ) >"$TMP/out.recipe" 2>"$TMP/err.recipe" || fail "main base: the printed merge recipe failed" recipe
+git -C "$TMP/mremote.git" cat-file -e main:y.txt 2>/dev/null || fail "main base: origin main lacks the merged change" recipe
+! git -C "$TMP/mremote.git" rev-parse -q --verify refs/heads/nightshift/y >/dev/null \
+  || fail "main base: the recipe did not delete the branch on origin" recipe
+
 echo "test-review-branch-base: ok"
