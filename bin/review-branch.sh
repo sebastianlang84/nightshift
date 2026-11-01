@@ -58,7 +58,7 @@ load_rulebook() {
 # ------------------------------------------------------------------ one branch ----
 review_branch() { # repo base branchref
   local repo="$1" base="$2" ref="$3"
-  local name="${ref#origin/}"            # nightshift/foo-...  (for display + delete cmd)
+  local name="${ref#origin/}"            # nightshift/foo-...  (for display + delete cmd; never a merge target)
   local basebranch="${base#origin/}"
 
   printf '\n=== %s : %s ===\n' "$(basename "$repo")" "$name"
@@ -166,10 +166,13 @@ review_branch() { # repo base branchref
   # operator sweeps it by hand. Only the `reject` path below used to delete anything, which is why
   # accepted branches were the ones that piled up. A merge that leaves its branch behind is not
   # finished.
+  # The merge target is the remote-tracking ref, never the bare branch name: the Runner deletes its
+  # local nightshift/* branch after pushing, so `nightshift/<name>` does not resolve in the operator's
+  # repo, and git never looks under refs/remotes/origin/ for it. The reviewed ref is origin/<name>.
   case "$basebranch" in
     main|master)
       printf '  merge : git -C %q checkout %s && git -C %q merge --no-ff %q && git -C %q push origin %s && git -C %q push origin --delete %q\n' \
-        "$repo" "$basebranch" "$repo" "$name" "$repo" "$basebranch" "$repo" "$name" ;;
+        "$repo" "$basebranch" "$repo" "$ref" "$repo" "$basebranch" "$repo" "$name" ;;
     *)
       printf '  merge : gitflow base (%s) — open a PR: %s -> %s (do not push %s directly);\n' \
         "$basebranch" "$name" "$basebranch" "$basebranch"
