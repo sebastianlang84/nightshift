@@ -104,7 +104,7 @@ chmod +x "$TMP/bin/claude"
 PATH="$TMP/bin:/usr/bin:/bin" \
 RULEBOOK="$TMP/rulebook.yaml" \
 NIGHTSHIFT_AGENT=claude \
-NIGHTSHIFT_CODEMAP=0 NIGHTSHIFT_OPEN_PR=0 \
+NIGHTSHIFT_OPEN_PR=0 \
 NIGHTSHIFT_STATE_DIR="$TMP/state" NIGHTSHIFT_RUNS_DIR="$TMP/runs" \
 NIGHTSHIFT_DIGEST_DIR="$TMP/digests" NIGHTSHIFT_WORKTREES="$TMP/worktrees" \
 "$ROOT/bin/nightshift.sh" >/dev/null

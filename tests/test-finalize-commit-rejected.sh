@@ -49,7 +49,7 @@ repos:
 EOF
 
 LEDGER="$TMP/state/ledger.jsonl"
-RULEBOOK="$TMP/rulebook.yaml" NIGHTSHIFT_AGENT=mock NIGHTSHIFT_CODEMAP=0 NIGHTSHIFT_OPEN_PR=0 \
+RULEBOOK="$TMP/rulebook.yaml" NIGHTSHIFT_AGENT=mock NIGHTSHIFT_OPEN_PR=0 \
 NIGHTSHIFT_STATE_DIR="$TMP/state" NIGHTSHIFT_RUNS_DIR="$TMP/runs" \
 NIGHTSHIFT_DIGEST_DIR="$TMP/digests" NIGHTSHIFT_WORKTREES="$TMP/worktrees" \
   "$ROOT/bin/nightshift.sh" >"$TMP/out" 2>"$TMP/err"
@@ -136,7 +136,7 @@ repos:
     test_cmd: $tc
     base: main
 RB
-  env RULEBOOK="$d/rulebook.yaml" NIGHTSHIFT_AGENT=mock NIGHTSHIFT_CODEMAP=0 NIGHTSHIFT_OPEN_PR=0 \
+  env RULEBOOK="$d/rulebook.yaml" NIGHTSHIFT_AGENT=mock NIGHTSHIFT_OPEN_PR=0 \
     NIGHTSHIFT_STATE_DIR="$d/state" NIGHTSHIFT_RUNS_DIR="$d/runs" \
     NIGHTSHIFT_DIGEST_DIR="$d/digests" NIGHTSHIFT_WORKTREES="$d/worktrees" "$@" \
     "$ROOT/bin/nightshift.sh" >"$d/out" 2>"$d/err"
@@ -223,7 +223,7 @@ git -C "$TMP2/repo" push -q -u origin main
 sed "s|$TMP/repo|$TMP2/repo|" "$TMP/rulebook.yaml" > "$TMP2/rulebook.yaml"
 
 LEDGER2="$TMP2/state/ledger.jsonl"
-RULEBOOK="$TMP2/rulebook.yaml" NIGHTSHIFT_AGENT=mock NIGHTSHIFT_CODEMAP=0 NIGHTSHIFT_OPEN_PR=0 \
+RULEBOOK="$TMP2/rulebook.yaml" NIGHTSHIFT_AGENT=mock NIGHTSHIFT_OPEN_PR=0 \
 NIGHTSHIFT_MOCK_FIX_NOOP=1 \
 NIGHTSHIFT_STATE_DIR="$TMP2/state" NIGHTSHIFT_RUNS_DIR="$TMP2/runs" \
 NIGHTSHIFT_DIGEST_DIR="$TMP2/digests" NIGHTSHIFT_WORKTREES="$TMP2/worktrees" \

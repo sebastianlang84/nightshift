@@ -32,15 +32,6 @@ NIGHTSHIFT_SOURCED=1 source "$ROOT/bin/nightshift.sh"
 MAX_FILES=15
 MAX_LINES=400
 write_claude_settings
-write_codemap_mcp
-
-if command -v codemap >/dev/null 2>&1 \
-    && codemap index --approve --repo "$repo" >"$case_dir/codemap.out" 2>"$case_dir/codemap.err"; then
-  export NIGHTSHIFT_CODEMAP_REPO="$repo"
-else
-  unset NIGHTSHIFT_CODEMAP_REPO
-fi
-
 recon_id="$case_dir/recon"
 mkdir -p "$recon_id"
 "$ROOT/lib/recon_signals.sh" "$repo" > "$recon_id/signals.json"

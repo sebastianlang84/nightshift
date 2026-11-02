@@ -31,7 +31,7 @@ fi
 # Make the tools nightshift invokes findable under systemd's minimal PATH.
 # System dirs come FIRST so a binary planted under ~/.local/bin (which a write
 # primitive could reach) cannot shadow the Runner's unqualified jq/git/gh/
-# python3/codemap calls — see docs/design/risk-analysis.md R10/N4. Agent tools
+# python3 calls — see docs/design/risk-analysis.md R10/N4. Agent tools
 # that live only under ~/.local/bin (claude/codex/gh) are still resolved there.
 export PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:${PATH:-}"
 

@@ -49,7 +49,7 @@ note "The  repo has   no test script, so the gate instruction cannot be followed
 [ "$(grep -c '^## ' "$NOTES")" = 1 ] || fail "a repeated note was recorded twice"
 
 # --- 4. a different note is recorded ---
-note "codemap index is stale here and I could not refresh it."
+note "the lockfile is stale here and I could not refresh it."
 [ "$(grep -c '^## ' "$NOTES")" = 2 ] || fail "a genuinely new note was not recorded"
 
 # --- 5. an empty or whitespace-only note is not an entry ---

@@ -418,17 +418,6 @@ write_claude_settings() {
     > "$STATE_DIR/claude-settings.json"
 }
 
-# codemap (optional structural index) — an MCP tool, so it adds navigation power WITHOUT reopening
-# Bash. Auto-gated per repo: offered only where the Runner's own `codemap index --approve` succeeded
-# for that repo this pass (NIGHTSHIFT_CODEMAP_REPO, set in the night loop) — nightshift indexes every
-# repo itself, so activation is never a human step; the rulebook is the consent surface. The agent
-# works in a throwaway worktree (no index) and queries the STABLE real repo via repoPath; codemap not
-# installed, indexing failed or NIGHTSHIFT_CODEMAP=0 -> the agent just uses Read/Grep/Glob.
-write_codemap_mcp() {
-  printf '%s\n' '{"mcpServers":{"codemap":{"type":"stdio","command":"codemap-mcp","args":[],"env":{}}}}' \
-    > "$STATE_DIR/codemap-mcp.json"
-}
-
 # The Runner-owned CODEX_HOME a codex stage runs under (ADR 0019) — echoes the path, empty on
 # failure. It deliberately contains NOTHING but a symlink to the operator's credentials: no
 # AGENTS.md (the leak this closes), no config.toml, no skills, no memories, no session history.
@@ -1385,20 +1374,6 @@ claude_run() { # stage workdir item_dir
     *)   tools="${NIGHTSHIFT_READONLY_TOOLS:-Read,Grep,Glob}" ;;
   esac
   prompt="$(stage_prompt "$stage" "$wd" "$id")"
-  # codemap structural index — only when the Runner flagged THIS repo as indexed, and only for the
-  # navigation stages (explore/review). It is an MCP tool, so it needs no Bash. The worktree has no
-  # index, so the agent must query the stable real repo via repoPath (injected below).
-  local cm_flags=""
-  if [ -n "${NIGHTSHIFT_CODEMAP_REPO:-}" ] && { [ "$stage" = explore ] || [ "$stage" = review ]; }; then
-    tools="$tools,mcp__codemap__codemap_search,mcp__codemap__codemap_context"
-    cm_flags="--mcp-config $STATE_DIR/codemap-mcp.json"
-    prompt="$prompt
-
-## Structural index (codemap)
-A codemap index of this repo is available. Prefer codemap_search / codemap_context to locate relevant
-code instead of reading files blindly. Your cwd is a throwaway worktree with NO index — ALWAYS pass
-repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
-  fi
   # Layer 1 for the agent: inject core.hooksPath via env so EVERY git the agent runs is
   # confined by hooks/pre-push — no writes to any repo config. Layer 2: the PreToolUse guard
   # (blocks disabling Layer 1) via --settings. NIGHTSHIFT_BRANCH_PREFIX is already exported.
@@ -1418,7 +1393,7 @@ repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
   (cd "$wd" && \
     GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="$HOOKS_DIR" \
     NIGHTSHIFT_WORKTREE="$wd" CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 \
-    claude -p "$prompt" --output-format json --settings "$STATE_DIR/claude-settings.json" --tools "$tools" "${model_arg[@]}" "${sources_arg[@]}" $cm_flags $flags </dev/null) >"$rawf" 2>"$errf" || rc=$?
+    claude -p "$prompt" --output-format json --settings "$STATE_DIR/claude-settings.json" --tools "$tools" "${model_arg[@]}" "${sources_arg[@]}" $flags </dev/null) >"$rawf" 2>"$errf" || rc=$?
   out="$(cat "$rawf")"
   # `claude -p --output-format json` is NOT a stable shape. Sometimes it is a single
   # result object ({result,usage,total_cost_usd}); sometimes a JSON ARRAY of events with
@@ -1507,16 +1482,6 @@ codex_run() { # stage workdir item_dir
   local cx_home
   cx_home="$(codex_stage_home)"
   [ -n "$cx_home" ] || return 1
-
-  if [ -n "${NIGHTSHIFT_CODEMAP_REPO:-}" ] && { [ "$stage" = explore ] || [ "$stage" = review ]; }; then
-    args+=(-c 'mcp_servers.codemap.command="codemap-mcp"')
-    prompt="$prompt
-
-## Structural index (codemap)
-A codemap index of this repo is available. Prefer codemap_search / codemap_context to locate relevant
-code instead of reading files blindly. Your cwd is a throwaway worktree with NO index — ALWAYS pass
-repoPath=$NIGHTSHIFT_CODEMAP_REPO to these tools."
-  fi
 
   # Same capture contract as the claude half: stderr to $stage.err, unparsed stdout to .raw_$stage
   # (here the event stream, which is also what codex uses to report an auth failure), so run_agent
@@ -3769,7 +3734,6 @@ main() {
   pi_daily_update
   guard_state_remote_incoherence
   write_claude_settings
-  write_codemap_mcp
   # Resolve the night's wall-clock budget: env (seconds, also the test hook) wins, else the rulebook's
   # max_run_minutes, else none. Empty ⇒ no time cap (unchanged behavior).
   RUN_START=$(date +%s)
@@ -3869,20 +3833,6 @@ main() {
     # Findings and each independent fix must describe the exact base tree Explore is reading.
     # $base stays the ref name: finalize hands it to open_pr as the PR base.
     base_sha=$(git -C "$wt" rev-parse HEAD)
-    # codemap: nightshift keeps the structural index current ITSELF — never a manual step. Indexing is
-    # local + incremental (seconds), so just do it every run before explore; the index is always
-    # current. --approve makes first-time automatic: the rulebook is already the human's consent
-    # surface (you listed these repos). Absent binary or a failure -> plain Read/Grep/Glob.
-    # Kill switch: NIGHTSHIFT_CODEMAP=0.
-    export NIGHTSHIFT_CODEMAP_REPO=""
-    if [ "${NIGHTSHIFT_CODEMAP:-1}" = 1 ] && command -v codemap >/dev/null 2>&1; then
-      if codemap index --approve --repo "$repo" >/dev/null 2>&1; then
-        export NIGHTSHIFT_CODEMAP_REPO="$repo"
-      else
-        log "  $(basename "$repo"): codemap index failed — continuing without it"
-      fi
-    fi
-
     rfind=$(repo_findings "$repo")
     export NIGHTSHIFT_FINDINGS_N="$rfind"
     # Recon (cached): survey the repo and label each dimension's expected yield. Then pick the review

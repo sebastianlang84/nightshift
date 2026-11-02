@@ -61,7 +61,7 @@ run_night() { # case_dir agent [extra env…]
   local d="$1" agent="$2"; shift 2
   set +e
   env "$@" PATH="$d/bin:$PATH" \
-    RULEBOOK="$d/rulebook.yaml" NIGHTSHIFT_AGENT="$agent" NIGHTSHIFT_CODEMAP=0 NIGHTSHIFT_OPEN_PR=0 \
+    RULEBOOK="$d/rulebook.yaml" NIGHTSHIFT_AGENT="$agent" NIGHTSHIFT_OPEN_PR=0 \
     NIGHTSHIFT_STATE_DIR="$d/state" NIGHTSHIFT_RUNS_DIR="$d/runs" \
     NIGHTSHIFT_DIGEST_DIR="$d/digests" NIGHTSHIFT_WORKTREES="$d/worktrees" \
     "$ROOT/bin/nightshift.sh" >"$d/out" 2>"$d/err"

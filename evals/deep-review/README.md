@@ -8,7 +8,7 @@ Claude adapter, a three-finding budget, and the frozen lens and semantic anchors
 evals/deep-review/run.sh
 ```
 
-Requirements: authenticated `claude`, `jq`, Git, and optionally CodeMap. Results go to `/tmp` unless
+Requirements: authenticated `claude`, `jq`, Git. Results go to `/tmp` unless
 an output directory is passed. The gate passes at three of four `hit@3`; `score.json` also records
 `hit@1` and model cost. This is an explicit quality eval, not part of credential-free CI. Never
 weaken cases or match anchors in the same change that tunes Explore.

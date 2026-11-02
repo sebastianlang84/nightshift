@@ -70,7 +70,7 @@ repos:
     base: main
     test_cmd: true
 EOF
-RULEBOOK="$TMP/rulebook.yaml" NIGHTSHIFT_AGENT=mock NIGHTSHIFT_CODEMAP=0 \
+RULEBOOK="$TMP/rulebook.yaml" NIGHTSHIFT_AGENT=mock \
   NIGHTSHIFT_TEST_SANDBOX=none bash "$ROOT/bin/nightshift.sh" > "$TMP/run.log" 2>&1
 jq -se 'any(.outcome=="shipped" and .dimension=="general")' "$LEDGER" >/dev/null
 jq -e '.[-1].files | index("README.md")!=null' "$(search_history_path "$TMP/repo")" >/dev/null

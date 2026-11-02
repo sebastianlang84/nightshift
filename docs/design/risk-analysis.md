@@ -161,7 +161,7 @@ whether it is *read* adversarially is not something the mechanism can guarantee.
 
 ### R6 — Unrestricted network egress <a id="r6"></a>
 Nothing at the OS level restricts where the agent process can talk. Today the allowlist grants no
-fetch-capable tool (only Read/Grep/Glob/Write/Edit + read-only codemap MCP), so there is no *direct*
+fetch-capable tool (only Read/Grep/Glob/Write/Edit), so there is no *direct*
 exfil channel from the agent. But that safety rests entirely on the allowlist staying fetch-free; a
 future tool addition would open a channel with no second barrier.
 
@@ -211,7 +211,7 @@ extra path still ships if the reviewer reads past it. That is a review-attention
 evidence gap.*
 
 ### R10 — `~/.local/bin` on PATH → write primitive hijacks the Runner <a id="r10"></a>
-The Runner calls `jq`, `git`, `gh`, `python3`, `codemap` **unqualified** throughout (e.g.
+The Runner calls `jq`, `git`, `gh`, `python3` **unqualified** throughout (e.g.
 [nightshift.sh:1184,1199,1220](../../bin/nightshift.sh)), and the launcher must put `$HOME/.local/bin`
 on PATH because the agent CLIs live there. Chained with R8: a fix stage that writes `~/.local/bin/jq`
 would get that binary executed **by the Runner** on the next `jq` call in the same run — turning a
@@ -400,7 +400,7 @@ equals the finding's declared file(s) and abandon/flag on any extra path.
 ### N4 — Pin the Runner's own tool paths <a id="n4"></a>
 **Addresses R10. Partially implemented.** The launcher puts the system dirs ahead of `~/.local/bin`
 ([nightshift-cron.sh:20](../../bin/nightshift-cron.sh)), so a plant cannot shadow a Runner tool that
-also exists in `/usr/bin`. *Still open, the remainder:* resolve `jq`/`git`/`gh`/`python3`/`codemap`
+also exists in `/usr/bin`. *Still open, the remainder:* resolve `jq`/`git`/`gh`/`python3`
 to absolute paths once at Runner start and call via those — the only form that also covers a tool
 resolved solely from `~/.local/bin` (today: `gh`).
 

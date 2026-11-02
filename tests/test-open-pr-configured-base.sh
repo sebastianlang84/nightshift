@@ -44,7 +44,7 @@ repos:
     test_cmd: true
 YAML
 
-PATH="$TMP/bin:$PATH" RULEBOOK="$TMP/rulebook.yaml" NIGHTSHIFT_AGENT=mock NIGHTSHIFT_CODEMAP=0 \
+PATH="$TMP/bin:$PATH" RULEBOOK="$TMP/rulebook.yaml" NIGHTSHIFT_AGENT=mock \
 NIGHTSHIFT_OPEN_PR=1 NIGHTSHIFT_STATE_DIR="$TMP/state" NIGHTSHIFT_RUNS_DIR="$TMP/runs" \
 NIGHTSHIFT_DIGEST_DIR="$TMP/digests" NIGHTSHIFT_WORKTREES="$TMP/worktrees" \
 "$ROOT/bin/nightshift.sh" >"$TMP/stdout" 2>"$TMP/stderr"

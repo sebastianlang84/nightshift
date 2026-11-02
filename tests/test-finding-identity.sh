@@ -79,7 +79,7 @@ repos:
     test_cmd: true
 EOF
 brun() {
-  RULEBOOK="$BTMP/rulebook.yaml" NIGHTSHIFT_AGENT=mock NIGHTSHIFT_CODEMAP=0 NIGHTSHIFT_OPEN_PR=0 \
+  RULEBOOK="$BTMP/rulebook.yaml" NIGHTSHIFT_AGENT=mock NIGHTSHIFT_OPEN_PR=0 \
   NIGHTSHIFT_STATE_DIR="$BTMP/state" NIGHTSHIFT_RUNS_DIR="$BTMP/runs" \
   NIGHTSHIFT_DIGEST_DIR="$BTMP/digests" NIGHTSHIFT_WORKTREES="$BTMP/worktrees" \
   "$ROOT/bin/nightshift.sh" >"$BTMP/out.$1" 2>"$BTMP/err.$1"

@@ -42,7 +42,7 @@ EOF
 cat > "$TMP/bin/codex" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-out="" model="" effort="" sandbox="" approval="" network="" codemap=""
+out="" model="" effort="" sandbox="" approval="" network=""
 ephemeral=0 ignore_config=0 ignore_rules=0 strict_config=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -58,7 +58,6 @@ while [ "$#" -gt 0 ]; do
       case "$2" in
         sandbox_workspace_write.network_access=false) network=off ;;
         'model_reasoning_effort="high"') effort=high ;;
-        'mcp_servers.codemap.command="codemap-mcp"') codemap=on ;;
       esac
       shift 2 ;;
     *) shift ;;
@@ -99,7 +98,7 @@ env -u NIGHTSHIFT_CODEX_REASONING_EFFORT \
 PATH="$TMP/bin:/usr/bin:/bin" \
 RULEBOOK="$TMP/rulebook.yaml" \
 NIGHTSHIFT_AGENT=codex NIGHTSHIFT_CODEX_MODEL=test-model \
-NIGHTSHIFT_CODEMAP=0 NIGHTSHIFT_OPEN_PR=0 \
+NIGHTSHIFT_OPEN_PR=0 \
 NIGHTSHIFT_STATE_DIR="$TMP/state" NIGHTSHIFT_RUNS_DIR="$TMP/runs" \
 NIGHTSHIFT_DIGEST_DIR="$TMP/digests" NIGHTSHIFT_WORKTREES="$TMP/worktrees" \
 "$ROOT/bin/nightshift.sh" >/dev/null
@@ -136,7 +135,7 @@ chmod +x "$TMP/ubin/codex"
   export PATH="$TMP/ubin:$PATH" CODEX_HOME="$TMP/ucodex" NIGHTSHIFT_TEST_ARGV="$TMP/argv"
   export NIGHTSHIFT_STATE_DIR="$TMP/ustate" NIGHTSHIFT_RUNS_DIR="$TMP/runs" \
          NIGHTSHIFT_DIGEST_DIR="$TMP/digests" NIGHTSHIFT_WORKTREES="$TMP/worktrees" \
-         RULEBOOK="$TMP/rulebook.yaml" NIGHTSHIFT_CODEMAP=0
+         RULEBOOK="$TMP/rulebook.yaml"
   unset NIGHTSHIFT_CODEX_REASONING_EFFORT NIGHTSHIFT_CODEX_MODEL
   # shellcheck disable=SC1090
   NIGHTSHIFT_SOURCED=1 source "$ROOT/bin/nightshift.sh"

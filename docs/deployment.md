@@ -45,7 +45,6 @@ ledgers diverge silently: duplicate branches, broken caps and rotation). See
    | `python3` (stdlib only — nothing to install) | rulebook parsing, JSON extraction, finding probes | run aborts |
    | `bwrap` (`apt install bubblewrap`; on Debian 11 from bullseye-backports, because 0.4.1 lacks `--clearenv` and `--size`) | sandboxing the ship gate (ADR 0026) | every `branch-fix` repo refuses to ship |
    | `gh` | opening PRs when `NIGHTSHIFT_OPEN_PR=1` | branch still pushed, no PR |
-   | `codemap` | structural index handed to explore | falls back to Read/Grep/Glob |
 
    Only the last two degrade — they are probed with `command -v`. `git`, `jq` and `python3` are hard
    dependencies called unqualified and unguarded: parsing the rulebook is a `python3` call on the

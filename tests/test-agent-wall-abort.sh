@@ -76,7 +76,7 @@ night() { # reply_file rc -> exit status of one night against the stub; log in $
   PATH="$TMP/bin:/usr/bin:/bin" CLAUDE_REPLY="$1" CLAUDE_RC="$2" \
   RULEBOOK="$TMP/rulebook.yaml" \
   NIGHTSHIFT_AGENT=claude \
-  NIGHTSHIFT_CODEMAP=0 NIGHTSHIFT_OPEN_PR=0 \
+  NIGHTSHIFT_OPEN_PR=0 \
   NIGHTSHIFT_STATE_DIR="$TMP/state" NIGHTSHIFT_RUNS_DIR="$TMP/runs" \
   NIGHTSHIFT_DIGEST_DIR="$TMP/digests" NIGHTSHIFT_WORKTREES="$TMP/worktrees" \
   "$ROOT/bin/nightshift.sh" >"$TMP/out" 2>"$TMP/err" || rc=$?

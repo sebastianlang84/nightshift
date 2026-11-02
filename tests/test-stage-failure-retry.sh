@@ -40,7 +40,7 @@ repos:
 EOF
 
 run_night() {
-  env "$@" RULEBOOK="$D/rulebook.yaml" NIGHTSHIFT_AGENT=mock NIGHTSHIFT_CODEMAP=0 \
+  env "$@" RULEBOOK="$D/rulebook.yaml" NIGHTSHIFT_AGENT=mock \
     NIGHTSHIFT_OPEN_PR=0 NIGHTSHIFT_STATE_DIR="$D/state" NIGHTSHIFT_RUNS_DIR="$D/runs" \
     NIGHTSHIFT_DIGEST_DIR="$D/digests" NIGHTSHIFT_WORKTREES="$D/worktrees" \
     "$ROOT/bin/nightshift.sh" >"$D/out" 2>"$D/err"

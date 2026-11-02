@@ -126,7 +126,7 @@ chmod +x "$TMP/bin/pi"
 # A real night: mock serves every stage, pi serves Review only.
 PATH="$TMP/bin:/usr/bin:/bin" \
 RULEBOOK="$TMP/rulebook.yaml" \
-NIGHTSHIFT_AGENT=mock NIGHTSHIFT_CODEMAP=0 NIGHTSHIFT_OPEN_PR=0 \
+NIGHTSHIFT_AGENT=mock NIGHTSHIFT_OPEN_PR=0 \
 NIGHTSHIFT_PI_STAGE_HOME="$TMP/state/pi-home" PI_CODING_AGENT_DIR="$TMP/pi-real" \
 NIGHTSHIFT_PI_UPDATE=0 \
 NIGHTSHIFT_STATE_DIR="$TMP/state" NIGHTSHIFT_RUNS_DIR="$TMP/runs" \

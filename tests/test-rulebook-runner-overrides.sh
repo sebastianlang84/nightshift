@@ -35,7 +35,7 @@ repos:
     dimensions: docs
 EOF
 
-RULEBOOK="$TMP/rulebook.yaml" NIGHTSHIFT_AGENT=mock NIGHTSHIFT_CODEMAP=0 NIGHTSHIFT_OPEN_PR=0 \
+RULEBOOK="$TMP/rulebook.yaml" NIGHTSHIFT_AGENT=mock NIGHTSHIFT_OPEN_PR=0 \
 NIGHTSHIFT_STATE_DIR="$TMP/state" NIGHTSHIFT_RUNS_DIR="$TMP/runs" \
 NIGHTSHIFT_DIGEST_DIR="$TMP/digests" NIGHTSHIFT_WORKTREES="$TMP/worktrees" \
 "$ROOT/bin/nightshift.sh" >"$TMP/stdout" 2>"$TMP/stderr"
@@ -76,7 +76,7 @@ repos:
     test_cmd: true
     findings: 3
 EOF
-RULEBOOK="$TMP/rulebook-ceiling.yaml" NIGHTSHIFT_AGENT=mock NIGHTSHIFT_CODEMAP=0 NIGHTSHIFT_OPEN_PR=0 \
+RULEBOOK="$TMP/rulebook-ceiling.yaml" NIGHTSHIFT_AGENT=mock NIGHTSHIFT_OPEN_PR=0 \
 NIGHTSHIFT_STATE_DIR="$TMP/state" NIGHTSHIFT_RUNS_DIR="$TMP/runs" \
 NIGHTSHIFT_DIGEST_DIR="$TMP/digests" NIGHTSHIFT_WORKTREES="$TMP/worktrees" \
 "$ROOT/bin/nightshift.sh" >"$TMP/stdout" 2>"$TMP/stderr"
