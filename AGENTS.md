@@ -68,8 +68,9 @@ Operations: [docs/deployment.md](docs/deployment.md).
 5. Every status reply about nightshift includes an overview table (Sebastian, 2026-11-02).
    One row per repo and night item: what was found or changed, and whether it is open, reviewed,
    merged or dropped.
-   Take state from the digests, the ledger, origin's branches and the board, not from memory.
-6. Every status reply also includes a clutter check across all managed repos.
-   It covers leftover `nightshift/*` branches on origin and locally, worktrees, stashes,
-   and nightshift's own worktree and run directories.
+   `bin/status.sh` prints that table from the ledger, the merge job's state and git.
+6. Every status reply also includes the clutter check that `bin/status.sh` prints.
+   It covers leftover `nightshift/*` branches, clean merged worktrees, merged local branches,
+   stashes and nightshift's worktree directory across all managed repos.
    Remove what the git hook and standing approval allow; request curator approval for the rest.
+   Leave work owned by another live session to that session's board task.

@@ -349,7 +349,7 @@ never push outside `nightshift/*` (see [`docs/design/hook-spec.md`](design/hook-
 
 ## Daily operation
 
-- **Morning:** read `digests/<date>.md`; review open branches with `bin/review-branch.sh`; merge or
+- **Morning:** read `digests/<date>.md`; `bin/status.sh` shows each recent item's state and leftover clutter; review open branches with `bin/review-branch.sh`; merge or
   delete. Deleting/merging frees the open-branch cap so the next night resumes. The `next: merge`
   command deletes the branch as its last step: nothing else does, and a merged-but-undeleted
   `nightshift/*` ref lingers on origin indefinitely.
