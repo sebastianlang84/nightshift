@@ -2854,6 +2854,22 @@ gate_exec() { # repo worktree item_dir cmd out label consequence -> the command'
   return "$trc"
 }
 
+# Runs the gate command on the commit the item's worktree was cut from, in a throwaway worktree.
+# Rerun on every red result, never cached: the registry or the network can fail between two fix
+# iterations, and a green base from the first would pin the next failure on the fix again.
+# 0 = red there too; 1 = green, or no answer (worktree or sandbox unavailable), which keeps the
+# failure on the fix as before.
+base_suite_red() { # repo worktree item_dir cmd
+  local repo="$1" wt="$2" id="$3" tcmd="$4" head bwt brc=0
+  head="$(git -C "$wt" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null)" || return 1
+  bwt="$WORKTREES_DIR/base-gate-$(date +%s%N)"
+  setup_worktree "$repo" "$bwt" "$head" 2>/dev/null || { log "  base check: no worktree — skipped"; return 1; }
+  gate_exec "$repo" "$bwt" "$id" "$tcmd" "$id/base-tests.log" "base check" "keeping the failure on the fix" || brc=$?
+  remove_worktree "$repo" "$bwt"
+  [ ! -e "$bwt" ] || log "  base check: could not remove $bwt — bin/status.sh lists it as clutter"
+  [ "$GATE_UNAVAILABLE" = 0 ] && [ "$brc" -ne 0 ]
+}
+
 run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 blocked, 3 tampered
   local repo="$1" wt="$2" id="$3" tcmd trc=0 pre_id=""
   tcmd=$(repo_test_cmd "$repo")
@@ -2900,6 +2916,14 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 blocked, 3 
     # bind, a bad --chdir and an unknown option alike, so no exit code identifies that case.
     if [ "$trc" -eq 125 ] && [ "$TEST_SANDBOX" != none ]; then
       log "  $(basename "$repo"): test gate could not run under its resource ceilings — NOT shipping"
+      return 2
+    fi
+    # Red is the fix's fault only if the unchanged base is green. On 2026-10-29 and 2026-11-01 the
+    # registry refused npm downloads before a single test ran, and the Fix stage was asked again and
+    # again to repair a suite it had not touched. Red on the base as well means the host, the
+    # network or the base itself, which no Fix iteration can repair.
+    if base_suite_red "$repo" "$wt" "$id" "$tcmd"; then
+      log "  $(basename "$repo"): test gate failed (rc=$trc) and the suite is red on the unchanged base as well — not the fix; NOT shipping (see $id/tests.log, $id/base-tests.log)"
       return 2
     fi
     log "  $(basename "$repo"): test gate failed (rc=$trc) — see $id/tests.log"

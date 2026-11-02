@@ -61,6 +61,9 @@ set +e
 TEST_TIMEOUT="${GATE_TIMEOUT:-60}"; TEST_MEMORY_MB=4096; TEST_MAX_PROCS=2048; TEST_FSIZE_MB="${GATE_FSIZE_MB:-2048}"
 REPO_PATHS=("$REPO"); REPO_MODES=(branch-fix)
 REPO_TEST_NETS=("${GATE_NET:-false}"); REPO_TEST_ROBINDS=("${GATE_ROBIND:-}"); REPO_TEST_CMDS=("$GATE_CMD; exit 1")
+# The command fails on the base too, which would make every red case here "not the fix" (rc 2).
+# This file pins the sandbox, so the base check answers green; test-ship-test-gate covers it.
+base_suite_red() { return 1; }
 run_test_gate "$REPO" "$WT" "$ID"; echo "GATE_RC=$?"
 cat "$ID/tests.log" 2>/dev/null
 # The probe's LAST command decides its exit status, and the caller assigns that under `set -e`:

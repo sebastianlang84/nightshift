@@ -60,8 +60,9 @@ run_night() {
 
 fail() { echo "test-ship-test-gate: $*" >&2; exit 1; }
 
-# --- 1. a suite that stays red through every attempt blocks the ship ----------
-run_night fails 'exit 1'
+# --- 1. a suite the fix keeps red through every attempt blocks the ship ------
+# Green on the base (it still says `teh`), red once the mock fix repairs the typo.
+run_night fails 'grep -q teh README.md'
 d="$TMP/fails"; LEDGER="$d/state/ledger.jsonl"
 
 grep -q "test gate failed" "$d/err" "$d/out" || { cat "$d/err" >&2; fail "the failed gate was not reported"; }
@@ -158,7 +159,7 @@ rm -f "$pid/tests.log"
 # A relative sentinel resolves against the worktree (mock_review) and is gitignored, so it never
 # reaches a commit — the sandboxed gate cannot write anywhere else.
 ( export NIGHTSHIFT_MOCK_ABANDON_IF=".gate-marker"
-  run_night abandons 'touch .gate-marker; exit 1' )
+  run_night abandons 'grep -q teh README.md && exit 0; touch .gate-marker; exit 1' )
 d="$TMP/abandons"; LEDGER="$d/state/ledger.jsonl"
 
 grep -q "gate overrules ship" "$d/err" "$d/out" \
@@ -224,7 +225,7 @@ if git -C "$d/remote.git" for-each-ref --format='%(refname)' 'refs/heads/nightsh
 fi
 
 # --- 4. a hanging suite is bounded, not waited on -----------------------------
-( export NIGHTSHIFT_TEST_TIMEOUT=1; run_night hangs 'sleep 30' )
+( export NIGHTSHIFT_TEST_TIMEOUT=1; run_night hangs 'grep -q teh README.md && exit 0; sleep 30' )
 d="$TMP/hangs"; LEDGER="$d/state/ledger.jsonl"
 
 grep -q "test gate TIMED OUT" "$d/err" "$d/out" \
@@ -234,5 +235,24 @@ jq -e 'select(.outcome=="tests-failed")' "$LEDGER" >/dev/null 2>&1 \
 if [ -f "$LEDGER" ] && jq -e 'select(.outcome=="shipped")' "$LEDGER" >/dev/null 2>&1; then
   fail "a branch shipped although the test gate timed out"
 fi
+
+# --- 7. a suite that is red on the unchanged base too is not the fix's fault --
+# 2026-10-29 and 2026-11-01: the registry refused npm downloads before any test ran, and the Fix
+# stage was sent back to repair a suite it had not touched, then the item was booked tests-failed.
+run_night basered 'exit 1'
+d="$TMP/basered"; LEDGER="$d/state/ledger.jsonl"
+
+grep -q "red on the unchanged base as well" "$d/err" \
+  || { cat "$d/err" >&2; fail "a suite red on the base too was not recognised"; }
+if grep -q "gate overrules ship" "$d/err"; then
+  cat "$d/err" >&2; fail "the Fix stage was sent back to repair a suite red on the base"
+fi
+jq -e 'select(.outcome=="gate-blocked")' "$LEDGER" >/dev/null 2>&1 \
+  || { jq -c . "$LEDGER" >&2; fail "a suite red on the base was not recorded as gate-blocked"; }
+if jq -e 'select(.outcome=="tests-failed" or .outcome=="shipped")' "$LEDGER" >/dev/null 2>&1; then
+  jq -c . "$LEDGER" >&2; fail "a suite red on the base was booked against the fix or shipped"
+fi
+[ -n "$(find "$d/runs" -name base-tests.log)" ] \
+  || fail "the base run left no log to read"
 
 echo "test-ship-test-gate: ok"

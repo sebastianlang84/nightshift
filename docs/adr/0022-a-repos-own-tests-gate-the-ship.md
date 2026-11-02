@@ -73,10 +73,18 @@ repaired.
 
 Only an item that leaves the loop still broken is refused.
 
+*Addendum 2026-11-02:* a red suite is the fix's regression only if the unchanged base passes it.
+On every red result the gate runs the same command on the commit the worktree was cut from
+(`base_suite_red`), uncached, since the registry can fail between two fix iterations. Red there too means the host, the network or the base
+itself is broken, which no Fix iteration repairs: the item is refused as `gate-blocked` and the
+base output is kept in `base-tests.log`. On 2026-10-29 and 2026-11-01 the npm registry refused
+downloads before any macrolens test ran, and a correct fix was sent back three times and then
+booked `tests-failed`. A base run that cannot start leaves the failure on the fix, as before.
+
 **3. A refusal is recorded, not swallowed.**
 
 The ledger gets `tests-failed` only when the suite was actually red. An unavailable or non-hermetic
-gate gets `gate-blocked`; a rewritten `.git` pointer gets `worktree-tampered`. All carry the
+gate, or a suite red on the base as well, gets `gate-blocked`; a rewritten `.git` pointer gets `worktree-tampered`. All carry the
 finding's summary and identity, with `branch` and `sha` null because neither ever existed. They are
 distinct from `abandoned` because the reviewer wanted to ship; the digest lists every refusal under
 "Considered but not shipped".
