@@ -97,14 +97,53 @@ def tip(repo, branch):
     return out.strip() if rc == 0 else ''
 
 
+def finding_states(rows):
+    """(plain state, settled?) of every finding row, keyed by its position in the ledger.
+
+    A finding's identity is (repo, fingerprint), as in the digest's 'Open findings' and
+    probe_findings.open_findings: ADR 0014 re-emits a still-open finding as a new row with a new
+    item id, and verdicts land on the newest row. So only the newest row of an identity can be
+    open; a verdict after it closes the identity, and wontfix closes it for good. Rows without a
+    fingerprint fall back to their item id."""
+    row_key, newest, item_keys, events = {}, {}, {}, {}
+    for n, r in enumerate(rows):
+        outcome = r.get('outcome')
+        if outcome not in ('finding', 'verdict'):
+            continue
+        repo, fp, item = r.get('repo'), r.get('fingerprint'), r.get('item')
+        if outcome == 'verdict' and item in item_keys:
+            key = item_keys[item]
+        elif repo and fp:
+            key = ('fingerprint', repo, fp)
+        elif item:
+            key = ('item', item)
+        else:
+            continue
+        if outcome == 'finding':
+            row_key[n], newest[key] = key, n
+            if item:
+                item_keys[item] = key
+        else:
+            events.setdefault(key, []).append((n, r.get('verdict')))
+    states = {}
+    for n, key in row_key.items():
+        ev = events.get(key, [])
+        if newest[key] != n:
+            states[n] = ('finding superseded: reported again on %s'
+                         % rows[newest[key]].get('night', '?'), True)
+        elif any(v == 'wontfix' for _, v in ev):
+            states[n] = ('finding closed (wontfix)', True)
+        elif ev and ev[-1][0] > n and ev[-1][1] in ('merged', 'resolved', 'dropped'):
+            states[n] = ('finding closed (%s)' % ev[-1][1], True)
+        else:
+            states[n] = ('finding open, awaits a decision', False)
+    return states
+
+
 def item_state(row, verdicts, job, bases):
-    """(plain state, settled?) of one ledger item, most authoritative source first."""
+    """(plain state, settled?) of one ledger item other than a finding, most authoritative first."""
     repo, branch, outcome, sha = row['repo'], row.get('branch'), row['outcome'], row.get('sha')
     v = verdicts.get(row.get('item')) or verdicts.get((repo, branch, sha))
-    if outcome == 'finding':
-        if v in ('resolved', 'wontfix', 'dropped'):
-            return 'finding closed (%s)' % v, True
-        return 'finding open, awaits a decision', False
     if outcome == 'tests-failed':
         return 'not shipped: tests failed', True
     if outcome == 'abandoned':
@@ -136,11 +175,15 @@ def overview(rows, job, bases, since):
                 verdicts[r['item']] = r.get('verdict')
             if r.get('branch'):
                 verdicts[(r['repo'], r['branch'], r.get('sha'))] = r.get('verdict')
+    findings = finding_states(rows)
     items = []
-    for r in rows:
+    for n, r in enumerate(rows):
         if r.get('outcome') not in ('shipped', 'finding', 'tests-failed', 'abandoned'):
             continue
-        state, settled = item_state(r, verdicts, job, bases)
+        if r['outcome'] == 'finding':
+            state, settled = findings.get(n, ('finding open, awaits a decision', False))
+        else:
+            state, settled = item_state(r, verdicts, job, bases)
         # Older items stay listed until they are settled: an open item is outstanding work.
         if r.get('night', '') >= since or not settled:
             items.append((r, state))

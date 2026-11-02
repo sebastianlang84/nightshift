@@ -54,6 +54,17 @@ mkdir -p "$TMP/state" "$TMP/worktrees"
   printf '{"night":"2020-01-01","item":"i4","repo":"%s","branch":null,"sha":null,"outcome":"finding","summary":"Old finding"}\n' "$R"
   printf '{"night":"2020-01-01","item":"i5","repo":"%s","branch":null,"sha":null,"outcome":"finding","summary":"Old closed"}\n' "$R"
   printf '{"night":"2020-01-02","item":"i5","repo":"%s","branch":null,"sha":null,"outcome":"verdict","verdict":"resolved"}\n' "$R"
+  # ADR 0014 re-emission: one (repo, fingerprint) identity, two rows, the verdict on the newest.
+  printf '{"night":"2020-01-01","item":"a1","repo":"%s","branch":null,"sha":null,"outcome":"finding","fingerprint":"x.py:bug:f","summary":"Re-emitted first"}\n' "$R"
+  printf '{"night":"2020-01-05","item":"a2","repo":"%s","branch":null,"sha":null,"outcome":"finding","fingerprint":"x.py:bug:f","summary":"Re-emitted second"}\n' "$R"
+  printf '{"night":"2020-01-06","item":"a2","repo":"%s","branch":null,"sha":null,"outcome":"verdict","fingerprint":"x.py:bug:f","verdict":"wontfix"}\n' "$R"
+  # Closed, then re-emitted after its code changed: the identity is open again on the newest row.
+  printf '{"night":"2020-01-01","item":"c1","repo":"%s","branch":null,"sha":null,"outcome":"finding","fingerprint":"y.py:bug:g","summary":"Reopened first"}\n' "$R"
+  printf '{"night":"2020-01-02","item":"c1","repo":"%s","branch":null,"sha":null,"outcome":"verdict","fingerprint":"y.py:bug:g","verdict":"resolved"}\n' "$R"
+  printf '{"night":"2020-01-03","item":"c2","repo":"%s","branch":null,"sha":null,"outcome":"finding","fingerprint":"y.py:bug:g","summary":"Reopened second"}\n' "$R"
+  # Re-emitted inside the window and still open: the older row is listed as superseded.
+  printf '{"night":"%s","item":"b1","repo":"%s","branch":null,"sha":null,"outcome":"finding","fingerprint":"z.py:bug:h","summary":"Twice first"}\n' "$today" "$R"
+  printf '{"night":"%s","item":"b2","repo":"%s","branch":null,"sha":null,"outcome":"finding","fingerprint":"z.py:bug:h","summary":"Twice second"}\n' "$today" "$R"
 } > "$TMP/state/ledger.jsonl"
 printf '{"%s\\tnightshift/open":{"kb":"9","result":"conflict","sha":"%s"}}\n' "$R" "$open_sha" > "$TMP/merge.json"
 cat > "$TMP/rulebook.yaml" <<EOF
@@ -78,6 +89,14 @@ expect "worktree $TMP/wt-env [detached] is merged; only ignored files remain"
 # An item older than the window stays listed while it is open, and drops out once settled.
 expect "| finding | Old finding | finding open, awaits a decision |"
 if grep -q 'Old closed' <<<"$out"; then echo "a settled old item was listed" >&2; exit 1; fi
+# A finding is settled per (repo, fingerprint), as in the digest, not per item id.
+if grep -q 'Re-emitted' <<<"$out"; then
+  echo "a closed re-emitted finding was listed" >&2; echo "$out" >&2; exit 1
+fi
+expect "| finding | Reopened second | finding open, awaits a decision |"
+if grep -q 'Reopened first' <<<"$out"; then echo "a superseded old row was listed" >&2; exit 1; fi
+expect "| finding | Twice first | finding superseded: reported again on $today |"
+expect "| finding | Twice second | finding open, awaits a decision |"
 expect "repo: 1 stash entries"
 if grep -q 'nightshift/open on origin' <<<"$out"; then
   echo "an open branch was reported as clutter" >&2; exit 1
