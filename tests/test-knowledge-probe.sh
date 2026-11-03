@@ -25,8 +25,12 @@ sources:
 ---
 # Good
 Grounded claim.[^spec]
+See the [data](data.json) and the [license](LICENSE).
 [^spec]: Source.
 EOF
+# Tracked non-Markdown link targets: they exist, so they must not be reported as broken links.
+echo '{}' > "$TMP/repo/data.json"
+echo 'test licence' > "$TMP/repo/LICENSE"
 cat > "$TMP/repo/calc.md" <<'EOF'
 ---
 type: Attested Computation
@@ -68,7 +72,8 @@ jq -e '
   any(.diagnostics[]; .code == "computation_missing_executor") and
   any(.diagnostics[]; .code == "computation_missing_attester") and
   any(.diagnostics[]; .code == "nonstandard_wikilink") and
-  any(.diagnostics[]; .code == "broken_markdown_link") and
+  any(.diagnostics[]; .code == "broken_markdown_link" and (.message | endswith("missing.md"))) and
+  ([.diagnostics[] | select(.code == "broken_markdown_link")] | length) == 1 and
   any(.diagnostics[]; .code == "duplicate_log_date") and
   any(.diagnostics[]; .code == "orphan_concept" and .file == "orphan.md")
 ' "$TMP/report.json" >/dev/null

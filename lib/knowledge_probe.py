@@ -30,14 +30,14 @@ DATE_HEADING_RE = re.compile(r"^##\s+(\S.*)$", re.MULTILINE)
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
-def tracked_markdown(repo: Path) -> list[PurePosixPath]:
+def tracked_files(repo: Path, *pathspec: str) -> list[PurePosixPath]:
     proc = subprocess.run(
-        ["git", "-C", str(repo), "ls-files", "-z", "--", "*.md"],
+        ["git", "-C", str(repo), "ls-files", "-z", "--", *pathspec],
         check=False,
         capture_output=True,
     )
     if proc.returncode:
-        raise RuntimeError("cannot enumerate tracked Markdown files")
+        raise RuntimeError("cannot enumerate tracked files")
     return sorted(
         PurePosixPath(raw.decode("utf-8", errors="surrogateescape"))
         for raw in proc.stdout.split(b"\0")
@@ -144,16 +144,22 @@ def target_path(source: PurePosixPath, raw: str) -> PurePosixPath | None:
                 clean.pop()
             continue
         clean.append(part)
-    result = PurePosixPath(*clean)
-    if result.suffix == "":
-        result /= "index.md"
-    return result
+    return PurePosixPath(*clean)
+
+
+def resolve_target(target: PurePosixPath, tracked: set[PurePosixPath]) -> PurePosixPath:
+    # A link may point at any tracked file (PDF, JSON, source, LICENSE), not only Markdown. Only a
+    # suffixless target that is not itself a tracked file is read as a directory with an index.md.
+    if target in tracked or target.suffix != "":
+        return target
+    return target / "index.md"
 
 
 def main(repo_arg: str) -> None:
     repo = Path(repo_arg).resolve()
-    files = tracked_markdown(repo)
-    tracked = set(files)
+    files = tracked_files(repo, "*.md")
+    markdown = set(files)
+    tracked = set(tracked_files(repo))
     texts = {
         path: (repo / Path(*path.parts)).read_text(encoding="utf-8", errors="replace")
         for path in files
@@ -258,10 +264,11 @@ def main(repo_arg: str) -> None:
             target = target_path(path, raw)
             if target is None:
                 continue
-            if target in tracked:
-                inbound[target] += 1
-            else:
+            target = resolve_target(target, tracked)
+            if target not in tracked:
                 add("warning", "broken_markdown_link", path, f"relative Markdown target does not exist: {target}", raw)
+            elif target in markdown:
+                inbound[target] += 1
         for wiki in WIKILINK_RE.findall(body if fm_lines is not None else text):
             add("warning", "nonstandard_wikilink", path, f"wiki-link is not a portable Markdown link: {wiki}", f"[[{wiki}]]")
 
