@@ -144,7 +144,9 @@ def target_path(source: PurePosixPath, raw: str) -> PurePosixPath | None:
                 clean.pop()
             continue
         clean.append(part)
-    return PurePosixPath(*clean)
+    result = PurePosixPath(*clean)
+    # PurePosixPath drops a trailing slash, so preserve the explicit directory intent here.
+    return result / "index.md" if target.endswith("/") else result
 
 
 def resolve_target(target: PurePosixPath, tracked: set[PurePosixPath]) -> PurePosixPath:
@@ -265,8 +267,8 @@ def main(repo_arg: str) -> None:
             if target is None:
                 continue
             target = resolve_target(target, tracked)
-            if target not in tracked:
-                add("warning", "broken_markdown_link", path, f"relative Markdown target does not exist: {target}", raw)
+            if target not in tracked or not (repo / Path(*target.parts)).exists():
+                add("warning", "broken_markdown_link", path, f"relative link target does not exist: {target}", raw)
             elif target in markdown:
                 inbound[target] += 1
         for wiki in WIKILINK_RE.findall(body if fm_lines is not None else text):
