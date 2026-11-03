@@ -5,7 +5,8 @@ unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this
 # bin/status.sh answers "what did nightshift find or change, how far did each item get, and what
 # is left lying around" from the ledger, the merge job's state and git — not from memory.
 # Asserted: a merged fix, a fix the merge job reviewed but could not merge (with its kb task), an
-# open finding, a branch merged but not deleted on origin, a clean merged worktree and a stash.
+# open finding, a branch merged but not deleted on origin, a branch the ledger settled as `resolved`
+# (settled in the overview, curator clutter on origin), a clean merged worktree and a stash.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
@@ -38,6 +39,14 @@ git -C "$R" push -q origin nightshift/open
 g -C "$R" switch -q main
 git -C "$R" branch -q -D nightshift/open
 
+# nightshift/resolved: never merged, but the ledger settled it as `resolved` (harvest.sh verdict).
+g -C "$R" switch -q -c nightshift/resolved main~1
+echo four > "$R/c.txt"; g -C "$R" add c.txt; g -C "$R" commit -q -m resolved
+resolved_sha=$(git -C "$R" rev-parse HEAD)
+git -C "$R" push -q origin nightshift/resolved
+g -C "$R" switch -q main
+git -C "$R" branch -q -D nightshift/resolved
+
 # A clean worktree whose commit main already contains, one holding only an ignored file (a removal
 # would lose it, so it is not "clean"), and one stash entry.
 git -C "$R" worktree add -q --detach "$TMP/wt" main
@@ -50,6 +59,11 @@ mkdir -p "$TMP/state" "$TMP/worktrees"
 {
   printf '{"night":"%s","item":"i1","repo":"%s","branch":"nightshift/merged","sha":"%s","outcome":"shipped","summary":"Fix one"}\n' "$today" "$R" "$merged_sha"
   printf '{"night":"%s","item":"i2","repo":"%s","branch":"nightshift/open","sha":"%s","outcome":"shipped","summary":"Fix two"}\n' "$today" "$R" "$open_sha"
+  # A shipped branch settled as `resolved` is decided, as for the runner (ADR 0025).
+  printf '{"night":"%s","item":"s1","repo":"%s","branch":"nightshift/resolved","sha":"%s","outcome":"shipped","summary":"Fix resolved"}\n' "$today" "$R" "$resolved_sha"
+  printf '{"night":"%s","item":"s1","repo":"%s","branch":"nightshift/resolved","sha":"%s","outcome":"verdict","verdict":"resolved"}\n' "$today" "$R" "$resolved_sha"
+  printf '{"night":"2020-01-01","item":"s2","repo":"%s","branch":"nightshift/old-resolved","sha":"%s","outcome":"shipped","summary":"Old fix resolved"}\n' "$R" "$resolved_sha"
+  printf '{"night":"2020-01-02","item":"s2","repo":"%s","branch":"nightshift/old-resolved","sha":"%s","outcome":"verdict","verdict":"resolved"}\n' "$R" "$resolved_sha"
   printf '{"night":"%s","item":"i3","repo":"%s","branch":null,"sha":null,"outcome":"finding","summary":"Finding three"}\n' "$today" "$R"
   printf '{"night":"2020-01-01","item":"i4","repo":"%s","branch":null,"sha":null,"outcome":"finding","summary":"Old finding"}\n' "$R"
   printf '{"night":"2020-01-01","item":"i5","repo":"%s","branch":null,"sha":null,"outcome":"finding","summary":"Old closed"}\n' "$R"
@@ -97,6 +111,11 @@ expect "| finding | Reopened second | finding open, awaits a decision |"
 if grep -q 'Reopened first' <<<"$out"; then echo "a superseded old row was listed" >&2; exit 1; fi
 expect "| finding | Twice first | finding superseded: reported again on $today |"
 expect "| finding | Twice second | finding open, awaits a decision |"
+expect "| fix | Fix resolved | resolved |"
+if grep -q 'Old fix resolved' <<<"$out"; then
+  echo "an old branch settled as resolved was listed as open" >&2; echo "$out" >&2; exit 1
+fi
+expect "nightshift/resolved on origin was resolved; deleting it needs the curator"
 expect "repo: 1 stash entries"
 if grep -q 'nightshift/open on origin' <<<"$out"; then
   echo "an open branch was reported as clutter" >&2; exit 1

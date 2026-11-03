@@ -155,6 +155,9 @@ def item_state(row, verdicts, job, bases):
     job_merged = j.get('result') == 'merged' and j.get('sha') in (sha, head or None)
     if v == 'merged' or job_merged or (base and contains(repo, base, sha)):
         return 'merged', True
+    # The runner's terminal set (refresh_settled_branches, ADR 0025): each frees the branch's slot.
+    if v == 'resolved':
+        return 'resolved', True
     if v in ('dropped', 'wontfix'):
         return 'dropped', True
     if j and j.get('sha') in (head or sha,):
@@ -222,10 +225,10 @@ def clutter(prefix, repos, rows, unfetched):
             br = ref[len('origin/'):]
             if contains(repo, b, ref):
                 found.append('%s: %s on origin is merged but not deleted' % (name, br))
-            elif (settled.get((repo, br), (None, None))[0] in ('dropped', 'wontfix')
+            elif (settled.get((repo, br), (None, None))[0] in ('dropped', 'wontfix', 'resolved')
                   and settled[(repo, br)][1] == tip(repo, br)):
-                found.append('%s: %s on origin was dropped; deleting it needs the curator'
-                             % (name, br))
+                found.append('%s: %s on origin was %s; deleting it needs the curator' % (
+                    name, br, 'resolved' if settled[(repo, br)][0] == 'resolved' else 'dropped'))
         _, out = git(repo, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/')
         local = [x for x in out.split() if x != b.split('/', 1)[-1]]
         merged = [x for x in local if contains(repo, b, x)]
