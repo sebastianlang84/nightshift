@@ -51,10 +51,10 @@ jobs:
       - name: Allow unprivileged user namespaces (runner-local)
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
 
-      # Unprivileged user namespaces are kernel policy, not a package: a hardened or nested runner
-      # can refuse them, and then the sandbox cannot be built at all. Rather than a red suite that
-      # says nothing about the code, fall back to the documented opt-out and say so loudly — the
-      # sandbox's own test skips itself in that case, and everything else still runs.
+      # Unprivileged user namespaces are kernel policy, not a package. If this runner refuses them,
+      # the sandbox tests would SKIP and a change to the ship-gate sandbox would go green untested,
+      # so the job fails here instead. The documented opt-out (NIGHTSHIFT_TEST_SANDBOX=none) is for
+      # hosts without user namespaces, not for the pipeline that approves sandbox changes.
       - name: Probe the ship-gate sandbox
         run: |
           if bwrap --unshare-all --ro-bind /usr /usr --symlink usr/bin /bin \
@@ -62,8 +62,8 @@ jobs:
                    --proc /proc --dev /dev /bin/true 2>/dev/null; then
             echo "bwrap works — the suite exercises the real ship-gate sandbox"
           else
-            echo "::warning::unprivileged user namespaces unavailable on this runner — running the suite with NIGHTSHIFT_TEST_SANDBOX=none; tests/test-gate-sandbox.sh will SKIP"
-            echo "NIGHTSHIFT_TEST_SANDBOX=none" >> "$GITHUB_ENV"
+            echo "::error::unprivileged user namespaces unavailable on this runner — the sandbox tests cannot run"
+            exit 1
           fi
 
       # A run creates commits in throwaway sandboxes; git refuses without an identity.
@@ -84,14 +84,24 @@ jobs:
           GIT_CONFIG_COUNT: "1"
           GIT_CONFIG_KEY_0: core.hooksPath
           GIT_CONFIG_VALUE_0: ${{ github.workspace }}/hooks
+        # A test that SKIPs exits 0. On this runner every prerequisite is present (the probe above
+        # fails the job otherwise), so a SKIP means a check silently did not run: count it as a failure.
+        # The output goes to a file, not through a pipe: a redirect that cannot be written fails the
+        # test's own status, and grep's "no match" (1) is told apart from "could not read" (2).
         run: |
           rc=0
+          log="$RUNNER_TEMP/test.log"
           for t in tests/*.sh; do
-            if bash "$t"; then
-              echo "PASS $t"
-            else
-              echo "::error file=$t::$t failed"
-              rc=1
+            st=0; bash "$t" >"$log" 2>&1 || st=$?
+            cat "$log" || { echo "::error file=$t::could not read the output of $t"; rc=1; continue; }
+            if [ "$st" -ne 0 ]; then
+              echo "::error file=$t::$t failed"; rc=1; continue
             fi
+            g=0; grep -q ': SKIP' "$log" || g=$?
+            case "$g" in
+              0) echo "::error file=$t::$t skipped on CI, where every prerequisite is present"; rc=1 ;;
+              1) echo "PASS $t" ;;
+              *) echo "::error file=$t::could not inspect the output of $t"; rc=1 ;;
+            esac
           done
           exit $rc

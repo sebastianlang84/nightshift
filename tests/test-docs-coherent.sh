@@ -59,12 +59,14 @@ expect_caught "a dead relative link"      'See [the thing](docs/design/gone.md).
 expect_caught "a missing ADR"             'This follows ADR 0042 closely.'             "ADR 0042"
 expect_caught "a named file that is gone" 'Run `bin/vanished.sh` nightly.'             "does not exist"
 expect_caught "a citation past EOF"       'The flag lives at `bin/real.sh:99`.'        "only 2 lines"
+expect_caught "a citation of a gone file" 'The flag lived at `bin/vanished.sh:12`.'   "which does not exist"
 
 # The counterparts must stay quiet, or the checker is just noise people switch off.
 expect_clean "a live link"                'See [the ADR](docs/adr/0001-real.md).'
 expect_clean "a resolvable ADR"           'This follows ADR 0001 closely.'
 expect_clean "a file that exists"         'Run `bin/real.sh` nightly.'
 expect_clean "a citation inside the file" 'The flag lives at `bin/real.sh:2`.'
+expect_clean "another project's citation" 'Upstream has it at `src/other.py:12`.'
 expect_clean "an external URL"            'See [upstream](https://example.com/x.md).'
 expect_clean "a pure anchor"              'Jump to [the section](#context).'
 expect_clean "runtime state, not source"  'The ledger is `state/ledger.jsonl` and is gitignored.'

@@ -16,6 +16,18 @@ NIGHTSHIFT_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$NIGHTSHIFT_HOME/scheduler"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 
+# True only when systemd itself reports the timer can no longer fire: not active and not enabled.
+# A query that fails (no user manager, say) is unknown, never "off" — `show` exits non-zero then,
+# while for a unit that is not installed it still answers (ActiveState=inactive, empty file state).
+timer_off() {
+  local out active file
+  out="$(systemctl --user show nightshift.timer -p ActiveState -p UnitFileState 2>/dev/null)" || return 1
+  active="$(sed -n 's/^ActiveState=//p' <<<"$out")"
+  file="$(sed -n 's/^UnitFileState=//p' <<<"$out")"
+  case "$active" in inactive|failed) ;; *) return 1 ;; esac
+  case "$file" in ""|disabled|masked|masked-runtime) return 0 ;; *) return 1 ;; esac
+}
+
 # systemd drop-ins (…/nightshift.timer.d/*.conf, e.g. from `systemctl --user edit`) override the
 # committed unit, so the EFFECTIVE cadence can silently differ from scheduler/nightshift.timer.
 # Surface them wherever we report state, and point at the authoritative merged view.
@@ -57,7 +69,10 @@ case "$cmd" in
     report_overrides
     ;;
   disable)
+    # `|| true` keeps disabling an already-disabled timer idempotent; the check after it is what
+    # says the timer is really off, so a failed call (no user manager, say) is not reported as done.
     systemctl --user disable --now nightshift.timer || true
+    timer_off || { echo "ERROR: nightshift.timer is still enabled or active, or its state could not be read — not disabled" >&2; exit 1; }
     echo "timer disabled (units still installed; '$0 enable' to resume)"
     ;;
   status)
@@ -116,6 +131,7 @@ case "$cmd" in
     ;;
   uninstall)
     systemctl --user disable --now nightshift.timer 2>/dev/null || true
+    timer_off || { echo "ERROR: nightshift.timer is still enabled or active, or its state could not be read — units left in place" >&2; exit 1; }
     rm -f "$UNIT_DIR/nightshift.timer" "$UNIT_DIR/nightshift.service"
     # Remove drop-in override dirs too, so uninstall leaves no hidden schedule behind. Report each
     # removed file first, since these are operator-created (e.g. via `systemctl --user edit`).

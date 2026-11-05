@@ -107,6 +107,10 @@ def check(root: Path) -> list[str]:
                     if "/" not in name else ([root / name] if (root / name).exists() else [])
                 matches = [p for p in matches if ".git" not in p.parts]
                 if not matches:
+                    # A citation rooted in one of this repo's source dirs claims a file here; a
+                    # missing one is a dead citation (a deleted or moved file), not an example.
+                    if "/" in name and name.split("/")[0] in SOURCE_DIRS:
+                        findings.append(f"{where}: cites {name}:{num}, which does not exist")
                     continue  # not a repo file (an example, another project) — not our claim to check
                 if len(matches) > 1:
                     continue  # ambiguous basename; refusing on a guess is worse than not checking

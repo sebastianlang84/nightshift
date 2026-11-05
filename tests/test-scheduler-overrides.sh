@@ -21,9 +21,18 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 mkdir -p "$TMP/bin"
+# `show` reports the timer off unless STUB_TIMER_ON=1 (a disable that did not take) or
+# STUB_SYSTEMCTL_DOWN=1 (no user manager: every call fails). schedule.sh must then fail instead of
+# reporting the timer off — and uninstall must leave the units in place.
 cat > "$TMP/bin/systemctl" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$TMP/systemctl.calls"
+[ "\${STUB_SYSTEMCTL_DOWN:-0}" = 1 ] && exit 1
+case " \$* " in
+  *" show "*)
+    if [ "\${STUB_TIMER_ON:-0}" = 1 ]; then printf 'ActiveState=active\nUnitFileState=enabled\n'
+    else printf 'ActiveState=inactive\nUnitFileState=disabled\n'; fi ;;
+esac
 exit 0
 EOF
 chmod +x "$TMP/bin/systemctl"
@@ -47,5 +56,20 @@ grep -q "override.conf" <<<"$uout" || { echo "uninstall did not report the remov
 # the operator's systemd, so removing the stub fails loudly rather than silently disarming a timer.
 grep -q -- "--user disable --now nightshift.timer" "$TMP/systemctl.calls" \
   || { echo "uninstall did not attempt to disable the timer" >&2; cat "$TMP/systemctl.calls" >&2; exit 1; }
+
+# A disable that leaves the timer enabled or active is a failure, not "timer disabled".
+if dout="$(STUB_TIMER_ON=1 bash "$ROOT/bin/schedule.sh" disable 2>&1)"; then
+  echo "disable reported success while the timer stayed on: $dout" >&2; exit 1
+fi
+grep -q "still enabled or active" <<<"$dout" || { echo "disable failed without saying why: $dout" >&2; exit 1; }
+if dout="$(STUB_SYSTEMCTL_DOWN=1 bash "$ROOT/bin/schedule.sh" disable 2>&1)"; then
+  echo "disable reported success although the timer state could not be read: $dout" >&2; exit 1
+fi
+bash "$ROOT/bin/schedule.sh" disable >/dev/null || { echo "disable failed although the timer is off" >&2; exit 1; }
+mkdir -p "$UNIT_DIR"; touch "$UNIT_DIR/nightshift.timer"
+if STUB_SYSTEMCTL_DOWN=1 bash "$ROOT/bin/schedule.sh" uninstall >/dev/null 2>&1; then
+  echo "uninstall reported success although the timer state could not be read" >&2; exit 1
+fi
+[ -f "$UNIT_DIR/nightshift.timer" ] || { echo "uninstall removed the units without knowing the timer is off" >&2; exit 1; }
 
 echo "test-scheduler-overrides: ok"

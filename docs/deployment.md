@@ -299,6 +299,8 @@ these flags, is what confines the agent (see [`docs/design/risk-analysis.md`](de
   whose docs name something that is not there: a dead relative link, an `ADR 00NN` with no file, a
   backticked `bin/…`/`lib/…` path that moved, or a `file.sh:123` citation past the end of that file.
   It is the class of rot nightshift itself kept reporting as findings. `--no-verify` bypasses it.
+  `core.hooksPath` replaces `.git/hooks` entirely: if the clone already has hooks there (on svrllm,
+  the git-workflow shims), call `.githooks/pre-commit` from `.git/hooks/pre-commit` instead.
   This is unrelated to `hooks/`, which is the agent confinement and is never installed into a clone.
 - The hook applies to the runner's own commits too, when nightshift services this repo — and the Fix
   stage is told about it up front (`stage_prompt`), so a doc-breaking fix is corrected before the
