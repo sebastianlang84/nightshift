@@ -30,8 +30,8 @@ jobs:
   suite:
     # Pinned, not ubuntu-latest: on 2026-11-05 that label moved to 26.04 and tests went red for the
     # image alone (a dangling link in /usr/bin; egress proxies outliving the gate). Move the pin on
-    # purpose, once the suite is green on the new image.
-    runs-on: ubuntu-24.04
+    # purpose, once the suite is green on the new image (26.04: green on 2026-11-05).
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
