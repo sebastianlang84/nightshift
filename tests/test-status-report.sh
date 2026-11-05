@@ -51,6 +51,7 @@ git -C "$R" branch -q -D nightshift/resolved
 # would lose it, so it is not "clean"), and one stash entry.
 git -C "$R" worktree add -q --detach "$TMP/wt" main
 git -C "$R" worktree add -q --detach "$TMP/wt-env" main
+mkdir -p "$R/.git/info"  # absent when init.templateDir names a template without info/
 echo '.env' > "$R/.git/info/exclude"; echo SECRET=x > "$TMP/wt-env/.env"
 echo dirty >> "$R/a.txt"; g -C "$R" stash -q
 
