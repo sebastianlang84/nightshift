@@ -129,7 +129,8 @@ for d in /usr/local/bin /usr/bin /bin; do
   [ -d "$d" ] || continue
   for f in "$d"/*; do
     b="$(basename "$f")"
-    [ "$b" = bwrap ] || [ -e "$TMP/nobw/$b" ] || ln -s "$f" "$TMP/nobw/$b"
+    # -L too: a dangling link (a runner image ships some) fails -e, and ln then aborts the test.
+    [ "$b" = bwrap ] || [ -e "$TMP/nobw/$b" ] || [ -L "$TMP/nobw/$b" ] || ln -s "$f" "$TMP/nobw/$b"
   done
 done
 printf '#!/bin/sh\necho CALLED > "%s/pi-called"\n' "$TMP" > "$TMP/bin/pi"
