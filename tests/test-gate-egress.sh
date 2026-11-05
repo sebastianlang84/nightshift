@@ -266,4 +266,18 @@ out="$(gate 'true' GATE_NET=true)"
 grep -q 'Terminated' <<<"$out" \
   && { echo "$out" >&2; fail "the egress teardown printed a bare 'Terminated' into the run output"; }
 
+# The teardown's SIGINT must stop the proxy even when it was started from a shell that ignores
+# SIGINT: the proxy then inherits SIG_IGN, and on GitHub's ubuntu-26.04 runner every test_net
+# gate left one running. Started here directly, with the disposition the Runner may hand it.
+sock="$TMP/sigint.sock"
+exec 9< <(trap '' INT; exec python3 "$ROOT/lib/egress_proxy.py" "$sock" 2>/dev/null)
+read -r -t 10 -u 9 _ready pid || fail "the proxy started with SIGINT ignored did not come up"
+kill -INT "$pid" 2>/dev/null || true
+for _ in $(seq 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+if kill -0 "$pid" 2>/dev/null; then
+  kill "$pid" 2>/dev/null || true
+  fail "a proxy started with SIGINT ignored survived the teardown's SIGINT"
+fi
+exec 9<&-
+
 echo "test-gate-egress: ok"

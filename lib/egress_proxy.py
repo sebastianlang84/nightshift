@@ -24,6 +24,7 @@ dependency and nothing in this repo may add a pip install).
 import ipaddress
 import os
 import socket
+import signal
 import sys
 import threading
 
@@ -204,6 +205,10 @@ def dispatch(conn: socket.socket, slots: threading.BoundedSemaphore) -> bool:
 
 
 def main(sock_path: str) -> None:
+    # The Runner stops this proxy with SIGINT. A process started from a shell that ignores SIGINT
+    # inherits SIG_IGN, and Python then installs no KeyboardInterrupt handler: the kill does nothing
+    # and the proxy outlives its gate (seen on GitHub's ubuntu-26.04 runner). Take the signal back.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
     if os.path.exists(sock_path):
         os.unlink(sock_path)
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
