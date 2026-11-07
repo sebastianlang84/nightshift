@@ -75,6 +75,9 @@ cat > "$TMP/findings.json" <<EOF
  {$(req ordering-only "leans on session B without quoting it"),
   "quotes":[{"turn":"sa:aaaaaaaa","text":"warum steht der vorgang still?"}],
   "ordering":[{"before":"sa:aaaaaaaa","after":"sb:ffffffff"}]},
+ {$(req two-turns "cites two nearby turns of one session"),
+  "quotes":[{"turn":"sa:a0000001","text":"filler so the cited turn"},
+            {"turn":"sa:dddddddd","text":"Damit faellt meine Cron-Erklaerung"}]},
  {$(req unresolvable "cites a turn that is not there"),
   "quotes":[{"turn":"sc:c1111111","text":"NEVER SAID THIS"}]}
 ]}
@@ -105,6 +108,28 @@ grep -q 'earlier turn(s) in sa not shown' <<<"$sec" \
   || fail "retracted: turns were clipped from the start without saying so"
 grep -q 'later turn(s) in sa not shown' <<<"$sec" \
   || fail "retracted: turns were clipped from the end without saying so"
+
+# --- 2b. two cited turns of one session share one set of edges ----------------
+# Each window marked on its own counts its sibling's turns as hidden: here seq 1 and seq 5 with width
+# 2 cover all seven turns, yet per-window markers would claim 3 turns were clipped on each side of
+# the middle. The judge answers "cannot tell" past a "not shown" mark, so a false one costs a verdict.
+sec="$(section two-turns "$TMP/judge.txt")"
+grep -q 'not shown' <<<"$sec" \
+  && fail "two-turns: every turn of sa is rendered, yet a 'not shown' marker claims some were clipped"
+[ "$(grep -c '^\[turn sa:' <<<"$sec")" -eq 7 ] \
+  || fail "two-turns: the merged window should render each of sa's 7 turns exactly once"
+# With no context the two windows are disjoint; the gap between them is 3 turns, not 5 or 6.
+narrow="$(python3 "$BUILD" --checked "$TMP/checked.json" --turns "${TURNS[@]}" --context 0)" \
+  || fail "builder failed with --context 0"
+sec="$(section two-turns <(printf '%s\n' "$narrow"))"
+grep -q '1 earlier turn(s) in sa not shown' <<<"$sec" \
+  || fail "two-turns: the leading gap before the first cited turn is miscounted"
+grep -q '3 intervening turn(s) in sa not shown' <<<"$sec" \
+  || fail "two-turns: the gap between two cited turns is miscounted"
+grep -q '1 later turn(s) in sa not shown' <<<"$sec" \
+  || fail "two-turns: the trailing gap after the last cited turn is miscounted"
+[ "$(grep -c 'not shown' <<<"$sec")" -eq 3 ] \
+  || fail "two-turns: expected exactly one marker per real gap"
 
 # --- 3. a trailing elision is flagged -----------------------------------------
 # This is the prototype's worst case: an exact quote that stops right before the clause reversing
