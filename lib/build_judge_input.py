@@ -99,6 +99,11 @@ def context_block(finding, by_id, sessions, width):
 
     The edges are marked because the judge is asked whether a quote survives its surroundings, and
     a window that stops one turn before the retraction looks exactly like a session that ends there.
+
+    The windows of one session are merged into intervals before any marker is written. Marking each
+    cited turn's window on its own counts a sibling window's turns as hidden, so two nearby cited
+    turns would tell the judge that evidence it is looking at was clipped. Each marker therefore
+    counts exactly the turns that no interval shows: before the first, between two, after the last.
     """
     cited = cited_turns(finding)
     missing = sorted(t for t in cited if t not in by_id)
@@ -107,20 +112,30 @@ def context_block(finding, by_id, sessions, width):
             f"finding {finding.get('id', '?')} cites turn(s) {', '.join(missing)} that are not in "
             "the supplied transcripts — the citation check and this stage saw different input")
 
-    out, seen = [], set()
-    for tid in sorted(cited, key=lambda i: (by_id[i]["session"], by_id[i]["seq"])):
-        t = by_id[tid]
-        row = sessions[t["session"]]
-        lo, hi = max(0, t["seq"] - width), min(len(row), t["seq"] + width + 1)
-        if lo > 0:
-            out.append(f"  [... {lo} earlier turn(s) in {t['session']} not shown ...]")
-        for nb in row[lo:hi]:
-            if nb["id"] in seen:
-                continue
-            seen.add(nb["id"])
-            out.append(render_turn(nb, "CITED" if nb["id"] in cited else ""))
-        if hi < len(row):
-            out.append(f"  [... {len(row) - hi} later turn(s) in {t['session']} not shown ...]")
+    seqs_by_session = {}
+    for tid in cited:
+        seqs_by_session.setdefault(by_id[tid]["session"], set()).add(by_id[tid]["seq"])
+
+    out = []
+    for session in sorted(seqs_by_session):
+        row = sessions[session]
+        intervals = []  # [lo, hi) — overlapping or touching windows become one
+        for seq in sorted(seqs_by_session[session]):
+            lo, hi = max(0, seq - width), min(len(row), seq + width + 1)
+            if intervals and lo <= intervals[-1][1]:
+                intervals[-1][1] = max(intervals[-1][1], hi)
+            else:
+                intervals.append([lo, hi])
+        prev_hi = 0
+        for lo, hi in intervals:
+            if lo > prev_hi:
+                where = "earlier" if prev_hi == 0 else "intervening"
+                out.append(f"  [... {lo - prev_hi} {where} turn(s) in {session} not shown ...]")
+            for nb in row[lo:hi]:
+                out.append(render_turn(nb, "CITED" if nb["id"] in cited else ""))
+            prev_hi = hi
+        if prev_hi < len(row):
+            out.append(f"  [... {len(row) - prev_hi} later turn(s) in {session} not shown ...]")
     return "\n\n".join(out)
 
 
