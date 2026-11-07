@@ -127,8 +127,21 @@ def line_number(text: str, needle: str) -> int:
     return 1 if pos < 0 else text.count("\n", 0, pos) + 1
 
 
+def link_destination(raw: str) -> str:
+    # CommonMark: the destination is either <...> (which may contain spaces) or a run of
+    # non-whitespace; an optional title ("...", '...' or (...)) follows after whitespace. LINK_RE
+    # captures everything inside the parentheses, so separate the destination from the title here.
+    raw = raw.strip()
+    if raw.startswith("<"):
+        end = raw.find(">", 1)
+        if end > 0:
+            return raw[1:end]
+    parts = raw.split(None, 1)
+    return parts[0] if parts else ""
+
+
 def target_path(source: PurePosixPath, raw: str) -> PurePosixPath | None:
-    target = unquote(raw.split("#", 1)[0].strip())
+    target = unquote(link_destination(raw).split("#", 1)[0].strip())
     if not target or target.startswith(("http://", "https://", "mailto:", "#")):
         return None
     if target.startswith("/"):

@@ -105,6 +105,32 @@ jq -e '
   any(.diagnostics[]; .code == "duplicate_frontmatter_key" and .file == "index.md")
 ' "$TMP/duplicate-root-report.json" >/dev/null
 
+# CommonMark link titles and <...> destinations are not part of the path: these links work, so
+# they must count as inbound links and must not be reported as broken.
+git init -q "$TMP/titled"
+cat > "$TMP/titled/index.md" <<'EOF'
+---
+okf_version: "0.2"
+---
+# Index
+* [Spec](spec.md "OKF spec") and its [part](spec.md#part 'Part').
+* [Plan](<my plan.md>) and [Notes](notes.md (Notes)).
+* [Missing](<gone.md> "Gone").
+EOF
+for page in spec.md "my plan.md" notes.md; do
+  printf -- '---\ntype: Note\n---\n# Page\n' > "$TMP/titled/$page"
+done
+git -C "$TMP/titled" -c user.name=test -c user.email=test@localhost add .
+git -C "$TMP/titled" -c user.name=test -c user.email=test@localhost commit -q -m initial
+python3 "$ROOT/lib/knowledge_probe.py" "$TMP/titled" > "$TMP/titled-report.json"
+jq -e '
+  ([.diagnostics[] | select(.code == "orphan_concept")] | length) == 0 and
+  ([.diagnostics[] | select(.code == "broken_markdown_link")] | length) == 1 and
+  any(.diagnostics[]; .code == "broken_markdown_link" and (.message | endswith(": gone.md")))
+' "$TMP/titled-report.json" >/dev/null || {
+  echo "test-knowledge-probe: titled or <> links misparsed:" >&2; cat "$TMP/titled-report.json" >&2; exit 1;
+}
+
 # Restore the valid root index for the end-to-end Runner check below.
 cat > "$TMP/repo/index.md" <<'EOF'
 ---
