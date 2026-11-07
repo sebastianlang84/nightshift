@@ -23,7 +23,16 @@ OKF_SPEC = "https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/o
 RESERVED = {"index.md", "log.md"}
 STATUS_VALUES = {"draft", "stable", "deprecated"}
 TOP_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*):(?:\s*(.*))?$")
-LINK_RE = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
+# Capture only the destination, but require the complete inline link (including an optional
+# title and the outer closing parenthesis). Plain destinations support one balanced paren pair;
+# angle destinations may contain spaces and parentheses. This remains a lightweight graph probe.
+LINK_RE = re.compile(
+    r'''(?<!!)\[[^\]]+\]\(\s*
+        (<[^<>\n]*>|(?:\\[^\n]|[^\s()<>\\]|\((?:\\[^\n]|[^\s()<>\\])*\))+)
+        (?:\s+(?:"(?:\\[^\n]|[^"\\])*"|'(?:\\[^\n]|[^'\\])*'|\((?:\\[^\n]|[^()\\])*\)))?
+        \s*\)''',
+    re.VERBOSE,
+)
 FOOTNOTE_RE = re.compile(r"\[\^([^\]]+)\]")
 WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 DATE_HEADING_RE = re.compile(r"^##\s+(\S.*)$", re.MULTILINE)
@@ -128,7 +137,9 @@ def line_number(text: str, needle: str) -> int:
 
 
 def target_path(source: PurePosixPath, raw: str) -> PurePosixPath | None:
-    target = unquote(raw.split("#", 1)[0].strip())
+    # LINK_RE has already validated the syntax and separated the optional title.
+    destination = raw[1:-1] if raw.startswith("<") and raw.endswith(">") else raw
+    target = unquote(destination.split("#", 1)[0].strip())
     if not target or target.startswith(("http://", "https://", "mailto:", "#")):
         return None
     if target.startswith("/"):
@@ -262,15 +273,18 @@ def main(repo_arg: str) -> None:
                     if "computation" not in fields and not re.search(r"^# Computation\s*$", body, re.MULTILINE):
                         add("warning", "computation_body_missing", path, "Attested Computation has neither computation path nor # Computation body", "type:")
 
-        for raw in LINK_RE.findall(body if fm_lines is not None else text):
-            target = target_path(path, raw)
-            if target is None:
-                continue
-            target = resolve_target(target, tracked)
-            if target not in tracked or not (repo / Path(*target.parts)).exists():
-                add("warning", "broken_markdown_link", path, f"relative link target does not exist: {target}", raw)
-            elif target in markdown:
-                inbound[target] += 1
+        # Scan paragraphs separately: a partial label in earlier prose must not consume a
+        # later paragraph's valid link, and titles cannot cross blank lines.
+        for paragraph in re.split(r"\n[ \t]*\n", body if fm_lines is not None else text):
+            for raw in LINK_RE.findall(paragraph):
+                target = target_path(path, raw)
+                if target is None:
+                    continue
+                target = resolve_target(target, tracked)
+                if target not in tracked or not (repo / Path(*target.parts)).exists():
+                    add("warning", "broken_markdown_link", path, f"relative link target does not exist: {target}", raw)
+                elif target in markdown:
+                    inbound[target] += 1
         for wiki in WIKILINK_RE.findall(body if fm_lines is not None else text):
             add("warning", "nonstandard_wikilink", path, f"wiki-link is not a portable Markdown link: {wiki}", f"[[{wiki}]]")
 
