@@ -28,8 +28,10 @@ if [ -z "$files" ] && [ -d "$repo" ]; then
   files="$( (cd "$repo" && find . -type d -name .git -prune -o -type f -print 2>/dev/null) | sed 's#^\./##' || true)"
 fi
 
-# grep the path inventory; returns 0 on a match (used only inside `if`).
-has() { printf '%s\n' "$files" | grep -Eq "$1"; }
+# grep the path inventory; returns 0 on a match (used only inside `if`). A here-string, not
+# `printf | grep -q`: grep -q quits on its first match, and on a path list larger than the pipe
+# buffer the writer's SIGPIPE turns that match into a miss under pipefail.
+has() { grep -Eq -- "$1" <<<"$files"; }
 # newline-separated stdin -> compact, unique, sorted JSON array of nonempty lines.
 json_array() { jq -R . | jq -sc 'map(select(length>0)) | unique'; }
 
@@ -45,7 +47,7 @@ fi
 # lens. Generic docs alone remain a weaker signal interpreted by Recon; they do not make every code
 # repository a knowledge-base target.
 has_knowledge=false
-if printf '%s\n' "$files" | grep -qx 'index.md' && \
+if grep -qx 'index.md' <<<"$files" && \
    grep -Eq "^okf_version:[[:space:]]*['\"]?[0-9]+\.[0-9]+" "$repo/index.md" 2>/dev/null; then
   has_knowledge=true
 fi

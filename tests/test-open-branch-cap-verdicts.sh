@@ -105,6 +105,23 @@ branch_is_settled "$TMP/repo" nightshift/fallback \
 ! branch_is_settled "$TMP/other" nightshift/rejected \
   || { echo "verdicts leaked across repos" >&2; exit 1; }
 
+# The settled set only grows. Once it outgrows the 64 KiB pipe buffer, `printf | grep -q` under
+# pipefail reads an early match as a miss: grep quits, the writer takes SIGPIPE, and the pipeline
+# fails. Put the real verdicts FIRST, ahead of enough filler to cross the buffer.
+small_settled="$SETTLED_BRANCHES"
+filler=$(for n in $(seq 1 3000); do printf '%s\tnightshift/filler-%05d\n' "$TMP/repo" "$n"; done)
+SETTLED_BRANCHES="$small_settled"$'\n'"$filler"
+[ "${#SETTLED_BRANCHES}" -gt 65536 ] \
+  || { echo "fixture too small to cross the pipe buffer: ${#SETTLED_BRANCHES} bytes" >&2; exit 1; }
+branch_is_settled "$TMP/repo" nightshift/rejected \
+  || { echo "an early match in a settled set over 64 KiB must still count as settled" >&2; exit 1; }
+! branch_is_settled "$TMP/repo" nightshift/pending \
+  || { echo "a large settled set must not settle a branch it does not list" >&2; exit 1; }
+open=$(open_branch_count)
+[ "$open" = 2 ] \
+  || { echo "with a settled set over 64 KiB the cap counted '$open', expected 2" >&2; exit 1; }
+SETTLED_BRANCHES="$small_settled"
+
 # No ledger at all (first ever night) degrades to the naive count rather than failing.
 mv "$TMP/state/ledger.jsonl" "$TMP/ledger.bak"
 refresh_settled_branches
