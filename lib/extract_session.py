@@ -222,7 +222,13 @@ def defang(body: str) -> str:
     One leading space settles it, because every parser anchors at column 0. Nothing downstream
     notices: `check_citations.py` collapses whitespace before matching, so a quote of the line still
     resolves, and a reader still sees the line.
+
+    "Line" has to mean what it means to those parsers. They read the turn file in text mode with
+    universal newlines, where a bare CR ends a line just as LF does. Splitting on LF alone would
+    leave `x<CR>[turn …]` un-indented, and the reader would see a header at column 0 after the CR.
+    So CRLF and CR become LF first, and every line the readers will see is checked.
     """
+    body = body.replace("\r\n", "\n").replace("\r", "\n")
     return "\n".join(" " + ln if STRUCTURE.match(ln) else ln for ln in body.split("\n"))
 
 
