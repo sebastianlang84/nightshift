@@ -13,7 +13,9 @@ set -euo pipefail
 # below — `NIGHTSHIFT_BRANCH_PREFIX=m` makes refs/heads/main match. An agent command that sets
 # it is therefore denied at Layer 2 (hooks/pretooluse-guard.sh), alongside GIT_CONFIG_*.
 prefix="refs/heads/${NIGHTSHIFT_BRANCH_PREFIX:-nightshift/}"
-zero="0000000000000000000000000000000000000000"
+# git passes the null object id of the repository's OWN hash: 40 zeros under SHA-1, 64 under
+# SHA-256. No real object has an all-zero id, so matching any all-zero id widens nothing.
+is_null_oid() { [[ "$1" =~ ^0+$ ]]; }
 
 reject() {
   echo "nightshift pre-push: REJECTED — $1" >&2
@@ -26,7 +28,7 @@ while read -r _local_ref local_sha remote_ref remote_sha; do
     refs/tags/*) reject "tag push not allowed ($remote_ref) — nightshift makes branches, not releases" ;;
   esac
   # A delete presents an all-zero LOCAL sha.
-  if [ "$local_sha" = "$zero" ]; then
+  if is_null_oid "$local_sha"; then
     reject "ref delete not allowed ($remote_ref)"
   fi
   case "$remote_ref" in
@@ -36,7 +38,7 @@ while read -r _local_ref local_sha remote_ref remote_sha; do
   # Namespace ownership does not permit rewriting its published history. Git has already resolved
   # `+branch`, `--force` and `--force-with-lease` to these object ids; require the remote tip to be
   # an ancestor of the proposed tip. An unavailable old object fails closed as well.
-  if [ "$remote_sha" != "$zero" ] \
+  if ! is_null_oid "$remote_sha" \
      && ! git merge-base --is-ancestor "$remote_sha" "$local_sha" >/dev/null 2>&1; then
     reject "non-fast-forward update not allowed ($remote_ref)"
   fi
