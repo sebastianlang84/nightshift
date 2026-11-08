@@ -2208,7 +2208,9 @@ refresh_settled_branches() { # cache the branches whose latest ledger verdict is
 
 branch_is_settled() { # repo branch -> 0 when the ledger's latest verdict for it is terminal
   [ -n "$SETTLED_BRANCHES" ] || return 1
-  printf '%s\n' "$SETTLED_BRANCHES" | grep -qxF "$1	$2"
+  # Drain the input: grep -q can SIGPIPE printf on large sets and turn a match into a
+  # failure under pipefail. Redirect ordinary grep output instead of exiting early.
+  printf '%s\n' "$SETTLED_BRANCHES" | grep -xF -- "$1	$2" >/dev/null
 }
 
 open_branch_count() { # count nightshift/* still awaiting the operator's decision (§3e)
