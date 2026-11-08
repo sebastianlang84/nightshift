@@ -39,4 +39,26 @@ if feed '(delete)' "$ZERO" refs/heads/nightshift/x "$new" >/dev/null 2>&1; then
   fail "a branch delete was accepted"
 fi
 
+# A SHA-256 repository gets the 64-zero null id from git, not the 40-zero SHA-1 one.
+REPO="$TMP/repo256"
+ZERO64="$ZERO$(printf '0%.0s' {1..24})"
+git init -q -b main --object-format=sha256 "$REPO"
+git -C "$REPO" -c user.name=t -c user.email=t@localhost commit -q --allow-empty -m one
+old="$(git -C "$REPO" rev-parse HEAD)"
+git -C "$REPO" -c user.name=t -c user.email=t@localhost commit -q --allow-empty -m two
+new="$(git -C "$REPO" rev-parse HEAD)"
+[ "${#new}" = 64 ] && [ "${#ZERO64}" = 64 ] || fail "the SHA-256 fixture did not produce 64-char ids"
+feed refs/heads/nightshift/x "$new" refs/heads/nightshift/x "$ZERO64" \
+  || fail "a new owned branch in a SHA-256 repo was rejected"
+feed refs/heads/nightshift/x "$new" refs/heads/nightshift/x "$old" \
+  || fail "a fast-forward update in a SHA-256 repo was rejected"
+if feed refs/heads/nightshift/x "$old" refs/heads/nightshift/x "$new" >/dev/null 2>&1; then
+  fail "a non-fast-forward update in a SHA-256 repo was accepted"
+fi
+if feed '(delete)' "$ZERO64" refs/heads/nightshift/x "$new" 2>"$TMP/err"; then
+  fail "a branch delete in a SHA-256 repo was accepted"
+fi
+grep -q 'ref delete not allowed' "$TMP/err" \
+  || fail "the SHA-256 delete refusal did not name the reason"
+
 echo "test-pre-push-confinement: ok"
