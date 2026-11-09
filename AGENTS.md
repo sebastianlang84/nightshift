@@ -65,10 +65,9 @@ Operations: [docs/deployment.md](docs/deployment.md).
    [ADR 0040](docs/adr/0040-reviewed-branches-merge-without-a-human.md).
    The runner itself only pushes `nightshift/*`.
    Handle tasks for this repo labelled `nightshift-merge` in this session; do not pass them on.
-5. Every status reply about nightshift includes an overview table (Sebastian, 2026-11-02).
-   One row per repo and night item: what was found or changed, and whether it is open, reviewed,
-   merged or dropped.
-   `bin/status.sh` prints that table from the ledger, the merge job's state and git.
+5. Never show the `bin/status.sh` table in a status reply about nightshift (Sebastian, 2026-11-09).
+   Give a verdict per open item instead: merge, fix first, or drop, with the reason in one sentence.
+   Base each verdict on the advisor reports in `state/advice/` and on checks of the disputed points.
 6. Every status reply also includes the clutter check that `bin/status.sh` prints.
    It covers leftover `nightshift/*` branches, clean merged worktrees, merged local branches,
    stashes and nightshift's worktree directory across all managed repos.
