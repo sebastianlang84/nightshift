@@ -66,7 +66,8 @@ Operations: [docs/deployment.md](docs/deployment.md).
    The runner itself only pushes `nightshift/*`.
    Handle tasks for this repo labelled `nightshift-merge` in this session; do not pass them on.
 5. Never show the `bin/status.sh` table in a status reply about nightshift (Sebastian, 2026-11-09).
-   Give a verdict per open item instead: merge, fix first, or drop, with the reason in one sentence.
+   Give a verdict table instead: one row per open item with repo, item, verdict (merge, fix first,
+   drop or close) and the reason in one sentence.
    Base each verdict on the advisor reports in `state/advice/` and on checks of the disputed points.
 6. Every status reply also includes the clutter check that `bin/status.sh` prints.
    It covers leftover `nightshift/*` branches, clean merged worktrees, merged local branches,
