@@ -90,9 +90,12 @@ repos:
     test_cmd: true
 EOF
 
-out=$(RULEBOOK="$TMP/rulebook.yaml" NIGHTSHIFT_STATE_DIR="$TMP/state" \
-  NIGHTSHIFT_MERGE_STATE="$TMP/merge.json" NIGHTSHIFT_WORKTREES="$TMP/worktrees" \
-  "$ROOT/bin/status.sh")
+status_report() {
+  RULEBOOK="$TMP/rulebook.yaml" NIGHTSHIFT_STATE_DIR="$TMP/state" \
+    NIGHTSHIFT_MERGE_STATE="$TMP/merge.json" NIGHTSHIFT_WORKTREES="$TMP/worktrees" \
+    "$ROOT/bin/status.sh"
+}
+out=$(status_report)
 
 expect() { grep -qF -- "$1" <<<"$out" || { echo "missing: $1" >&2; echo "$out" >&2; exit 1; }; }
 expect "| fix | Fix one | merged |"
@@ -121,5 +124,29 @@ expect "repo: 1 stash entries"
 if grep -q 'nightshift/open on origin' <<<"$out"; then
   echo "an open branch was reported as clutter" >&2; exit 1
 fi
+
+# A gitflow base differs from origin/HEAD: keep the default branch, report merged topic branches.
+g -C "$R" switch -q -c develop
+git -C "$R" push -q origin develop
+printf '    base: develop\n' >> "$TMP/rulebook.yaml"
+out=$(status_report)
+if grep -q 'other local branches already merged' <<<"$out"; then
+  echo "the remote default branch was reported as clutter" >&2; echo "$out" >&2; exit 1
+fi
+git -C "$R" branch merged-topic main
+out=$(status_report)
+expect "repo: 1 other local branches already merged into origin/develop"
+
+# Follow the configured default, including names with slashes, rather than hard-coding main.
+git -C "$R" branch -m main stable/main
+git -C "$R" push -q origin stable/main
+git -C "$R" remote set-head origin stable/main
+out=$(status_report)
+expect "repo: 1 other local branches already merged into origin/develop"
+
+# An unset origin/HEAD adds no exclusion.
+git -C "$R" remote set-head origin -d
+out=$(status_report)
+expect "repo: 2 other local branches already merged into origin/develop"
 
 echo "test-status-report: ok"

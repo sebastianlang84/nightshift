@@ -236,7 +236,9 @@ def clutter(prefix, repos, rows, unfetched):
             if x.startswith(prefix):
                 found.append('%s: local branch %s%s' % (
                     name, x, ' (merged)' if x in merged else ''))
-        other = [x for x in merged if not x.startswith(prefix)]
+        rc, out = git(repo, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD')
+        default = out.strip().split('/', 1)[-1] if rc == 0 else ''
+        other = [x for x in merged if not x.startswith(prefix) and x != default]
         if other:
             found.append('%s: %d other local branches already merged into %s'
                          % (name, len(other), b))
