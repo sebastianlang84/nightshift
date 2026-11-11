@@ -68,6 +68,15 @@ The exceptions inside the root are `.claude/settings.json`, `.claude/settings.lo
 Fix may not create or edit them. A repository that intentionally changes those files needs human
 handling.
 
+The guard only confines a *Claude* Fix. A codex Fix (`workspace-write`) or a pi Fix (bwrap with the
+worktree writable) can still write those files, and the Review stage or a branch advisor may be
+Claude. So the Runner enforces the same rule for every adapter (`worktree_control_files_clean` in
+`bin/nightshift.sh`): right after Fix, at the `.git`-pointer choke point, a worktree in which any of the
+three files — or `.claude` itself, which a symlink could replace — is changed, untracked or ignored is
+refused as `worktree-tampered` before Review runs. `advise_branches` asks the same of a pushed branch
+against its merge base (`branch_control_files_changed`) and rejects such a branch without checking it
+out for any advisor.
+
 **The denial itself is built with `jq`,** not string-interpolated: its reason quotes the resolved
 target, i.e. an agent-supplied path, and a quote/backslash/control character in that path would
 otherwise emit malformed JSON from the very call that is supposed to block the write. If `jq` is

@@ -2591,6 +2591,46 @@ assert_worktree_git_sane() { # repo worktree -> 0 sane, 1 tampered (and says so)
   return 1
 }
 
+# Claude loads these from a stage's cwd (`--setting-sources project,local`) and runs the hooks and
+# MCP servers they name, unsandboxed, as the operator (docs/design/hook-spec.md). The PreToolUse
+# guard keeps a CLAUDE Fix away from them; a codex or pi Fix can write the worktree freely, and the
+# Review stage or a branch advisor may well be Claude. So the Runner checks the result itself, for
+# every adapter. `.claude` is listed on its own because a symlink in its place would redirect all
+# three paths without git ever naming them.
+CLAUDE_CONTROL_PATHS=(.claude/settings.json .claude/settings.local.json .mcp.json .claude)
+# Keeps only the paths that ARE control data from a list of changed paths: the `.claude` pathspec
+# also matches everything beneath it (commands, agents), which is ordinary repository content.
+control_path_filter() {
+  awk '$0==".claude" || $0==".claude/settings.json" || $0==".claude/settings.local.json" || $0==".mcp.json"'
+}
+
+# A Fix that touched any of them is refused before Review runs. Ignored files count — a gitignored
+# settings.local.json is still loaded — and a failed listing counts as a change: this fails closed.
+worktree_control_files_clean() { # repo worktree -> 0 untouched, 1 touched (and says so)
+  local repo="$1" wt="$2" st hit
+  st="$(git -C "$wt" status --porcelain=v1 --ignored=traditional --untracked-files=all --no-renames \
+        -- "${CLAUDE_CONTROL_PATHS[@]}" 2>/dev/null)" || {
+    log "  $(basename "$repo"): could not list Claude control files in $(basename "$wt") — refusing"
+    return 1
+  }
+  hit="$(printf '%s\n' "$st" | cut -c4- | sed 's#/$##' | control_path_filter | sort -u | tr '\n' ' ')"
+  [ -z "$hit" ] && return 0
+  log "  $(basename "$repo"): Fix wrote Claude control files in $(basename "$wt") (${hit% }) — refusing"
+  return 1
+}
+
+# The same question for a pushed branch, asked before an advisor checks it out: which control paths
+# does the branch change against its merge base? Any output (or a failed diff) means do not run.
+branch_control_files_changed() { # repo base tip -> prints the paths; 1 if none
+  local repo="$1" base="$2" tip="$3" mb out
+  mb="$(git -C "$repo" merge-base "$base" "$tip" 2>/dev/null)" || { echo "(merge base unknown)"; return 0; }
+  out="$(git -C "$repo" diff --name-only --no-renames "$mb" "$tip" -- "${CLAUDE_CONTROL_PATHS[@]}" 2>/dev/null)" \
+    || { echo "(diff failed)"; return 0; }
+  out="$(printf '%s\n' "$out" | control_path_filter | sort -u | tr '\n' ' ')"
+  [ -n "$out" ] || return 1
+  printf '%s\n' "${out% }"
+}
+
 # Removes every ignored file from a worktree and reports whether anything git does not track
 # survived (ADR 0037). `-ff` also takes an ignored directory that holds its own `.git`, which a plain
 # `-f` leaves in place. A submodule path is invisible to both `clean` and `ls-files`: a worktree is
@@ -3286,7 +3326,7 @@ advise_branches() {
   [ -z "$AGENT_FATAL" ] || [ -z "$AGENT_FATAL_AGENT" ] || dead[$AGENT_FATAL_AGENT]="$AGENT_FATAL"
   local AGENT_FATAL="" AGENT_FATAL_AGENT=""
   local i k path base base_sha branches ref name tip stem finding id wt adapter key cache ans
-  local rec reason rf what benefit cells fixes n_missing n_merge n_reject combined head sep rows=""
+  local rec reason rf what benefit cells fixes n_missing n_merge n_reject combined head sep ctl rows=""
   mkdir -p "$ADVICE_CACHE_DIR"
   # Retention: an entry older than 90 days only costs one re-review if its branch is still open.
   find "$ADVICE_CACHE_DIR" -maxdepth 1 -name '*.json' -mtime +90 -delete 2>/dev/null || true
@@ -3316,6 +3356,16 @@ advise_branches() {
         | {summary:(.summary//""),fingerprint:(.fingerprint//""),type:(.type//""),dimension:(.dimension//"")}' \
         "$LEDGER" 2>/dev/null) || finding='{}'
       wt=""; cells=""; fixes=""; what=""; benefit=""; n_missing=0; n_merge=0; n_reject=0
+      # A branch that changes Claude's project settings or MCP config is never checked out for an
+      # advisor: a Claude advisor would run the hooks it names on the host. It is rejected outright.
+      if ctl="$(branch_control_files_changed "$path" "$base_sha" "$tip")"; then
+        log "branch review: $name changes Claude control files ($ctl) — not checked out, rejected"
+        for k in "${!advisors[@]}"; do
+          cells="$cells **reject** — $(md_cell "changes Claude control files: $ctl") |"
+        done
+        rows="$rows| $(md_cell "$(basename "$path")") | $(md_cell "$name") | | |$cells **reject** | $(md_cell "needs human handling: $ctl") |"$'\n'
+        continue
+      fi
       for k in "${!advisors[@]}"; do
         adapter="${advisors[$k]}"; ADVISE_SLOT=$((k + 1))
         # Cache key (ADR 0038): repo + branch tip + base + adapter + model. Any of them moving is a
@@ -4034,6 +4084,8 @@ main() {
         # finalize will commit — unsandboxed, and BEFORE the ship gate exists to check anything. So
         # a `.git` the Fix stage rewrote detonates here, earlier than any gate could catch it.
         if ! assert_worktree_git_sane "$repo" "$wt"; then gate=tampered; verdict=revise; break; fi
+        # A Claude reviewer would load hooks or MCP servers the Fix just wrote and run them on the host.
+        if ! worktree_control_files_clean "$repo" "$wt"; then gate=tampered; verdict=revise; break; fi
         # Record the exact tree object the reviewer is about to judge. THIS object, and nothing
         # assembled later, is what finalize commits (ADR 0027): "the reviewer saw what shipped"
         # stops being a property that holds as long as nothing touches the worktree in between and
