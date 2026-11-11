@@ -1337,6 +1337,14 @@ materialize_stage_output() { # stage item_dir
 # confinement via hooks/pre-push holds regardless of Claude's permission mode).
 claude_run() { # stage workdir item_dir
   local stage="$1" wd="$2" id="$3" prompt out model
+  local rawf="$id/.raw_$stage" errf="$id/$stage.err" rc=0 parse_rc=0
+  # A Read-only tool profile does not stop startup hooks or MCP servers. Inspect before
+  # launching ANY Claude stage, including advice on branches not produced by this Runner.
+  if ! python3 "$NIGHTSHIFT_HOME/lib/check_claude_controls.py" worktree "$wd" >"$errf" 2>&1; then
+    : > "$rawf"
+    log "  stage $stage: Claude control files refused — see $errf"
+    return 1
+  fi
   # --max-turns is the C6 runaway cap (docs/design/risk-analysis.md), not a budget: the spend cap and
   # the wall-clock bound are what limit cost. It was 25, which Explore reached and died on for 5 of 26
   # items on 2026-08-12 — each after spending its full ~$2 of tokens and returning nothing. A ceiling
@@ -1389,7 +1397,6 @@ claude_run() { # stage workdir item_dir
   # stderr went to /dev/null, and a non-zero exit dropped the captured stdout on the floor with it —
   # so a stage that never started left an empty item dir and no trace of why (see AGENT_FATAL above).
   # Keeping both lets run_agent report the reason and recognise a credential failure.
-  local rawf="$id/.raw_$stage" errf="$id/$stage.err" rc=0 parse_rc=0
   (cd "$wd" && \
     GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="$HOOKS_DIR" \
     NIGHTSHIFT_WORKTREE="$wd" CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 \
@@ -2608,6 +2615,12 @@ control_path_filter() {
 # settings.local.json is still loaded — and a failed listing counts as a change: this fails closed.
 worktree_control_files_clean() { # repo worktree -> 0 untouched, 1 touched (and says so)
   local repo="$1" wt="$2" st hit
+  # Also refuse unchanged config that can execute a changed script, and all symlink
+  # control paths. A pathname diff alone cannot protect either kind of indirection.
+  if ! python3 "$NIGHTSHIFT_HOME/lib/check_claude_controls.py" worktree "$wt" >&2; then
+    log "  $(basename "$repo"): unsafe Claude control files — refusing"
+    return 1
+  fi
   st="$(git -C "$wt" status --porcelain=v1 --ignored=traditional --untracked-files=all --no-renames \
         -- "${CLAUDE_CONTROL_PATHS[@]}" 2>/dev/null)" || {
     log "  $(basename "$repo"): could not list Claude control files in $(basename "$wt") — refusing"
@@ -2623,6 +2636,10 @@ worktree_control_files_clean() { # repo worktree -> 0 untouched, 1 touched (and 
 # does the branch change against its merge base? Any output (or a failed diff) means do not run.
 branch_control_files_changed() { # repo base tip -> prints the paths; 1 if none
   local repo="$1" base="$2" tip="$3" mb out
+  if ! out="$(python3 "$NIGHTSHIFT_HOME/lib/check_claude_controls.py" tree "$repo" "$tip" 2>&1)"; then
+    printf '%s\n' "${out:-(control inspection failed)}"
+    return 0
+  fi
   mb="$(git -C "$repo" merge-base "$base" "$tip" 2>/dev/null)" || { echo "(merge base unknown)"; return 0; }
   out="$(git -C "$repo" diff --name-only --no-renames "$mb" "$tip" -- "${CLAUDE_CONTROL_PATHS[@]}" 2>/dev/null)" \
     || { echo "(diff failed)"; return 0; }

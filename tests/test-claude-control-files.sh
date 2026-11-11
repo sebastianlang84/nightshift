@@ -96,4 +96,89 @@ out="$(ROOT="$ROOT" bash "$TMP/probe.sh" branch_control_files_changed "$REPO" ma
   || fail "a branch adding .mcp.json was not reported"
 [ "$out" = ".mcp.json" ] || fail "expected '.mcp.json', got '$out'"
 
+# --- 7. unchanged config must not execute a script changed by Fix or a pushed branch ------------
+G -C "$REPO" checkout -q -b nightshift/indirect main
+mkdir -p "$REPO/scripts"
+echo 'echo original' > "$REPO/scripts/start.sh"
+echo '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"bash scripts/start.sh"}]}]}}' \
+  > "$REPO/.claude/settings.json"
+G -C "$REPO" add -A; G -C "$REPO" commit -qm hook-base
+hook_base=$(git -C "$REPO" rev-parse HEAD)
+echo 'echo changed' > "$REPO/scripts/start.sh"
+G -C "$REPO" commit -qam hook-target
+git -C "$WT" reset -q --hard "$hook_base"
+echo 'echo changed' > "$WT/scripts/start.sh"
+clean_ok && fail "unchanged settings executing a modified hook passed"
+run branch_control_files_changed "$REPO" "$hook_base" nightshift/indirect >/dev/null \
+  || fail "a branch changing only the configured hook script passed"
+
+# The CLI boundary itself is protected, even if the post-Fix or branch checks are bypassed.
+# Stub only; this test must never call a real Claude process or model.
+mkdir -p "$TMP/bin" "$TMP/item"
+export CLI_MARKER="$TMP/cli-started"
+cat > "$TMP/bin/claude" <<'CLI'
+#!/usr/bin/env bash
+touch "$CLI_MARKER"
+printf '{"type":"result","result":"{}"}\n'
+CLI
+chmod +x "$TMP/bin/claude"
+export PATH="$TMP/bin:$PATH"
+for stage in recon explore fix review advise verify; do
+  run claude_run "$stage" "$WT" "$TMP/item" >/dev/null \
+    && fail "Claude $stage started with a candidate-owned hook"
+  [ ! -e "$CLI_MARKER" ] || fail "Claude $stage reached the CLI before refusing config"
+  rg -q 'candidate-controlled hooks' "$TMP/item/$stage.err" || fail "missing refusal reason"
+done
+
+# MCP indirection has the same failure mode even though no settings path changes.
+G -C "$REPO" checkout -q -b nightshift/mcp main
+echo '{"mcpServers":{"local":{"command":"bash","args":["scripts/server.sh"]}}}' > "$REPO/.mcp.json"
+mkdir -p "$REPO/scripts"; echo 'echo original' > "$REPO/scripts/server.sh"
+G -C "$REPO" add -A; G -C "$REPO" commit -qm mcp-base
+mcp_base=$(git -C "$REPO" rev-parse HEAD)
+echo 'echo changed' > "$REPO/scripts/server.sh"; G -C "$REPO" commit -qam mcp-target
+git -C "$WT" reset -q --hard "$mcp_base"; echo 'echo changed' > "$WT/scripts/server.sh"
+clean_ok && fail "unchanged MCP config executing a modified server passed"
+run branch_control_files_changed "$REPO" "$mcp_base" nightshift/mcp >/dev/null \
+  || fail "a branch changing only the configured MCP server passed"
+
+# --- 8. a TRACKED, unchanged settings symlink with a changed target is refused at both seams ----
+G -C "$REPO" checkout -q -b nightshift/symlink main
+echo '{}' > "$REPO/config.json"
+rm "$REPO/.claude/settings.json"; ln -s ../config.json "$REPO/.claude/settings.json"
+G -C "$REPO" add -A; G -C "$REPO" commit -qm symlink-base
+link_base=$(git -C "$REPO" rev-parse HEAD)
+echo '{"hooks":{"SessionStart":[]}}' > "$REPO/config.json"; G -C "$REPO" commit -qam symlink-target
+git -C "$WT" reset -q --hard "$link_base"
+echo '{"hooks":{"SessionStart":[]}}' > "$WT/config.json"
+clean_ok && fail "an unchanged settings symlink with a modified target passed"
+run branch_control_files_changed "$REPO" "$link_base" nightshift/symlink >/dev/null \
+  || fail "a branch changing only the settings symlink target passed"
+run claude_run review "$WT" "$TMP/item" >/dev/null && fail "symlink reached Claude"
+[ ! -e "$CLI_MARKER" ] || fail "a symlink reached the CLI"
+
+# --- 9. malformed, non-object, unreadable-as-JSON and executable alternative configs fail closed --
+git -C "$WT" reset -q --hard main
+for config in '{' '[]' '{"statusLine":{"type":"command","command":"bash start.sh"}}' \
+  '{"fileSuggestion":{"type":"command","command":"bash start.sh"}}' \
+  '{"enabledPlugins":{"local@repo":true}}' '{"extraKnownMarketplaces":{"local":{}}}' \
+  '{"env":{"BASH_ENV":"scripts/start.sh"}}' '{"apiKeyHelper":"bash scripts/start.sh"}' \
+  '{"futureExecutableSetting":"scripts/start.sh"}'; do
+  printf '%s\n' "$config" > "$WT/.claude/settings.json"
+  python3 "$ROOT/lib/check_claude_controls.py" worktree "$WT" >/dev/null \
+    && fail "unsafe config was allowed: $config"
+done
+rm "$WT/.claude/settings.json"; mkfifo "$WT/.claude/settings.json"
+python3 "$ROOT/lib/check_claude_controls.py" worktree "$WT" >/dev/null \
+  && fail "a FIFO control path passed"
+rm "$WT/.claude/settings.json"; reset_wt
+echo '{"model":"default","hooks":{},"mcpServers":{}}' > "$WT/.claude/settings.json"
+python3 "$ROOT/lib/check_claude_controls.py" worktree "$WT" >/dev/null \
+  || fail "ordinary settings without executable config were refused"
+reset_wt
+run claude_run recon "$WT" "$TMP/item" >/dev/null || fail "safe Claude stage was refused"
+[ -e "$CLI_MARKER" ] || fail "safe Claude stage never reached the stub CLI"
+python3 "$ROOT/lib/check_claude_controls.py" tree "$REPO" missing-ref >/dev/null \
+  && fail "a failed Git inspection passed"
+
 echo "test-claude-control-files: OK"

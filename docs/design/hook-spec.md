@@ -77,6 +77,19 @@ refused as `worktree-tampered` before Review runs. `advise_branches` asks the sa
 against its merge base (`branch_control_files_changed`) and rejects such a branch without checking it
 out for any advisor.
 
+A pathname diff alone cannot cover unchanged settings that execute a changed script, or unchanged
+symlinks whose targets changed. `lib/check_claude_controls.py` therefore also inspects the candidate
+configuration, both after Fix and in the committed tree before an advisor worktree is created.
+Only string-valued `model` and `$schema` preferences and empty `hooks`/`mcpServers` objects are
+allowed; all other settings are refused. This also blocks plugin, environment and command settings
+without depending on a complete list of executable configuration keys. Symlinks at
+`.claude` or any of the three control files, other non-regular paths, malformed or unreadable JSON,
+and failed Git inspections are refused too. Ordinary settings such as an unchanged model preference
+remain allowed. The same check runs before **every** Claude CLI launch, including Review and Advice,
+so even a branch or repository predating these checks cannot start candidate-owned hooks or MCP
+servers through Claude. The Runner-owned `--settings` guard is still loaded. Repositories that need
+these executable project settings require operator handling outside this pipeline.
+
 **The denial itself is built with `jq`,** not string-interpolated: its reason quotes the resolved
 target, i.e. an agent-supplied path, and a quote/backslash/control character in that path would
 otherwise emit malformed JSON from the very call that is supposed to block the write. If `jq` is

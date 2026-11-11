@@ -65,6 +65,7 @@ These are implemented and active today. Each is enforced by mechanism, not by pr
 | C7 | **Report-only for sensitive repos** | `findings-only` mode reports without ever pushing (e.g. llmstack). | `rulebook.yaml` |
 | C8 | **Change-size pressure** | Soft file/line budgets injected into explore/fix prompts (15 files / 400 lines) to keep changes reviewable. | [nightshift.sh:205-207](../../bin/nightshift.sh) |
 | C9 | **Ship-gate sandbox** | The one component that deliberately *executes* candidate content runs under `bwrap` — the gate, and since ADR 0037 the repo's `setup_cmd` before each Fix stage: no `$HOME`, `/etc` by allowlist, no docker socket, no network unless the repo opts in, allowlisted environment, writable only the worktree + a throwaway HOME, rlimits. No sandbox ⇒ no ship. | `build_test_sandbox`/`run_test_gate` in [nightshift.sh](../../bin/nightshift.sh), ADR 0026 |
+| C10 | **Claude startup configuration** | Every Claude launch refuses candidate hooks, MCP servers, executable/unknown settings and symlink control paths before the CLI loads them. Post-Fix and branch checks apply the same rule and refuse control-file edits for every adapter, including ignored local settings. Unchanged configuration cannot execute a changed script. | [hook-spec.md](hook-spec.md), [check_claude_controls.py](../../lib/check_claude_controls.py) |
 
 **Consequence — and its limit.** The *destructive-git* class is structurally blocked: no merge, no
 push outside `nightshift/*`, no direct repo access. But "no `Bash`" was **over-read** in the first
