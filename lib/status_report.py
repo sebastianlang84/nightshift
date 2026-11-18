@@ -62,15 +62,30 @@ def rulebook():
     return prefix, repos
 
 
-def base_ref(repo, base):
-    if base:
-        return 'origin/' + base
-    rc, out = git(repo, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD')
-    return out.strip() if rc == 0 and out.strip() else 'origin/main'
+ORIGIN_REFS = 'refs/remotes/origin/'
+
+
+def inventory_base(repo, prefix, base, no_fetch):
+    library = str(Path(__file__).with_name('base_resolution.sh'))
+    if no_fetch:
+        # A cached origin/HEAD can point to an old default even after a successful live report.
+        if not base or git(repo, 'rev-parse', '--is-shallow-repository') != (0, 'false\n'):
+            return None
+        function, args = 'cached_configured_base_ref', [repo, base]
+    else:
+        function, args = 'branch_inventory_base', [repo, prefix, base]
+    result = subprocess.run(
+        ['bash', '-c', 'source "$1"; shift; "$@"', 'status', library, function, *args],
+        capture_output=True, text=True,
+    )
+    ref = result.stdout.strip()
+    if result.returncode or not ref or git(repo, 'show-ref', '--verify', '--quiet', ref)[0]:
+        return None
+    return ref
 
 
 def contains(repo, base, sha):
-    return bool(sha) and git(repo, 'merge-base', '--is-ancestor', sha, base)[0] == 0
+    return bool(base and sha) and git(repo, 'merge-base', '--is-ancestor', sha, base)[0] == 0
 
 
 def ledger():
@@ -142,7 +157,7 @@ def finding_states(rows):
     return states
 
 
-def item_state(row, verdicts, job, bases):
+def item_state(row, verdicts, job, bases, no_fetch):
     """(plain state, settled?) of one ledger item other than a finding, most authoritative first."""
     repo, branch, outcome, sha = row['repo'], row.get('branch'), row['outcome'], row.get('sha')
     v = verdicts.get(row.get('item')) or verdicts.get((repo, branch, sha))
@@ -152,7 +167,7 @@ def item_state(row, verdicts, job, bases):
         return 'not shipped: abandoned', True
     base = bases.get(repo)
     j = job.get('%s\t%s' % (repo, branch)) or {}
-    head = tip(repo, branch)
+    head = tip(repo, branch) if base else None
     # The job's `merged` covers only the revision it judged: the item's own or the branch's current.
     job_merged = j.get('result') == 'merged' and j.get('sha') in (sha, head or None)
     if v == 'merged' or job_merged or (base and contains(repo, base, sha)):
@@ -160,18 +175,22 @@ def item_state(row, verdicts, job, bases):
     # Each terminal verdict frees the branch's slot (ADR 0025).
     if v in TERMINAL_VERDICTS:
         return SETTLED_LABEL[v], True
+    if not base:
+        return 'unknown: origin branches or base history unavailable', False
     if j and j.get('sha') in (head or sha,):
         s = JOB_RESULT.get(j.get('result'), 'reviewed: ' + str(j.get('result')))
         label = os.environ.get('NIGHTSHIFT_MERGE_ISSUE_LABEL', 'issue')
         return s + (' (%s #%s)' % (label, j['kb']) if j.get('kb') else ''), False
     if not head:
+        if no_fetch:
+            return 'unknown: branch missing from local refs', False
         return 'branch gone, not merged', False
     if j:
         return 'changed since its review, not yet reviewed again', False
     return 'open, not yet reviewed', False
 
 
-def overview(rows, job, bases, since):
+def overview(rows, job, bases, since, no_fetch):
     verdicts = {}
     for r in rows:
         if r.get('outcome') == 'verdict':
@@ -187,7 +206,7 @@ def overview(rows, job, bases, since):
         if r['outcome'] == 'finding':
             state, settled = findings.get(n, ('finding open, awaits a decision', False))
         else:
-            state, settled = item_state(r, verdicts, job, bases)
+            state, settled = item_state(r, verdicts, job, bases, no_fetch)
         # Older items stay listed until they are settled: an open item is outstanding work.
         if r.get('night', '') >= since or not settled:
             items.append((r, state))
@@ -211,43 +230,47 @@ SETTLED_LABEL = {v: v for v in TERMINAL_VERDICTS}
 SETTLED_LABEL.update(wontfix='dropped', merged='merged (by patch, not ancestry)')
 
 
-def clutter(prefix, repos, rows, unfetched):
+def clutter(prefix, repos, rows, bases):
     # This view historically ignores empty branch names as well as null ones.
     settled = {key: (r.get('verdict'), r.get('sha'))
                for key, r in latest_branch_verdicts(rows).items() if r.get('branch')}
     found, registered = [], set()
-    for repo, base in repos:
+    for repo, _ in repos:
         name = os.path.basename(repo)
         if git(repo, 'rev-parse', '--git-dir')[0]:
             continue
-        if repo in unfetched:
-            found.append('%s: fetch failed, origin may be stale' % name)
-        b = base_ref(repo, base)
-        _, out = git(repo, 'for-each-ref', '--format=%(refname:short)',
-                     'refs/remotes/origin/' + prefix)
-        for ref in out.split():
-            br = ref[len('origin/'):]
-            if contains(repo, b, ref):
-                found.append('%s: %s on origin is merged but not deleted' % (name, br))
-            # The rest of ADR 0025's terminal set. A `merged` ref that fails the ancestry test above
-            # landed by patch (squash or rebase merge), so its ref outlives the merge.
-            elif (settled.get((repo, br), (None, None))[0] in SETTLED_LABEL
-                  and settled[(repo, br)][1] == tip(repo, br)):
-                found.append('%s: %s on origin was %s; deleting it needs the curator' % (
-                    name, br, SETTLED_LABEL[settled[(repo, br)][0]]))
-        _, out = git(repo, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/')
-        local = [x for x in out.split() if x != b.split('/', 1)[-1]]
-        merged = [x for x in local if contains(repo, b, x)]
-        for x in local:
-            if x.startswith(prefix):
+        base = bases[repo]
+        if not base:
+            found.append('%s: origin branches or base history unknown' % name)
+        else:
+            rc, out = git(repo, 'for-each-ref', '--format=%(refname)', ORIGIN_REFS + prefix)
+            if rc:
+                found.append('%s: could not list origin branches' % name)
+            for ref in out.splitlines():
+                br = ref.removeprefix(ORIGIN_REFS)
+                if contains(repo, base, ref):
+                    found.append('%s: %s on origin is merged but not deleted' % (name, br))
+                # Terminal ledger verdicts can settle refs that survive a squash or rebase merge.
+                elif (settled.get((repo, br), (None, None))[0] in SETTLED_LABEL
+                      and settled[(repo, br)][1] == tip(repo, br)):
+                    found.append('%s: %s on origin was %s; deleting it needs the curator' % (
+                        name, br, SETTLED_LABEL[settled[(repo, br)][0]]))
+        _, out = git(repo, 'for-each-ref', '--format=%(refname)', 'refs/heads/')
+        local = [ref for ref in out.splitlines()
+                 if ref.removeprefix('refs/heads/') != (base or '').removeprefix(ORIGIN_REFS)]
+        merged = [ref for ref in local if contains(repo, base, ref)]
+        for ref in local:
+            br = ref.removeprefix('refs/heads/')
+            if br.startswith(prefix):
                 found.append('%s: local branch %s%s' % (
-                    name, x, ' (merged)' if x in merged else ''))
-        rc, out = git(repo, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD')
-        default = out.strip().split('/', 1)[-1] if rc == 0 else ''
-        other = [x for x in merged if not x.startswith(prefix) and x != default]
+                    name, br, ' (merged)' if ref in merged else ''))
+        rc, out = git(repo, 'symbolic-ref', 'refs/remotes/origin/HEAD')
+        default = out.strip().removeprefix(ORIGIN_REFS) if rc == 0 else ''
+        other = [ref for ref in merged
+                 if not ref.startswith('refs/heads/' + prefix) and ref != 'refs/heads/' + default]
         if other:
             found.append('%s: %d other local branches already merged into %s'
-                         % (name, len(other), b))
+                         % (name, len(other), base.removeprefix('refs/remotes/')))
         _, out = git(repo, 'worktree', 'list', '--porcelain')
         blocks = [blk for blk in out.strip().split('\n\n') if blk]
         registered.update(os.path.realpath(l.split(' ', 1)[1]) for blk in blocks
@@ -261,7 +284,7 @@ def clutter(prefix, repos, rows, unfetched):
             # --ignored: an ignored .env or local data is still something a removal would lose.
             rc, dirt = git(path, 'status', '--porcelain', '--ignored') if not gone else (1, '')
             lines = dirt.splitlines()
-            merged_head = not gone and rc == 0 and contains(repo, b, f.get('HEAD', ''))
+            merged_head = not gone and rc == 0 and contains(repo, base, f.get('HEAD', ''))
             if gone:
                 why = 'is missing on disk (prunable)'
             elif merged_head and not lines:
@@ -303,12 +326,10 @@ def main():
         job = json.loads(MERGE_STATE.read_text())
     except (OSError, json.JSONDecodeError):
         job = {}
-    unfetched = set() if a.no_fetch else {
-        repo for repo, _ in repos if git(repo, 'fetch', '--prune', '-q', 'origin')[0]}
-    bases = {repo: base_ref(repo, base) for repo, base in repos}
+    bases = {repo: inventory_base(repo, prefix, base, a.no_fetch) for repo, base in repos}
     since = (dt.date.today() - dt.timedelta(days=a.days)).isoformat()
-    overview(rows, job, bases, since)
-    clutter(prefix, repos, rows, unfetched)
+    overview(rows, job, bases, since, a.no_fetch)
+    clutter(prefix, repos, rows, bases)
 
 
 if __name__ == '__main__':

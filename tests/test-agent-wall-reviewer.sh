@@ -36,7 +36,7 @@ JSONL
         > "$id/.usage_$stage"
       return 1 ;;
     billed)   # a real answer that failed to parse: the model was reached
-      printf '%s\n' '{"model_id":"gpt-6.1-sol","output_tokens":40,"input_tokens":900,"cache_read_tokens":0}' \
+      printf '%s\n' '{"model_id":"gpt-6.2-sol","output_tokens":40,"input_tokens":900,"cache_read_tokens":0}' \
         > "$id/.usage_$stage"
       return 1 ;;
     refused)  # status 2: the adapter refused to run — a configuration verdict, not a wall

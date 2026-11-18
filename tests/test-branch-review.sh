@@ -13,17 +13,18 @@ trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/state" "$TMP/runs" "$TMP/digests" "$TMP/worktrees"
 
 git init -q --bare "$TMP/remote.git"
-git init -q -b main "$TMP/repo"
-git -C "$TMP/repo" remote add origin "$TMP/remote.git"
-printf '# Demo\n\nThis is teh demo.\n' > "$TMP/repo/README.md"
-git -C "$TMP/repo" -c user.name=test -c user.email=test@localhost add -A
-git -C "$TMP/repo" -c user.name=test -c user.email=test@localhost commit -q -m initial
-git -C "$TMP/repo" push -q -u origin main
+git init -q -b main "$TMP/seed"
+git -C "$TMP/seed" remote add origin "$TMP/remote.git"
+printf '# Demo\n\nThis is teh demo.\n' > "$TMP/seed/README.md"
+git -C "$TMP/seed" -c user.name=test -c user.email=test@localhost add -A
+git -C "$TMP/seed" -c user.name=test -c user.email=test@localhost commit -q -m initial
+git -C "$TMP/seed" push -q origin main
+git clone -q --single-branch --branch main "$TMP/remote.git" "$TMP/repo"
 
 cat > "$TMP/rulebook.yaml" <<EOF
 branch_prefix: nightshift/
 limits:
-  max_open_branches: 5
+  max_open_branches: 1
 recon:
   enabled: false
 dimensions:
@@ -55,6 +56,9 @@ fail() { echo "$1" >&2; [ -z "${2:-}" ] || cat "$2" >&2; exit 1; }
 
 # Run 2: the legacy single-advisor opt-in still works. It advises the open branch, into the digest.
 run 2 NIGHTSHIFT_BRANCH_REVIEW=1 NIGHTSHIFT_ADVISOR_AGENT=mock
+grep -qF 'open-branch cap reached (1/1)' "$TMP/err.2" || fail "narrow clone missed backpressure" "$TMP/err.2"
+[ "$(git -C "$TMP/repo" config --get-all remote.origin.fetch)" = '+refs/heads/main:refs/remotes/origin/main' ] \
+  || fail "branch refresh changed the checkout's configured refspec"
 after="$(branch_count)"
 [ "$after" -eq 1 ] || fail "branch review created/pushed a branch (count $after)"
 digest="$(ls -t "$TMP/digests"/*.md | head -1)"

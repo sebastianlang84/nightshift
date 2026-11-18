@@ -37,6 +37,7 @@ write_digest() { # made open status [advice]
     [ -f "$LEDGER" ] && fcount=$(jq -s --arg n "$NIGHT" '[.[]|select(.night==$n and .outcome=="finding")]|length' "$LEDGER" 2>/dev/null || echo 0)
     echo "- agent: \`$RUN_AGENT_ROUTE\` · shipped this run: ${made} · surfaced (findings): ${fcount} · open (awaiting your verdict): ${open}/${MAX_OPEN} (cap)"
     [ "$status" = ceiling ] && echo "- **Stopped: run ceiling reached** (\`max_branches_per_run: ${MAX_RUN_BRANCHES:-?}\`) — no further branch was opened this run; any remaining work waits for the next night."
+    [ "$status" = branch_inventory_unavailable ] && echo "- **Stopped: origin branch inventory unavailable.** The open-branch cap could not be checked."
     [ "$status" = budget ] && echo "- **Stopped: time budget exhausted** (\`${MAX_RUN_SECONDS:-?}s\`) — the night ended on the spend cap, not for lack of work."
     # An aborted night must announce itself in the ONE artifact the operator actually reads in the
     # morning. Without this the digest of a credential outage is indistinguishable from a clean

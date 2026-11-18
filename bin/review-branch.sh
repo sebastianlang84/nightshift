@@ -14,9 +14,8 @@
 # explicitly, previews the real merge, and flags files changed-but-not-described.
 #
 # It changes nothing you own: it never checks out, merges, deletes a branch, or pushes. Its one
-# write is `git fetch --prune origin`, which refreshes the repo's remote-tracking refs (and drops
-# those whose branch origin has deleted) so no verdict rests on a stale ref. It prints the exact
-# commands for you to run once you have judged the packet.
+# write refreshes remote-tracking refs and, for a shallow clone, retrieves the history needed
+# to classify the branches. It prints the exact commands for you to run once you have judged the packet.
 #
 #   review-branch.sh                        # every managed repo, every open nightshift/* branch
 #   review-branch.sh <repo-path>            # one repo, every open branch
@@ -35,7 +34,7 @@ RULEBOOK="${RULEBOOK:-$NIGHTSHIFT_HOME/rulebook.yaml}"
 
 PREFIX="nightshift/"
 declare -a REPO_PATHS=() REPO_BASES=()
-# The same normalization as the Runner and harvest: base_for_repo matches paths as strings, so a
+# The same normalization as the Runner and harvest: the rulebook matches paths as strings, so a
 # trailing slash, a relative path or a symlink would otherwise miss the rulebook's `base:` and
 # review a gitflow branch against main.
 repo_id() { realpath -m -- "$1" 2>/dev/null || printf '%s' "${1%/}"; }
@@ -58,11 +57,11 @@ load_rulebook() {
 # ------------------------------------------------------------------ one branch ----
 review_branch() { # repo base branchref
   local repo="$1" base="$2" ref="$3"
-  local name="${ref#origin/}"            # nightshift/foo-...  (for display + delete cmd; never a merge target)
-  local basebranch="${base#origin/}"
+  local name="${ref#refs/remotes/origin/}"            # nightshift/foo-...  (for display + delete cmd; never a merge target)
+  local basebranch="${base#refs/remotes/origin/}"
 
   printf '\n=== %s : %s ===\n' "$(basename "$repo")" "$name"
-  printf 'base: %s\n' "$base"
+  printf 'base: %s\n' "${base#refs/remotes/}"
 
   # (1) the branch's OWN commits — never affected by base drift
   local commits
@@ -73,7 +72,7 @@ review_branch() { # repo base branchref
     return 0
   fi
   if [ -z "$commits" ]; then
-    printf 'commits on branch: (none) — already contained in %s\n' "$base"
+    printf 'commits on branch: (none) — already contained in %s\n' "${base#refs/remotes/}"
     printf 'VERDICT: ALREADY MERGED — safe to delete.\n'
     printf 'next: git -C %q push origin --delete %q\n' "$repo" "$name"
     return 0
@@ -187,46 +186,37 @@ review_branch() { # repo base branchref
 
 # ------------------------------------------------------------------- one repo ----
 review_repo() { # repo [branchref]
-  local repo="$1" only="${2:-}"
-  [ -d "$repo/.git" ] || { printf '\n=== %s ===\n(skip: not a git repo)\n' "$repo"; return 0; }
-  # --prune: don't review branches already deleted on origin. A failed fetch leaves stale refs, and a
-  # stale ref can read as "already merged" while origin holds newer commits on that branch.
-  if ! git -C "$repo" fetch --prune -q origin 2>/dev/null; then
-    printf '\n=== %s ===\nVERDICT: UNKNOWN — fetch from origin failed; refusing to judge stale refs\n' \
+  local repo="$1" only="${2:-}" base cfg listing ref
+  [ -e "$repo/.git" ] || { printf '\n=== %s ===\n(skip: not a git repo)\n' "$repo"; return 0; }
+  only="${only#origin/}"
+  cfg=$(configured_base_for_repo "$repo") || cfg=""
+  if ! base=$(branch_inventory_base "$repo" "$PREFIX" "$cfg" "$only" 2>/dev/null); then
+    printf '\n=== %s ===\nVERDICT: UNKNOWN — could not refresh origin branches and base history\n' \
       "$(basename "$repo")"
     REVIEW_RC=1
     return 0
   fi
-  local base; base="$(base_for_repo "$repo")"
 
   if [ -n "$only" ]; then
-    local ref="$only"; [[ "$ref" == origin/* ]] || ref="origin/$ref"
-    git -C "$repo" rev-parse -q --verify "$ref" >/dev/null 2>&1 \
+    ref="refs/remotes/origin/$only"
+    git -C "$repo" show-ref --verify --quiet "$ref" \
       || { printf '\n=== %s ===\n(branch not found on origin: %s)\n' "$(basename "$repo")" "$only"; return 1; }
     review_branch "$repo" "$base" "$ref"
     return 0
   fi
 
-  # all OPEN (unmerged vs base) nightshift/* branches on origin
-  local listing branches
-  if ! listing=$(git -C "$repo" branch -r --no-merged "$base" 2>/dev/null); then
-    # A failed listing is not an empty one: "no open branches" would hide every branch it missed.
+  if ! listing=$(managed_open_refs "$repo" "$base" "$PREFIX" 2>/dev/null); then
     printf '\n=== %s ===\nVERDICT: UNKNOWN — could not list open %s* branches (base %s)\n' \
-      "$(basename "$repo")" "$PREFIX" "$base"
+      "$(basename "$repo")" "$PREFIX" "${base#refs/remotes/}"
     REVIEW_RC=1
     return 0
   fi
-  branches=$(printf '%s\n' "$listing" | tr -d ' ' | while IFS= read -r branch; do
-    case "$branch" in
-      "origin/${PREFIX}"*) printf '%s\n' "$branch" ;;
-    esac
-  done)
-  if [ -z "$branches" ]; then
-    printf '\n=== %s ===\nno open %s* branches (base %s)\n' "$(basename "$repo")" "$PREFIX" "$base"
+  if [ -z "$listing" ]; then
+    printf '\n=== %s ===\nno open %s* branches (base %s)\n' "$(basename "$repo")" "$PREFIX" "${base#refs/remotes/}"
     return 0
   fi
   local b
-  while IFS= read -r b; do review_branch "$repo" "$base" "$b"; done <<<"$branches"
+  while IFS= read -r b; do review_branch "$repo" "$base" "$b"; done <<<"$listing"
 }
 
 # ---------------------------------------------------------------------- main ----

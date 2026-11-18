@@ -46,8 +46,8 @@ if [ -n "\${FAIL_FETCH:-}" ] && [[ "\$args" == *" fetch "* ]]; then exit 128; fi
 if [ -n "\${FAIL_NAMES:-}" ] && [[ "\$args" == *" diff --name-only "* ]]; then exit 128; fi
 if [ -n "\${FAIL_STAT:-}" ] && [[ "\$args" == *" diff --stat "* ]]; then exit 128; fi
 if [ -n "\${FAIL_MERGETREE:-}" ] && [[ "\$args" == *" merge-tree "* ]]; then exit 128; fi
-if [ -n "\${FAIL_FULLDIFF:-}" ] && [[ "\$args" == *" diff origin/"* ]]; then exit 128; fi
-if [ -n "\${FAIL_LISTING:-}" ] && [[ "\$args" == *" branch -r --no-merged "* ]]; then exit 128; fi
+if [ -n "\${FAIL_FULLDIFF:-}" ] && [[ "\$args" == *" diff refs/remotes/origin/"* ]]; then exit 128; fi
+if [ -n "\${FAIL_LISTING:-}" ] && [[ "\$args" == *" for-each-ref --no-merged "* ]]; then exit 128; fi
 exec "$REAL_GIT" "\$@"
 SHIM
 chmod +x "$TMP/shim/git"
@@ -75,7 +75,7 @@ section ok alpha | grep -q '^merge preview: CLEAN' || fail "a clean merge was no
 
 # The history query for the FIRST branch fails: UNKNOWN for it, no delete instruction, the second
 # branch still gets its review, exit 1.
-review log FAIL_LOG_REF=origin/nightshift/alpha
+review log FAIL_LOG_REF=refs/remotes/origin/nightshift/alpha
 section log alpha | grep -q 'VERDICT: UNKNOWN' || fail "failed history query gave no UNKNOWN verdict" log
 ! section log beta | grep -q UNKNOWN || fail "the unaffected branch was judged UNKNOWN" log
 ! grep -q 'safe to delete' "$TMP/out.log" || fail "failed history query produced a delete instruction" log
@@ -114,7 +114,7 @@ grep -q 'VERDICT: UNKNOWN — could not list' "$TMP/out.list" || fail "failed li
 # The fetch fails: the refs may be stale, so no verdict at all — not even for the one branch asked
 # about — and exit 1.
 review fetch FAIL_FETCH=1
-grep -q 'VERDICT: UNKNOWN — fetch from origin failed' "$TMP/out.fetch" || fail "failed fetch gave no UNKNOWN verdict" fetch
+grep -q 'VERDICT: UNKNOWN — could not refresh' "$TMP/out.fetch" || fail "failed fetch gave no UNKNOWN verdict" fetch
 ! grep -q '=== repo : nightshift/' "$TMP/out.fetch" || fail "failed fetch still reviewed branches from stale refs" fetch
 [ "$(cat "$TMP/rc.fetch")" -eq 1 ] || fail "failed fetch did not reach the exit status" fetch
 

@@ -77,6 +77,7 @@ export NIGHTSHIFT_STATE_DIR="$TMP/state" NIGHTSHIFT_RUNS_DIR="$TMP/runs" \
 # shellcheck disable=SC1090
 source "$ROOT/bin/nightshift.sh"
 load_rulebook
+refresh_open_branch_refs
 
 # Sanity: without the verdicts the naive count really is 4 — otherwise this test proves nothing.
 SETTLED_BRANCHES=""

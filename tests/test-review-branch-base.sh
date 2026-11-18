@@ -61,19 +61,16 @@ review link  "$TMP/link";        check link  "symlinked path"
 rulebook "$TMP/repo/"
 review rbslash "$TMP/repo";      check rbslash "rulebook path with trailing slash"
 
-# A main-base branch: the printed merge recipe must work in a repo that holds only the remote-tracking
-# ref. The Runner deletes its local nightshift/* branch after pushing, so a recipe that merged the bare
-# `nightshift/<name>` failed with "not something we can merge" — after `checkout main` had already run,
-# and before the push and the branch deletion, which nothing else ever does.
-m() { git -C "$TMP/mrepo" -c user.name=test -c user.email=test@localhost "$@"; }
+# A main-only clone must discover the branch on origin and print a merge recipe that works
+# with only the fetched remote-tracking ref.
+m() { git -C "$TMP/mseed" -c user.name=test -c user.email=test@localhost "$@"; }
 git init -q --bare "$TMP/mremote.git"
-git init -q -b main "$TMP/mrepo"
+git init -q -b main "$TMP/mseed"
 m remote add origin "$TMP/mremote.git"
-printf 'base\n' > "$TMP/mrepo/README.md"; m add -A; m commit -q -m initial; m push -q -u origin main
+printf 'base\n' > "$TMP/mseed/README.md"; m add -A; m commit -q -m initial; m push -q origin main
 m checkout -q -b nightshift/y main
-printf 'y\n' > "$TMP/mrepo/y.txt"; m add -A; m commit -q -m "fix: y.txt"; m push -q origin nightshift/y
-m checkout -q main
-m branch -q -D nightshift/y   # what the Runner does after pushing
+printf 'y\n' > "$TMP/mseed/y.txt"; m add -A; m commit -q -m "fix: y.txt"; m push -q origin nightshift/y
+git clone -q --single-branch --branch main "$TMP/mremote.git" "$TMP/mrepo"
 cat > "$TMP/rulebook.yaml" <<YAML
 branch_prefix: nightshift/
 repos:

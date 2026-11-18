@@ -61,7 +61,8 @@ ledgers diverge silently: duplicate branches, broken caps and rotation). See
    every section takes a closed set of keys, so a typo (`max_open_branchs:`, `test-cmd:`) fails the
    parse by name instead of dropping that knob and running the night on the default you never wrote.
    `repos:` must contain at least one entry with an absolute, non-empty `path`; an empty fleet aborts
-   instead of producing a false-clean no-op night.
+   instead of producing a false-clean no-op night. List each checkout once. The runner aborts during
+   rulebook loading if two paths refer to the same checkout, including through a symlink or bind mount.
 
    **Every `branch-fix` repo needs a `test_cmd`, and the parse aborts without one**
    ([ADR 0022](adr/0022-a-repos-own-tests-gate-the-ship.md),
@@ -113,7 +114,7 @@ e.g. a smaller/cheaper model for one night.
 ```yaml
 agent:
   claude_model: claude-opus-5-5
-  codex_model: gpt-6.1-sol
+  codex_model: gpt-6.2-sol
   codex_effort: high
 ```
 
@@ -145,7 +146,7 @@ rest of the night stays on Codex. The failed attempts and the retry are separate
 and the failed attempt's raw output is kept in the item directory as `.raw_<stage>.claude-wall`.
 Credentials and ordinary stage failures do not trigger the fallback. A routed reviewer has no
 fallback: when it cannot reach its model twice in a row, the night aborts. Configure its model and effort
-through the normal Codex settings, for example `agent.codex_model: gpt-6.1-sol` plus
+through the normal Codex settings, for example `agent.codex_model: gpt-6.2-sol` plus
 `agent.codex_effort: medium` (or `NIGHTSHIFT_CODEX_REASONING_EFFORT=medium` for a one-off run).
 
 A provider sometimes accepts a turn, bills it, and returns an empty answer. That is not a verdict
@@ -401,6 +402,12 @@ destinations. See the [hook specification](design/hook-spec.md) and [risk analys
   delete. Deleting/merging frees the open-branch cap so the next night resumes. The `next: merge`
   command deletes the branch as its last step: nothing else does, and a merged-but-undeleted
   `nightshift/*` ref lingers on origin indefinitely.
+  These checks refresh the managed branch namespace and configured base even in a single-branch
+  checkout. They fetch full history in shallow clones before classifying branches. If the refresh
+  fails or history remains shallow, review and status report an unknown state and the runner
+  stops at the cap check.
+  With `bin/status.sh --no-fetch`, ancestry checks require a configured base and complete local
+  history. A managed branch missing from the local tracking refs is reported as unknown.
 - **Record verdicts** the machine can't derive with `bin/harvest.sh verdict <selector> <verdict>`;
   harvest also reconciles merged/dropped branches automatically each run.
 - **Clear open findings** — the work items nightshift reported but did not fix. A finding has **no

@@ -201,7 +201,7 @@ sweep_orphans() {
                        | [.repo,.branch]|join("\u001f")' "$LEDGER" 2>/dev/null || true)
   for i in "${!REPO_PATHS[@]}"; do
     repo="${REPO_PATHS[$i]}"
-    [ "${FETCHED[$repo]:-}" = fail ] && continue   # unreachable — don't guess (fail closed)
+    [ "${RECONCILE_BASE[$repo]-unfetched}" = "" ] && continue   # unreachable — don't guess (fail closed)
     [ -d "$repo/.git" ] || continue
     while read -r sha ref; do
       [ -n "$ref" ] || continue
@@ -454,7 +454,7 @@ case "${1:-}" in
 esac
 
 # prefetch each repo once
-declare -A FETCHED=()
+declare -A RECONCILE_BASE=()
 
 # Precompute the latest verdict+source per repo+branch in ONE ledger pass. last_verdict_meta
 # slurps the whole append-only ledger on every call; calling it once per shipped branch in
@@ -481,27 +481,21 @@ changed=0
 # non-whitespace separator is never collapsed, so empty fields keep their position.
 while IFS=$'\x1f' read -r item repo fp branch sha pr_url; do
   [ -z "$branch" ] && continue
-  # Prefetch once per repo, recording reachability. A missing repo path or a failed fetch means
-  # we cannot see git reality — skip every branch in that repo (fail closed) rather than
-  # reconcile against a stale/absent view and stamp false 'dropped's fleet-wide.
-  if [ -z "${FETCHED[$repo]:-}" ]; then
-    if [ -d "$repo/.git" ] && git -C "$repo" fetch --prune -q origin 2>/dev/null; then
-      FETCHED[$repo]=ok
-    else
-      FETCHED[$repo]=fail
-    fi
-  fi
-  if [ "${FETCHED[$repo]}" = fail ]; then
-    printf '%-28s %-46s %-8s -> %-8s %s\n' "$(basename "$repo")" "$branch" "—" "skip" "(repo unreachable — fail closed)"
-    continue
-  fi
   verdict_key="$(repo_id "$repo")"$'\x1f'"$branch"
   IFS=$'\t' read -r was was_src <<< "${LAST_VERDICT[$verdict_key]:-}" || true
-  # Fail closed on a repo the rulebook no longer lists: its base is unknown, and deriving a
-  # verdict against a guessed one rewrites settled history (see base_for_repo_strict).
-  if ! base=$(base_for_repo_strict "$repo"); then
+  # Refresh once per listed repo. A guessed or stale base can write a terminal verdict that
+  # also removes a still-open branch from the runner's cap.
+  if [ -z "${RECONCILE_BASE[$repo]+set}" ]; then
+    base=""
+    if cfg=$(configured_base_for_repo "$(repo_id "$repo")") && [ -e "$repo/.git" ]; then
+      base=$(branch_inventory_base "$repo" "$BRANCH_PREFIX" "$cfg" 2>/dev/null) || base=""
+    fi
+    RECONCILE_BASE[$repo]="$base"
+  fi
+  base="${RECONCILE_BASE[$repo]}"
+  if [ -z "$base" ]; then
     printf '%-28s %-46s %-8s -> %-8s %s\n' "$(basename "$repo")" "$branch" \
-      "${was:-—}" "skip" "(repo not in rulebook — base unknown)"
+      "${was:-—}" "skip" "(origin branches or base unknown — fail closed)"
     continue
   fi
   now=$(reconcile "$repo" "$base" "$branch" "$sha" "$pr_url")

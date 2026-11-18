@@ -144,7 +144,8 @@ log_model_selection() { # adapter env_var_name rulebook_value
 repo_id() { realpath -m -- "$1" 2>/dev/null || printf '%s' "${1%/}"; }
 
 load_rulebook() {
-  local tag a b c d e f g h i rb_run_branches="" parsed path
+  local tag a b c d e f g h i rb_run_branches="" parsed path raw_path checkout_id
+  local -A seen_paths=() seen_checkouts=()
   # Capture the parser's output AND its exit status. Reading it directly via
   # `done < <(python3 …)` hides a nonzero exit from `set -euo pipefail`, so a
   # mid-stream parse error (e.g. a bad `findings:` on repo #2) silently truncated
@@ -180,7 +181,29 @@ load_rulebook() {
       primary_agent)         RB_PRIMARY_AGENT="$a" ;;
       pi_allow_fix)          RB_PI_ALLOW_FIX="$a" ;;
       dimension)             DIMENSIONS+=("$a") ;;
-      repo)                  path="$(repo_id "${a#path=}")"; REPO_PATHS+=("$path"); REPO_MODES+=("${b#mode=}"); REPO_BASES+=("${c#base=}"); REPO_FINDINGS+=("${d#findings=}"); REPO_DIMS+=("${e#dimensions=}"); REPO_TEST_NETS+=("${f#test_net=}"); REPO_TEST_ROBINDS+=("${g#test_robind=}"); REPO_SETUP_CMDS+=("${h#setup_cmd=}"); REPO_TEST_CMDS+=("${i#test_cmd=}") ;;
+      repo)
+        raw_path="${a#path=}"
+        path="$(repo_id "$raw_path")"
+        # Selection reads individual rows, while ship-gate settings are looked up by canonical path.
+        if [ -n "${seen_paths[$path]+set}" ]; then
+          log "rulebook ($RULEBOOK): duplicate repo path '$raw_path' and '${seen_paths[$path]}' resolve to '$path' — keep one entry per checkout; aborting run"
+          exit 1
+        fi
+        seen_paths[$path]="$raw_path"
+        # Bind mounts can expose the same directory under distinct canonical paths.
+        if [ -d "$path" ]; then
+          checkout_id="$(stat -Lc '%d:%i' -- "$path")" \
+            || { log "rulebook ($RULEBOOK): cannot identify checkout '$raw_path' — aborting run"; exit 1; }
+          if [ -n "${seen_checkouts[$checkout_id]+set}" ]; then
+            log "rulebook ($RULEBOOK): duplicate repo path '$raw_path' and '${seen_checkouts[$checkout_id]}' identify the same checkout — keep one entry per checkout; aborting run"
+            exit 1
+          fi
+          seen_checkouts[$checkout_id]="$raw_path"
+        fi
+        REPO_PATHS+=("$path"); REPO_MODES+=("${b#mode=}"); REPO_BASES+=("${c#base=}")
+        REPO_FINDINGS+=("${d#findings=}"); REPO_DIMS+=("${e#dimensions=}")
+        REPO_TEST_NETS+=("${f#test_net=}"); REPO_TEST_ROBINDS+=("${g#test_robind=}")
+        REPO_SETUP_CMDS+=("${h#setup_cmd=}"); REPO_TEST_CMDS+=("${i#test_cmd=}") ;;
     esac
   done <<< "$parsed"
   MAX_FINDINGS="${MAX_FINDINGS:-1}"
@@ -1355,7 +1378,8 @@ ensure_recon() { # repo -> refresh cache if missing / configured base changed / 
   [ "${RECON_ENABLED:-true}" != false ] || return 0
   local repo="$1" cache head chead cts cepoch now ttl win cfailed id wt base tmp
   cache="$(recon_cache_path "$repo")"; mkdir -p "$RECON_DIR"
-  base="$(resolve_base "$repo" "$(repo_cfg_base "$repo")")"
+  base="${BRANCH_BASES[$repo]:-}"
+  [ -n "$base" ] || base="$(resolve_base "$repo" "$(repo_cfg_base "$repo")")"
   head=$(git -C "$repo" rev-parse "$base" 2>/dev/null || echo "")
   if [ -f "$cache" ]; then
     chead=$(jq -r '.head // ""' "$cache" 2>/dev/null || echo "")
@@ -1412,17 +1436,6 @@ ensure_recon() { # repo -> refresh cache if missing / configured base changed / 
   fi
 }
 
-refresh_open_branch_refs() { # reconcile remote-tracking refs once per pass, not once per cap check
-  local i path
-  for i in "${!REPO_PATHS[@]}"; do
-    path="${REPO_PATHS[$i]}"
-    [ -d "$path/.git" ] || continue
-    # --prune: without it, a branch deleted on origin lingers as a stale remote-tracking ref and
-    # `--no-merged` keeps counting it, inflating backpressure and blocking runs on phantom slots.
-    git -C "$path" fetch --prune -q origin 2>/dev/null || true
-  done
-}
-
 SETTLED_BRANCHES=""   # newline-separated "<repo>\t<branch>" the ledger has already settled
 
 refresh_settled_branches() { # cache the branches whose latest ledger verdict is terminal
@@ -1455,18 +1468,40 @@ branch_is_settled() { # repo branch -> 0 when the ledger's latest verdict for it
   printf '%s\n' "$SETTLED_BRANCHES" | grep -xF -- "$1	$2" >/dev/null
 }
 
-open_branch_count() { # count nightshift/* still awaiting the operator's decision (§3e)
-  local total=0 i path base b
+declare -A BRANCH_BASES=()
+
+refresh_open_branch_refs() { # one fresh base and branch inventory per repo and pass
+  local i path base
+  BRANCH_BASES=()
   for i in "${!REPO_PATHS[@]}"; do
     path="${REPO_PATHS[$i]}"
-    [ -d "$path/.git" ] || continue
-    base="$(resolve_base "$path" "${REPO_BASES[$i]:-}")"
-    while read -r b; do
-      b="${b#origin/}"
-      case "$b" in "${BRANCH_PREFIX}"*) ;; *) continue ;; esac
-      branch_is_settled "$path" "$b" && continue
+    [ -e "$path/.git" ] || continue
+    # A local-only findings repo has no origin on which to hold a branch.
+    if [ "${REPO_MODES[$i]}" = findings-only ] &&
+       ! git -C "$path" remote get-url origin >/dev/null 2>&1; then
+      continue
+    fi
+    if ! base=$(branch_inventory_base "$path" "$BRANCH_PREFIX" "${REPO_BASES[$i]:-}"); then
+      log "  $(basename "$path"): UNKNOWN — could not refresh branches on origin"
+      return 1
+    fi
+    BRANCH_BASES[$path]="$base"
+  done
+}
+
+open_branch_count() { # count decisions still pending in the refreshed inventory
+  local total=0 path base refs ref
+  for path in "${!BRANCH_BASES[@]}"; do
+    base="${BRANCH_BASES[$path]}"
+    if ! refs=$(managed_open_refs "$path" "$base" "$BRANCH_PREFIX"); then
+      log "  $(basename "$path"): UNKNOWN — could not classify branches on origin"
+      return 1
+    fi
+    while IFS= read -r ref; do
+      [ -n "$ref" ] || continue
+      branch_is_settled "$path" "${ref#refs/remotes/origin/}" && continue
       total=$((total + 1))
-    done < <(git -C "$path" branch -r --no-merged "$base" --format='%(refname:short)' 2>/dev/null)
+    done <<< "$refs"
   done
   echo "$total"
 }
@@ -1502,7 +1537,7 @@ open_pr() { # repo wt branch item_dir base -> echoes PR url ("" if none)
   # one-line fix showed develop's whole divergence as its diff. Fall back to auto-
   # detect only if the caller passed nothing.
   [ -n "$base" ] || base="$(base_ref "$repo")"
-  base="${base#origin/}"; [ "$base" = HEAD ] && base=main
+  base="${base#refs/remotes/}"; base="${base#origin/}"; [ "$base" = HEAD ] && base=main
   # A runtime/behavioral finding the reviewer could not statically prove ships flagged, so the
   # morning human knows this one needs tests before merge and the verified ones do not.
   local mark=""
@@ -1696,7 +1731,10 @@ base_ready_for_fix() { # repo sha item_dir fingerprint -> 0 fix may start; 1 ski
   local repo="$1" sha="$2" id="$3" fp="${4:-}" key tcmd st=0
   key="$repo"$'\t'"$sha"
   tcmd=$(repo_test_cmd "$repo")
-  [ -n "$tcmd" ] || return 0      # ungated findings-only repo: run_test_gate reports it
+  if [ -z "$tcmd" ]; then
+    BASE_PRECHECK_WHY="not attempted: no test_cmd in the rulebook for $repo"
+    return 1
+  fi
   if [ -z "${BASE_PRECHECK[$key]:-}" ]; then
     base_gate_status "$repo" "$sha" "$id" "$tcmd" "base pre-check" "skipping this repo's fixes tonight" || st=$?
     case "$st" in
@@ -1726,10 +1764,8 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 blocked, 3 
   local repo="$1" wt="$2" id="$3" tcmd trc=0 pre_id=""
   tcmd=$(repo_test_cmd "$repo")
   if [ -z "$tcmd" ]; then
-    # Only reachable for a findings-only repo, which never ships — the parser refuses a branch-fix
-    # repo with no test_cmd (ADR 0026). Kept as a guard, not as a shipping path.
-    log "  $(basename "$repo"): no test_cmd in the rulebook — shipping UNGATED"
-    return 0
+    log "  $(basename "$repo"): no test_cmd in the rulebook — NOT shipping"
+    return 2
   fi
   # The suite runs on the TRACKED tree plus what the suite itself builds, never on ignored files a
   # stage left behind (ADR 0037). Dependencies installed before Fix, or by the previous gate, sit in
@@ -2182,19 +2218,14 @@ advise_branches() {
   # advisor again each time its base moves.
   refresh_settled_branches
   for i in "${!REPO_PATHS[@]}"; do
-    path="${REPO_PATHS[$i]}"; [ -d "$path/.git" ] || continue
-    git -C "$path" fetch --prune -q origin 2>/dev/null || true   # --prune: drop stale refs so review skips phantom branches
-    base="$(resolve_base "$path" "${REPO_BASES[$i]:-}")"
-    base_sha="$(git -C "$path" rev-parse --verify -q "$base^{commit}" 2>/dev/null)" || continue
-    branches=$(git -C "$path" branch -r --no-merged "$base" 2>/dev/null | tr -d ' ' | while IFS= read -r branch; do
-      case "$branch" in
-        "origin/${BRANCH_PREFIX}"*) printf '%s\n' "$branch" ;;
-      esac
-    done || true)
+    path="${REPO_PATHS[$i]}"; [ -e "$path/.git" ] || continue
+    base=$(branch_inventory_base "$path" "$BRANCH_PREFIX" "${REPO_BASES[$i]:-}" 2>/dev/null) || continue
+    base_sha=$(git -C "$path" rev-parse --verify -q "$base^{commit}" 2>/dev/null) || continue
+    branches=$(managed_open_refs "$path" "$base" "$BRANCH_PREFIX" 2>/dev/null) || continue
     [ -n "$branches" ] || continue
     while IFS= read -r ref; do
       [ -n "$ref" ] || continue
-      name="${ref#origin/}"
+      name="${ref#refs/remotes/origin/}"
       branch_is_settled "$path" "$name" && continue
       tip="$(git -C "$path" rev-parse --verify -q "$ref^{commit}" 2>/dev/null)" || continue
       stem="$RUNS_DIR/advise-$(date +%s%N)"
@@ -2449,9 +2480,12 @@ main() {
     if [ -n "$AGENT_FATAL" ]; then stop_reason=agent_unavailable; break; fi
     # Reconcile once at the pass boundary. All inner cap checks reuse this total; successful pushes
     # increment it below, eliminating a fleet-wide network fetch for every repo and finding.
-    refresh_open_branch_refs
     refresh_settled_branches
-    open=$(open_branch_count)
+    if ! refresh_open_branch_refs || ! open=$(open_branch_count); then
+      open=unknown
+      stop_reason=branch_inventory_unavailable
+      break
+    fi
     if [ "$open" -ge "$MAX_OPEN" ]; then
       log "open-branch cap reached ($open/$MAX_OPEN) — stop; merge/close some to free slots"
       stop_reason=backpressure; break
@@ -2469,7 +2503,11 @@ main() {
     id="$RUNS_DIR/item-$(date +%s%N)"; mkdir -p "$id"
     echo "$repo" > "$id/repo"
     wt="$WORKTREES_DIR/$(basename "$id")"
-    base="$(resolve_base "$repo" "$cfgbase")"
+    base="${BRANCH_BASES[$repo]:-}"
+    if [ -z "$base" ]; then
+      [ "$mode" = findings-only ] || continue
+      base=$(resolve_base "$repo" "$cfgbase")
+    fi
     if ! setup_worktree "$repo" "$wt" "$base"; then
       log "  $(basename "$repo"): could not create worktree — skip"; continue
     fi
@@ -2817,7 +2855,10 @@ main() {
   base_red_wrap_all
 
   # A zero-length run (for example an already-exhausted time budget) has not reached a pass boundary.
-  if [ -z "$open" ]; then refresh_open_branch_refs; refresh_settled_branches; open=$(open_branch_count); fi
+  if [ -z "$open" ]; then
+    refresh_settled_branches
+    { refresh_open_branch_refs && open=$(open_branch_count); } || open=unknown
+  fi
   local advice; advice="$(advise_branches)"
   write_digest "$made" "$open" "$stop_reason" "$advice"
   # An aborted night exits NON-ZERO. `nightshift-cron.sh` records the rc in the day's log and the
@@ -2828,6 +2869,10 @@ main() {
   if [ -n "$AGENT_FATAL" ]; then
     log "night ABORTED: $AGENT_FATAL — $considered repos considered, nothing recorded."
     return 3
+  fi
+  if [ "$stop_reason" = branch_inventory_unavailable ]; then
+    log "night ABORTED: open branch inventory unavailable — $made shipped this run."
+    return 4
   fi
   log "night done: $made shipped this run, $considered considered, $open now open (cap $MAX_OPEN)."
 }

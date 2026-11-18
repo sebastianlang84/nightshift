@@ -12,7 +12,7 @@ trap 'rc=$?; [ "$rc" -eq 0 ] || cat "$TMP/err" 2>/dev/null || true; rm -rf "$TMP
 mkdir -p "$TMP/state" "$TMP/runs" "$TMP/digests" "$TMP/worktrees" "$TMP/wd" "$TMP/item"
 
 export NIGHTSHIFT_SOURCED=1 NIGHTSHIFT_AGENT=claude NIGHTSHIFT_QUOTA_FALLBACK_AGENT=codex
-export NIGHTSHIFT_CODEX_MODEL=gpt-6.1-sol NIGHTSHIFT_CODEX_REASONING_EFFORT=medium
+export NIGHTSHIFT_CODEX_MODEL=gpt-6.2-sol NIGHTSHIFT_CODEX_REASONING_EFFORT=medium
 export NIGHTSHIFT_STATE_DIR="$TMP/state" NIGHTSHIFT_RUNS_DIR="$TMP/runs"
 export NIGHTSHIFT_DIGEST_DIR="$TMP/digests" NIGHTSHIFT_WORKTREES="$TMP/worktrees"
 source "$ROOT/bin/nightshift.sh"
@@ -37,11 +37,11 @@ codex_run() {
   if [ -n "$CODEX_SLOW_FAIL" ]; then   # fails without counters after longer than the wall bound
     AGENT_WALL_SECONDS=-1; printf 'not json\n' > "$id/$stage.out"; : > "$id/$stage.err"; return 1
   fi
-  [ "$NIGHTSHIFT_CODEX_MODEL" = gpt-6.1-sol ]
+  [ "$NIGHTSHIFT_CODEX_MODEL" = gpt-6.2-sol ]
   [ "$NIGHTSHIFT_CODEX_REASONING_EFFORT" = medium ]
   : > "$id/$stage.err"
-  printf '%s\n' '{"type":"thread.started","model":"gpt-6.1-sol"}' > "$id/.raw_$stage"
-  printf '%s\n' '{"model_id":"gpt-6.1-sol","output_tokens":7,"input_tokens":11,"cache_read_tokens":0}' \
+  printf '%s\n' '{"type":"thread.started","model":"gpt-6.2-sol"}' > "$id/.raw_$stage"
+  printf '%s\n' '{"model_id":"gpt-6.2-sol","output_tokens":7,"input_tokens":11,"cache_read_tokens":0}' \
     > "$id/.usage_$stage"
   return 0
 }
@@ -74,7 +74,7 @@ grep -q 'rate_limit_event' "$TMP/item/.raw_explore.claude-wall" \
 
 jq -se 'length==3
         and .[0].model=="claude" and .[0].exit==1 and .[1].model=="claude" and .[1].exit==1
-        and .[2].model=="codex" and .[2].exit==0 and .[2].model_id=="gpt-6.1-sol"' \
+        and .[2].model=="codex" and .[2].exit==0 and .[2].model_id=="gpt-6.2-sol"' \
   "$TMP/state/runs.jsonl" >/dev/null \
   || { echo "fallback telemetry is incomplete" >&2; cat "$TMP/state/runs.jsonl" >&2; exit 1; }
 

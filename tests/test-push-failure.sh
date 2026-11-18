@@ -33,8 +33,8 @@ repos:
     base: main
 EOF
 
-# Keep the fetched base ref but make the next push fail.
-git -C "$TMP/repo" remote set-url origin "$TMP/missing/remote.git"
+# Make the push fail while origin remains reachable for the inventory.
+git -C "$TMP/repo" remote set-url --push origin "$TMP/missing/remote.git"
 
 RULEBOOK="$TMP/rulebook.yaml" NIGHTSHIFT_AGENT=mock NIGHTSHIFT_OPEN_PR=0 \
 NIGHTSHIFT_STATE_DIR="$TMP/state" NIGHTSHIFT_RUNS_DIR="$TMP/runs" \

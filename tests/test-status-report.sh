@@ -14,13 +14,12 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 g() { git -c user.name=test -c user.email=test@localhost "$@"; }
 
-R="$TMP/repo"
+R="$TMP/seed"
 git init -q --bare "$TMP/repo.git"
 git init -q -b main "$R"
 git -C "$R" remote add origin "$TMP/repo.git"
 echo one > "$R/a.txt"; g -C "$R" add a.txt; g -C "$R" commit -q -m initial
 git -C "$R" push -q -u origin main
-git -C "$R" remote set-head origin main
 
 # nightshift/merged: merged into main, but still on origin.
 g -C "$R" switch -q -c nightshift/merged
@@ -58,6 +57,11 @@ g -C "$R" switch -q main
 g -C "$R" cherry-pick "$squashed_sha" >/dev/null
 git -C "$R" push -q origin main
 git -C "$R" branch -q -D nightshift/squashed
+
+# The managed checkout tracks only main. All nightshift refs have to come from the status fetch.
+R="$TMP/repo"
+git clone -q --single-branch --branch main "$TMP/repo.git" "$R"
+git -C "$R" remote set-head origin main
 
 # A clean worktree whose commit main already contains, one holding only an ignored file (a removal
 # would lose it, so it is not "clean"), and one stash entry.
@@ -106,7 +110,7 @@ EOF
 
 status_report() {
   RULEBOOK="$TMP/rulebook.yaml" NIGHTSHIFT_STATE_DIR="$TMP/state" \
-    NIGHTSHIFT_MERGE_STATE="$TMP/merge.json" NIGHTSHIFT_WORKTREES="$TMP/worktrees" \
+    NIGHTSHIFT_MERGE_STATE="${1:-$TMP/merge.json}" NIGHTSHIFT_WORKTREES="$TMP/worktrees" \
     "$ROOT/bin/status.sh"
 }
 out=$(status_report)
@@ -144,7 +148,15 @@ if grep -q 'nightshift/open on origin' <<<"$out"; then
   echo "an open branch was reported as clutter" >&2; exit 1
 fi
 
+# Without a merge-job record, the live branch must still read as open until it is deleted.
+out=$(status_report "$TMP/no-merge-state.json")
+expect "| fix | Fix two | open, not yet reviewed |"
+git -C "$TMP/seed" push -q origin --delete nightshift/open
+out=$(status_report "$TMP/no-merge-state.json")
+expect "| fix | Fix two | branch gone, not merged |"
+
 # A gitflow base differs from origin/HEAD: keep the default branch, report merged topic branches.
+git -C "$R" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
 g -C "$R" switch -q -c develop
 git -C "$R" push -q origin develop
 printf '    base: develop\n' >> "$TMP/rulebook.yaml"
