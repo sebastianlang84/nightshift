@@ -5,8 +5,7 @@ models capabilities and failure modes, not any particular machine. Target reposi
 dependencies, commit messages, and agent output are untrusted. The operator's rulebook, runner,
 adapter configuration, and confinement assets form the trusted control plane.
 
-Read alongside [hook-spec.md](hook-spec.md),
-[reflection-confinement.md](reflection-confinement.md), and
+Read alongside [hook-spec.md](hook-spec.md) and
 [autonomy-and-shutoff.md](autonomy-and-shutoff.md) (proposed anomaly shutoff).
 
 ## 1. Trust model
@@ -29,10 +28,10 @@ An optional external merge job is a separate authorization decision ([ADR 0040](
 
 | ID | Control | Mechanism |
 | --- | --- | --- |
-| C1 | Stage capabilities | Claude receives a tool allowlist without Bash. Codex uses read-only or workspace-write sandboxing, with Fix network disabled. Pi withholds Bash and allows write tools only for explicitly enabled Fix. |
+| C1 | Stage capabilities | Claude receives a tool allowlist without Bash. Codex uses read-only or workspace-write sandboxing, with Fix network disabled. |
 | C2 | Disposable worktrees | Each work item runs in a detached worktree; the target checkout is not the edit destination. |
 | C3 | Push confinement | `hooks/pre-push` checks Git's resolved refs, refusing destinations outside `nightshift/*`, deletion, tag pushes, and non-fast-forward updates. |
-| C4 | Adapter write boundaries | Claude's tool guard confines write paths and rejects hook bypasses. Codex uses its OS sandbox. Pi Fix uses bubblewrap and fails closed when unavailable. |
+| C4 | Adapter write boundaries | Claude's tool guard confines write paths and rejects hook bypasses. Codex uses its OS sandbox. |
 | C5 | Separate merge authority | The runner never merges; review and merge authority stay with the operator or a separately authorized external job. |
 | C6 | Runaway bounds | Iteration, pending-branch, per-run branch, and optional wall-clock caps; launcher flock; scheduler hard timeout. Claude also has a turn cap. |
 | C7 | Report-only mode | `findings-only` reports without pushing. |
@@ -46,7 +45,7 @@ Implementation: [adapters.sh](../../lib/adapters.sh), [sandbox.sh](../../lib/san
 [check_claude_controls.py](../../lib/check_claude_controls.py).
 
 Codex stage isolation excludes host-global configuration and rules. Claude's tool restrictions do
-not provide an OS filesystem read boundary. Pi Fix's filesystem sandbox shares the host network.
+not provide an OS filesystem read boundary.
 Disabling a sandbox through an explicit environment override removes that control.
 
 ## 3. Risk register
@@ -85,8 +84,8 @@ pre-push hook validates refs, not content; branch deletion cannot undo disclosur
 
 Tool guards do not remove underlying account privileges. A CLI change or guard bypass can expose
 host-root-equivalent Docker access, administrative capabilities, or other services' secrets if
-those capabilities belong to the account. Gate and Pi sandboxes reduce some paths; they do not
-isolate every host process. Use M1 and M2.
+those capabilities belong to the account. Gate and Codex sandboxing limit some of that exposure.
+Use M1 and M2.
 
 ### R3 — Unattended permission bypass <a id="r3"></a>
 
@@ -108,10 +107,8 @@ help, but do not prove correctness. Merge review cannot prevent R1's push-time d
 
 ### R6 — Agent egress <a id="r6"></a>
 
-Claude and read-only Pi stages do not have a general OS egress policy. Pi Fix shares host networking
-to support configured model gateways, including private destinations. Its tools currently withhold
-Bash, but network reach is still an independent risk. Codex Fix disables network. The gate's
-public-only proxy does not isolate these other callers. See M2.
+Claude runs without a general OS egress policy. The Codex Fix sandbox disables network access for
+its commands. The gate's public-only proxy applies only to repository setup and tests. See M2.
 
 ### R7 — Runaway usage <a id="r7"></a>
 
@@ -124,7 +121,7 @@ caps. A wall-clock budget may let an in-flight stage finish; no cap guarantees a
 Changing cwd does not confine Write/Edit. An out-of-tree write could alter shell startup, SSH
 configuration, user services, CLI hooks, or a binary in a user-writable PATH directory without any
 shell tool. Claude's guard resolves paths and confines writes to the injected worktree. Codex uses
-its workspace sandbox; opted-in Pi Fix uses bubblewrap. See N1 and N2.
+its workspace sandbox. See N1 and N2.
 
 ### R9 — Untracked review gap <a id="r9"></a>
 
@@ -189,7 +186,7 @@ trusted runner code, and configured read-only binds remain in the trust base. Se
 | ID | Mitigation | Status |
 | --- | --- | --- |
 | <a id="m1"></a>M1 | Dedicated unprivileged service account without Docker, administrative groups, or unrelated service secrets | Deployment recommendation; highest priority |
-| <a id="m2"></a>M2 | OS filesystem and endpoint-restricted network sandbox around every agent, exposing only required inputs and model credentials | Partial: gate and Pi filesystem confinement exist; full agent isolation remains open |
+| <a id="m2"></a>M2 | OS filesystem and endpoint-restricted network sandbox around every agent, exposing only required inputs and model credentials | Partial. Gate and Codex filesystem confinement exist. Full agent isolation remains open. |
 | <a id="m3"></a>M3 | Scan pushed diff content for secrets before disclosure | Open |
 | <a id="m4"></a>M4 | Halt on anomalies and repeated unsafe behavior | Proposed in [autonomy-and-shutoff.md](autonomy-and-shutoff.md) |
 | <a id="m5"></a>M5 | Re-verify tool-hook contracts against supported CLI versions | Ongoing compatibility responsibility |
@@ -204,7 +201,7 @@ trusted runner code, and configured read-only binds remain in the trust base. Se
 
 A private model gateway needs an explicit endpoint policy that the public-only gate proxy cannot
 currently express. A destination pin or dedicated forwarder could restrict that connection without
-opening the surrounding LAN. Pi and reflection currently share the host network; this remains open.
+opening the surrounding LAN.
 
 ## 6. Residual risk
 

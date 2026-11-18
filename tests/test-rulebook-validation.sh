@@ -97,17 +97,15 @@ reject "an unknown review agent"    'agent:
   review_agent: gemini'             "unknown adapter 'gemini'"
 reject "an empty review agent"      'agent:
   review_agent:'                    "agent.review_agent is empty"
-reject "an empty pi model"          'agent:
-  pi_model:'                        "agent.pi_model is empty"
 reject "an unknown primary agent"   'agent:
   primary: gemini'                  "agent.primary: unknown adapter 'gemini'"
+# The pi adapter was removed on 2026-11-18; a rulebook that still names it must fail, not fall back.
+reject "the removed pi adapter"      'agent:
+  primary: pi'                       "agent.primary: unknown adapter 'pi'"
+reject "a removed pi key"            'agent:
+  pi_model: x'                       "pi_model"
 reject "an empty primary agent"     'agent:
   primary:'                         "agent.primary is empty"
-# `pi_allow_fix` hands the write-capable Fix stage to an adapter that cannot confine a write, so a
-# value it does not understand must abort rather than be read as either answer. `yes` and `1` are
-# the spellings a human reaches for, and both used to be falsy by accident.
-reject "a non-boolean pi_allow_fix" 'agent:
-  pi_allow_fix: yes'                "agent.pi_allow_fix must be true or false"
 # codex does not check a reasoning effort itself — an unknown one passes `--strict-config` and reaches
 # the API — so the parser holds the closed set. `High` and `extra-high` are the plausible typos.
 reject "an unknown codex effort"     'agent:
@@ -217,11 +215,8 @@ agent:   # the model this host runs its nights on
   claude_model: "claude-opus-5"
   codex_model: 'gpt-5 #2'
   codex_effort: xhigh
-  primary: pi
-  review_agent: pi
-  pi_model: z-ai/glm-5.3-flash
-  pi_provider: openrouter
-  pi_allow_fix: true
+  primary: codex
+  review_agent: claude
 repos:
   - path: /srv/example
     mode: findings-only
@@ -239,36 +234,39 @@ grep -qx "$(printf 'codex_effort\txhigh')" "$TMP/stdout" || {
   echo "codex_effort not emitted: $(grep codex_effort "$TMP/stdout")" >&2
   exit 1
 }
-grep -qx "$(printf 'primary_agent\tpi')" "$TMP/stdout" || {
+grep -qx "$(printf 'primary_agent\tcodex')" "$TMP/stdout" || {
   echo "primary_agent not emitted: $(grep primary_agent "$TMP/stdout")" >&2
   exit 1
 }
-grep -qx "$(printf 'pi_allow_fix\ttrue')" "$TMP/stdout" || {
-  echo "pi_allow_fix not emitted: $(grep pi_allow_fix "$TMP/stdout")" >&2
-  exit 1
-}
-# Omitted, the fix opt-in must read as OFF — a missing key can never mean "grant write access".
-# Its own output file: the checks below still read $TMP/stdout for the agent block above.
 printf 'repos:\n  - path: /srv/example\n    mode: findings-only\n' > "$TMP/no-agent.yaml"
 python3 "$ROOT/lib/parse_rulebook.py" "$TMP/no-agent.yaml" > "$TMP/stdout-no-agent"
-grep -qx "$(printf 'pi_allow_fix\tfalse')" "$TMP/stdout-no-agent" || {
-  echo "an omitted pi_allow_fix did not default to false" >&2
-  exit 1
-}
 # Omitted, the effort is emitted EMPTY, which the Runner reads as "let the CLI default apply".
 grep -qx "$(printf 'codex_effort\t')" "$TMP/stdout-no-agent" || {
   echo "an omitted codex_effort was not emitted empty: $(grep codex_effort "$TMP/stdout-no-agent")" >&2
   exit 1
 }
 
-grep -qx "$(printf 'review_agent\tpi')" "$TMP/stdout" || {
+grep -qx "$(printf 'review_agent\tclaude')" "$TMP/stdout" || {
   echo "review_agent not emitted: $(grep review_agent "$TMP/stdout")" >&2
   exit 1
 }
-grep -qx "$(printf 'pi_model\tz-ai/glm-5.3-flash')" "$TMP/stdout" || {
-  echo "pi_model not emitted: $(grep pi_model "$TMP/stdout")" >&2
-  exit 1
-}
+
+# Check adapter selection in the runner and the launcher's environment setup.
+(
+  export NIGHTSHIFT_HOME="$ROOT" NIGHTSHIFT_SOURCED=1
+  export NIGHTSHIFT_STATE_DIR="$TMP/state" NIGHTSHIFT_RUNS_DIR="$TMP/runs"
+  export NIGHTSHIFT_DIGEST_DIR="$TMP/digests" NIGHTSHIFT_WORKTREES="$TMP/worktrees"
+  export RULEBOOK="$TMP/agent-ok.yaml"
+  route='source "$1"; load_rulebook; printf "%s %s" "$NIGHTSHIFT_AGENT" "$RUN_PRIMARY_AGENT"'
+  [ "$(env -u NIGHTSHIFT_AGENT bash -c "$route" _ "$ROOT/bin/nightshift.sh")" = "codex codex" ]
+  [ "$(NIGHTSHIFT_AGENT=claude bash -c "$route" _ "$ROOT/bin/nightshift.sh")" = "claude claude" ]
+
+  cron_env="$(sed -n '1,/^# Make the tools nightshift invokes findable/p' "$ROOT/bin/nightshift-cron.sh")"
+  cron_env+=$'\nprintf "%s" "${NIGHTSHIFT_AGENT:-<unset>}"'
+  [ "$(env -u NIGHTSHIFT_AGENT bash -c "$cron_env")" = "<unset>" ]
+  [ "$(env -u NIGHTSHIFT_AGENT RULEBOOK="$TMP/no-agent.yaml" bash -c "$cron_env")" = claude ]
+  [ "$(NIGHTSHIFT_AGENT=codex RULEBOOK="$TMP/no-agent.yaml" bash -c "$cron_env")" = codex ]
+)
 
 # Standard YAML permits sequence items at the same indentation as their section key. This used to
 # parse successfully while emitting no repo at all, turning a configured fleet into a clean no-op.

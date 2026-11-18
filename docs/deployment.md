@@ -19,9 +19,8 @@ ledgers diverge silently: duplicate branches, broken caps and rotation). See
 1. **Clone** the Nightshift repo somewhere stable — this path becomes `NIGHTSHIFT_HOME`, and the
    installed systemd unit hard-codes it. Moving the checkout later requires re-running `install`.
 2. **Provide the binaries a run shells out to.** Nightly runs default to the `claude` adapter
-   (`NIGHTSHIFT_AGENT=claude`; `codex` and `pi` also supported; Pi Fix requires explicit opt-in and bubblewrap), but the agent CLI is
-   only one of the tools the
-   Runner invokes. All of these must be reachable from the launcher's `PATH`, which is
+   (`NIGHTSHIFT_AGENT=claude`), and also support `codex`. The launcher looks for these binaries
+   on its `PATH`, which is
    `/usr/local/bin:/usr/bin:/bin:~/.local/bin` — systemd user services start with a minimal env, so
    the launcher sets that list explicitly (system dirs first, deliberately: see
    [`docs/design/risk-analysis.md`](design/risk-analysis.md) R10). "It works in my login shell" is not
@@ -30,19 +29,14 @@ ledgers diverge silently: duplicate branches, broken caps and rotation). See
    | Binary | Used for | Missing |
    |--------|----------|---------|
    | `claude` or `codex` | every stage that thinks | every stage fails; nothing ships |
-   | `pi` (when configured for any stage, ADR 0031) | selected stages and its once-a-day `pi update` | every review fails, so nothing ships |
    | `git` | worktrees, commits, branch pushes | run aborts |
    | `jq` | every ledger and telemetry read/write | run aborts |
    | `python3` (stdlib only — nothing to install) | rulebook parsing, JSON extraction, finding probes | run aborts |
    | `bwrap` (`apt install bubblewrap`; on Debian 11 from bullseye-backports, because 0.4.1 lacks `--clearenv` and `--size`) | sandboxing the ship gate (ADR 0026) | every `branch-fix` repo refuses to ship |
    | `gh` | opening PRs when `NIGHTSHIFT_OPEN_PR=1` | branch still pushed, no PR |
 
-   `pi` is the one binary the PATH above does **not** cover: it is an npm-global under nvm, and its
-   `#!/usr/bin/env node` shebang would resolve `/usr/bin/node` (too old to run it). The launcher
-   therefore exports `NIGHTSHIFT_PI_PATH` — the nvm bin directory — and the Runner prepends it for
-   the pi subprocess alone, the same shape as `NIGHTSHIFT_TEST_PATH` and for the same R10/N4 reason.
-   It exports the same directory as `NIGHTSHIFT_CODEX_PATH`, prepended for the codex subprocess
-   alone: codex's Fix stage runs the repo's own checks, which may need a newer Node
+   The launcher exports the nvm bin directory as `NIGHTSHIFT_CODEX_PATH` and prepends it to
+   PATH for Codex alone. Codex Fix runs the repository's checks, which can need a newer Node
    than the system default (ADR 0037).
    A run started by hand from an interactive shell already has nvm on PATH and needs nothing.
 
@@ -390,10 +384,6 @@ Agent capabilities depend on the adapter and stage.
   Those shell commands can include the repository's own checks, so candidate code runs there
   outside the gate sandbox (risk analysis, R15): run Codex Fix only under a dedicated account.
   Fix shell commands have network access disabled, and Git inherits the `pre-push` hook.
-- **Pi** read-only stages can read files accessible to the host account. Opted-in Fix runs in
-  bubblewrap and can read the worktree and mounted paths. Writes are confined to the worktree and
-  disposable stage directories. The sandbox shares the host network. Every tool profile rejects Bash,
-  so Pi has no shell to run `git push`. `NIGHTSHIFT_PI_SANDBOX=none` removes the Fix filesystem boundary.
 
 The runner performs the branch push. Its `pre-push` hook allows new branches and fast-forward updates
 under the configured `branch_prefix` (`nightshift/` by default) and rejects deletions, tags and other

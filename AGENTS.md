@@ -7,7 +7,7 @@ Operations are documented in [docs/deployment.md](docs/deployment.md).
 
 - `bin/nightshift.sh`: orchestration; `lib/adapters.sh`: agent adapters.
 - `lib/sandbox.sh`: test execution and worktree safety; `lib/digest.sh`: reporting.
-- `prompts/`: stage and dimension prompts; `prompts/reflection/`: manual session reflection.
+- `prompts/`: stage and dimension prompts.
 - `docs/adr/`: decisions; `docs/design/`: implemented and explicitly labeled proposed designs.
 
 ## Verification
@@ -37,12 +37,9 @@ contains the agent confinement hooks.
 Read [hook-spec.md](docs/design/hook-spec.md) and the
 [threat model](docs/design/risk-analysis.md) before changing adapters or confinement hooks.
 
-Claude uses a tool guard, Codex uses its workspace sandbox, and Pi Fix uses bubblewrap.
-Pi's sandbox shares the host network. The ship gate runs candidate code in bubblewrap with
-an allowlisted environment and no host home. Missing bubblewrap blocks shipping.
-`NIGHTSHIFT_TEST_SANDBOX=none` and `NIGHTSHIFT_PI_SANDBOX=none` explicitly opt out of their
-respective sandboxes. Preserve the fail-closed defaults.
+Claude uses a tool guard. Codex uses its workspace sandbox. The ship gate runs candidate code in
+bubblewrap with an allowlisted environment and no host home. Missing bubblewrap blocks shipping.
+`NIGHTSHIFT_TEST_SANDBOX=none` explicitly opts out of the gate sandbox. Preserve the fail-closed default.
 
 The gate removes ignored files before each run and refuses hidden worktree changes.
 Finalize commits the reviewed tree. The runner only pushes `nightshift/*` and never merges.
-Session reflection is manually invoked and produces proposals for human review.

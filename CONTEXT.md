@@ -47,10 +47,6 @@ with network disabled unless public egress is explicitly enabled through a vetti
 These boundaries do not prevent all secret reads by agents or all prompt injection; see the
 [threat model](docs/design/risk-analysis.md).
 
-Manual session reflection is a separate pipeline: extract transcripts, generate proposals,
-check citations, assemble evidence, and judge. Its sandbox excludes Git write authority.
-Only the operator can apply its recommendations.
-
 ## Vocabulary
 
 - **Work item:** a repository, target, and proposed action.

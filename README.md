@@ -24,9 +24,8 @@ An append-only ledger tracks finding identity, branch outcomes, and coverage acr
 The runner never merges. You control merges; an optional external merge job requires separate
 operator authorization and is not included in this repository.
 
-Adapters support Claude Code, Codex, Pi, and a deterministic mock. You can select a separate
-review adapter and request advisory reviews from multiple vendors. Pi Fix requires explicit
-opt-in and a filesystem sandbox.
+Adapters support Claude Code, Codex, and a deterministic mock. You can select a separate
+review adapter and request advisory reviews from multiple vendors.
 
 ## Install
 
@@ -94,18 +93,12 @@ Common settings include:
 
 | Setting | Purpose |
 | --- | --- |
-| `NIGHTSHIFT_AGENT` | `claude` (default), `codex`, `pi`, or `mock` |
+| `NIGHTSHIFT_AGENT` | `claude` (default), `codex`, or `mock` |
 | `agent.review_agent` | Separate adapter for Review |
-| `agent.pi_provider`, `agent.pi_model` | Provider and model for Pi stages |
 | `limits.max_open_branches` | Maximum branches awaiting a verdict across repositories |
 | `limits.max_run_minutes` | Optional run budget; an in-flight stage may finish |
 | `NIGHTSHIFT_STATE_DIR` | Ledger and derived state location |
 | `NIGHTSHIFT_OPEN_PR=1` | Optional GitHub PR creation through authenticated `gh`; default off |
-
-Manual session reflection uses `bin/reflect.sh`. Its provider defaults to `openrouter`; set
-`NIGHTSHIFT_REFLECT_PROVIDER` and `NIGHTSHIFT_REFLECT_MODEL` for your provider and model. Judge
-settings can be overridden separately. Review the [reflection confinement design](docs/design/reflection-confinement.md)
-before sending transcripts to a model provider. Reflection produces proposals and never applies rules.
 
 To schedule real runs after checking a manual run:
 
@@ -123,8 +116,7 @@ The review/fix pipeline, mock adapter, ledger, scheduler, and sandboxed gate are
 Models can miss defects or introduce regressions. Review the branch and its evidence before merging.
 
 The gate sandbox executes candidate code without the host home or credentials and fails closed
-when bubblewrap is unavailable. This does not fully isolate every agent adapter: Claude reads
-with host-account access, and Pi's sandbox shares the host network. Branch confinement does not
+when bubblewrap is unavailable. Claude reads with host-account access. Branch confinement does not
 scan pushed content for secrets. Use a dedicated unprivileged account and read the
 [threat model](docs/design/risk-analysis.md) before unattended operation.
 

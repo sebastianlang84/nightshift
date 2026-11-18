@@ -13,8 +13,7 @@ export NIGHTSHIFT_HOME
 # Nightly runs are real work by default; the mock is only for --dry-run testing. But this default
 # must not overrule the rulebook's `agent.primary` (ADR 0031): the Runner treats a SET
 # NIGHTSHIFT_AGENT as the caller's explicit choice and lets it win, so exporting one here
-# unconditionally made that key dead in the only mode that matters — the unattended night. Observed
-# 2026-08-30: a rulebook declaring `primary: pi` ran the whole night on claude anyway.
+# unconditionally made that key dead in unattended runs.
 #
 # So the default is applied only when the rulebook names no adapter. Asking the parser is the one
 # way to know that without duplicating its rules here; a rulebook that does not parse leaves the
@@ -79,19 +78,8 @@ gate_toolchain_path() { # -> `:`-separated dirs the gates need bound and on PATH
 }
 export NIGHTSHIFT_TEST_PATH="${NIGHTSHIFT_TEST_PATH-$(gate_toolchain_path)}"
 
-# The `pi` adapter (ADR 0031) needs the nvm toolchain twice over: pi is an npm-global under nvm — NOT
-# in ~/.local/bin like claude and codex — and its `#!/usr/bin/env node` shebang resolves whatever
-# node is first on PATH, which here is /usr/bin/node v18 while pi requires >= 22.19 (verified: it
-# aborts on v18). Both failures land as a dead Review stage, one at a time, all night.
-#
-# It is exported as its OWN variable rather than merged into PATH, for the same reason
-# NIGHTSHIFT_TEST_PATH is: the Runner prepends it for the pi subprocess alone. Putting an nvm bin
-# ahead of the system dirs in the Runner's own PATH is precisely the R10/N4 hole the comment above
-# warns about, and appending it instead would leave /usr/bin/node v18 winning the shebang.
-export NIGHTSHIFT_PI_PATH="${NIGHTSHIFT_PI_PATH-$(nvm_toolchain_bin)}"
-# The codex adapter gets the same directory for the same reason (ADR 0037): its Fix stage executes the
-# repo's own checks, and web-app's pnpm refuses to start under /usr/bin/node v18. Prepended for the
-# codex subprocess alone; set it empty to opt out.
+# Codex Fix also runs the repo's checks, which can need a newer Node than /usr/bin/node
+# (ADR 0037). Prepend the nvm bin directory for Codex alone. Set it empty to opt out.
 export NIGHTSHIFT_CODEX_PATH="${NIGHTSHIFT_CODEX_PATH-$(nvm_toolchain_bin)}"
 
 # The sandbox has no $HOME, so a python package installed with `pip install --user` is invisible

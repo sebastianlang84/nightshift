@@ -1,6 +1,6 @@
 # ADR 0032 — the pi Fix stage runs inside the gate's sandbox
 
-- Status: accepted
+- Status: superseded — the Pi adapter was removed on 2026-11-18 (never used)
 - Date: 2026-09-06
 - Amends: [ADR 0031](0031-the-reviewer-may-be-another-vendor.md) (pi is read-only, and `pi_allow_fix` is the deliberate hole in that)
 - Extends: [ADR 0026](0026-the-ship-gate-runs-in-a-sandbox.md) (the bwrap hull this reuses)
@@ -54,4 +54,4 @@ private destination under an explicit host-declared pin, and that is an open net
 - **Unchanged:** every read-only pi stage runs exactly as before. They have no write primitive to
   confine, so a sandbox would buy nothing and could only break a read.
 
-Regression cover: `tests/test-pi-fix-sandbox.sh`.
+Regression cover: test-pi-fix-sandbox.sh (removed 2026-11-18).

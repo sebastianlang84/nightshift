@@ -8,7 +8,7 @@ unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this
 # fixed `nightshift: ` subject was exactly that unparseable case, so every change touching a
 # code-classified file was blocked for a CHANGELOG entry — and the Fix stage could not satisfy the
 # gate by writing a better subject, because it does not write the subject at all.
-# (Observed 2026-08-07: pi-ext-auth lost two comment-only `doc` findings, and two `bug` fixes on
+# (Observed 2026-08-07: a target repository lost two comment-only `doc` findings, and two `bug` fixes on
 # 08-05; its `pre-commit` is a SKILL.md lint and its `commit-msg` carries the CHANGELOG gate.)
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -41,7 +41,7 @@ check ''         'nightshift: s'
 check divergence 'nightshift: s'
 
 # --- 2. the Fix stage is told the subject VERBATIM ------------------------------------
-# Left to guess it, the model reasons about a subject it will never get: pi-ext-auth's `doc` fix
+# Left to guess it, the model reasons about a subject it will never get: one `doc` fix
 # concluded "a `docs:`-typed subject passes cleanly" and was then committed as `nightshift: `.
 mk() { git init -q --template= -b main "$1"; }   # this host installs hooks via init.templateDir
 mkdir -p "$TMP/item"

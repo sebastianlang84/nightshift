@@ -32,8 +32,13 @@ done
 
 # An explicit env value still wins over the rulebook's auto, and auto never asks without it set.
 NIGHTSHIFT_REVIEW_VENDOR_CMD="echo claude"; refresh_review_vendor
-NIGHTSHIFT_REVIEW_AGENT=pi; [ "$(review_stage_agent)" = pi ] || fail "env did not win over auto"
+NIGHTSHIFT_REVIEW_AGENT=codex; [ "$(review_stage_agent)" = codex ] || fail "env did not win over auto"
+NIGHTSHIFT_REVIEW_AGENT=""
+[ "$(review_stage_agent)" = "$NIGHTSHIFT_AGENT" ] || fail "empty env did not disable review routing"
 unset NIGHTSHIFT_REVIEW_AGENT
+RB_REVIEW_AGENT=claude
+[ "$(review_stage_agent)" = claude ] || fail "rulebook did not route review to Claude"
+RB_REVIEW_AGENT=auto
 
 # Same vendor: run_review_stage sets the flag, and stage_prompt carries the adversarial section.
 calls=""

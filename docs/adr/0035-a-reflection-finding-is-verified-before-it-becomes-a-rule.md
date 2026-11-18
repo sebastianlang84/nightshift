@@ -1,6 +1,6 @@
 # ADR 0035 — a reflection finding is verified before it becomes a rule
 
-- Status: accepted (design phase)
+- Status: superseded — the reflection tool was removed on 2026-11-18 (never used)
 - Date: 2026-09-16
 - Touches: [ADR 0031](0031-the-reviewer-may-be-another-vendor.md) (the cross-vendor reviewer this reuses)
 

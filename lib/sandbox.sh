@@ -45,22 +45,14 @@ _test_robind() { # path [declared] -> append a read-only bind, refusing anything
   TEST_SANDBOX_ARGV+=( --ro-bind "$rp" "$rp" )
 }
 
-# `net` is 0 (isolated) or 1 (isolated + egress through the ADR 0028 vetting proxy). A third value,
-# `host`, keeps the CALLER's network namespace and exists for one caller only: the pi Fix stage
-# (pi_sandbox_argv). Its model gateway is a LAN address, and the vetting proxy forwards to PUBLIC
-# addresses only — so an isolated namespace does not narrow that stage's reach, it removes the one
-# connection it exists to make. That stage is wrapped for the FILESYSTEM bound it never had (R8);
-# its network reach stays exactly as wide as it already is today, and narrowing it remains
-# an open network-isolation question. The ship gate never passes `host`, and a caller that does gets
-# no egress proxy — the two are alternatives, not layers.
-build_test_sandbox() { # worktree sandbox_home net(0|1|host) item_dir [robind] -> fills TEST_SANDBOX_ARGV
+build_test_sandbox() { # worktree sandbox_home net(0|1) item_dir [robind] -> fills TEST_SANDBOX_ARGV
   local wt="$1" sbhome="$2" net="$3" id="$4" robind="${5:-}" p
   local -a extra=()
   TEST_SANDBOX_ARGV=(
     bwrap
     --die-with-parent          # the sandbox can never outlive the `timeout` that bounds it
     --new-session              # its own session: no controlling tty, so no TIOCSTI back into ours
-    --unshare-user --unshare-ipc --unshare-pid --unshare-uts --unshare-cgroup
+    --unshare-user --unshare-ipc --unshare-pid --unshare-uts --unshare-cgroup --unshare-net
     --clearenv                 # the environment is an allowlist, built at the bottom of this function
     --proc /proc --dev /dev
     # A tmpfs is RAM. `--size` applies to the NEXT --tmpfs ONLY, so each one needs its own.
@@ -72,11 +64,6 @@ build_test_sandbox() { # worktree sandbox_home net(0|1|host) item_dir [robind] -
   # the HOST's namespace, which is loopback and the LAN — every other service on this machine — and
   # not merely "the internet" (ADR 0028). Egress now leaves through a vetting proxy on a unix
   # socket, which crosses the namespace because it is a filesystem object, not a route.
-  if [ "$net" = host ]; then
-    TEST_SANDBOX_ARGV+=( --share-net )
-  else
-    TEST_SANDBOX_ARGV+=( --unshare-net )
-  fi
   if [ "$net" = 1 ] && [ -n "${TEST_EGRESS_DIR:-}" ]; then
     TEST_SANDBOX_ARGV+=(
       --ro-bind "$TEST_EGRESS_DIR" /nightshift-egress

@@ -1,7 +1,7 @@
 # Design note — Memory (the ledger)
 
 > **⚠️ Superseded by [documentation-system.md](documentation-system.md) + [ADR 0004](../adr/0004-v1-scope-branch-isolated-steward.md).**
-> The two-tier split (episodic + semantic/working memory), reflect/compaction, and the self-authored
+> The two-tier split (episodic + semantic/working memory), log compaction, and the self-authored
 > backlog below are **cut from v1**. v1 memory is a single central append-only `ledger.jsonl` (per-repo
 > views *derived*, never stored); the "abandoned" set is folded into the ledger as `outcome: abandoned`
 > rows carrying a finding fingerprint (`sorted(files) : type : symbol`, line numbers excluded — see
@@ -36,8 +36,8 @@ and different lifecycles.
   bumps", "this module is hot". The distilled character of each repo.
 - **Selection state:** repo score, last-touched, backoff/cadence counters.
 
-### The bridge: reflect / compaction
-A periodic step (Aeon's reflect/flush pattern) compresses the episodic log into the semantic
+### Log compaction
+A periodic step, based on Aeon's memory maintenance, compresses the episodic log into the semantic
 memory, so the working notes stay small enough to fit in an agent's context. This is what lets a
 modern LLM actually *use* the memory instead of drowning in a raw log.
 

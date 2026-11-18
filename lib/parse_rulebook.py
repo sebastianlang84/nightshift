@@ -34,17 +34,13 @@ AGENT_KEYS = (
     "claude_model",
     "codex_model",
     "codex_effort",
-    "pi_model",
-    "pi_provider",
-    "pi_extensions",
-    "pi_allow_fix",
     "review_agent",
     "advisors",
 )
 # Adapters the Runner implements. `review_agent` names one of these; anything else is a typo, and
 # a typo here would silently leave Review on the night's primary adapter — the opposite of what the
 # host asked for, with no signal that the routing never took effect.
-REVIEW_AGENTS = ("claude", "codex", "pi", "mock")
+REVIEW_AGENTS = ("claude", "codex", "mock")
 # Reasoning efforts the codex adapter may request. codex itself does NOT validate the value: an
 # unknown one passes `--strict-config` and reaches the API (verified 2026-09-24, codex-cli 0.155.1),
 # so a typo here would silently spend a night on a request the provider rejects or reinterprets.
@@ -317,7 +313,7 @@ def main(path: str) -> None:
     # "no model" would silently run the night on something else. Model ID *syntax* stays
     # unvalidated — it belongs to the CLI vendor and any pattern here would go stale — but a tab
     # would corrupt the TSV transport to bash.
-    for key in ("claude_model", "codex_model", "pi_model", "pi_provider", "pi_extensions"):
+    for key in ("claude_model", "codex_model"):
         model = agent.get(key, "")
         if key in agent and not model:
             raise SystemExit(
@@ -338,10 +334,6 @@ def main(path: str) -> None:
             f"expected one of {', '.join(CODEX_EFFORTS)}"
         )
     print(f"codex_effort\t{effort}")
-    # Which adapter serves the Review stage (ADR 0031). Omitted = Review runs on the night's own
-    # adapter, which is the pre-0031 behaviour. Validated against the implemented set for the same
-    # reason `mode` is: an unrecognised value cannot be a feature request, and tolerating one would
-    # leave the routing silently off.
     # Which adapter runs the night. Omitted = whatever $NIGHTSHIFT_AGENT says, which is the
     # pre-existing behaviour; the env var still wins when explicitly set, so a one-off hand run needs
     # no rulebook edit. Declared here for the same reason the models are (ADR 0020): the host owns
@@ -355,13 +347,10 @@ def main(path: str) -> None:
             f"expected one of {', '.join(sorted(REVIEW_AGENTS))}"
         )
     print(f"primary_agent\t{primary}")
-    # Whether the read-only pi adapter may also serve the FIX stage, which it declines by default
-    # (ADR 0031). Only `true` turns it on; any other spelling is refused rather than interpreted, so
-    # a typo cannot decide this by accident.
-    allow_fix = agent.get("pi_allow_fix", "")
-    if allow_fix and allow_fix not in ("true", "false"):
-        raise SystemExit(f"agent.pi_allow_fix must be true or false, got {allow_fix!r}")
-    print(f"pi_allow_fix\t{allow_fix or 'false'}")
+    # Which adapter serves the Review stage (ADR 0031). Omitted = Review runs on the night's own
+    # adapter, which is the pre-0031 behaviour. Validated against the implemented set for the same
+    # reason `mode` is: an unrecognised value cannot be a feature request, and tolerating one would
+    # leave the routing silently off.
     review_agent = agent.get("review_agent", "")
     if "review_agent" in agent and not review_agent:
         raise SystemExit(

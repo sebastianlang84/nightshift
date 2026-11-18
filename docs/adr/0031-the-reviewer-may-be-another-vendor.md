@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Date: 2026-08-30
+- 2026-11-18 — the pi adapter was removed entirely (never used): neither Review nor Fix can run on pi; everything below about pi is history.
 - Related: [ADR 0019](0019-stage-context-excludes-operator-config.md),
   [ADR 0020](0020-the-rulebook-declares-the-stage-model.md), and
   [ADR 0032](0032-the-pi-fix-stage-is-sandboxed.md)
@@ -55,5 +56,5 @@ errors but does not prove correctness. The run log and telemetry state which ada
 fix. Pi Fix remains an explicit, sandboxed option; unconfined writes are never implied by a
 provider choice. See [the threat model](../design/risk-analysis.md) for read and network limits.
 
-Regression coverage: `tests/test-pi-adapter.sh`, `tests/test-pi-stage-failure.sh`,
+Regression coverage: test-pi-adapter.sh (removed 2026-11-18), test-pi-stage-failure.sh (removed 2026-11-18),
 `tests/test-rulebook-validation.sh`, and `tests/test-review-vendor.sh`.

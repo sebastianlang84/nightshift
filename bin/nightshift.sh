@@ -4,7 +4,7 @@
 # Outer loop: select a repo -> Explore -> Fix<->Review (capped) -> Finalize
 # (push a nightshift/* branch) -> record. Enforces the nightly branch cap and the
 # global open-branch backpressure. The agent invocation sits behind run_agent()
-# (ADR 0001 adapter seam): NIGHTSHIFT_AGENT=mock | claude | codex | pi. The Review stage may run
+# (ADR 0001 adapter seam): NIGHTSHIFT_AGENT=mock | claude | codex. The Review stage may run
 # on a DIFFERENT adapter than the rest of the night (ADR 0031) — see review_stage_agent().
 set -euo pipefail
 
@@ -86,13 +86,11 @@ unset _ns_lib _ns_part
 # --setting-sources cannot drop (verified 2026-08-02, claude 2.1.205). Worktrees default under
 # ${TMPDIR:-/tmp}, outside $HOME, where the isolation holds. Overriding NIGHTSHIFT_WORKTREES into
 # $HOME silently reopens the leak, so say so instead of failing the run (see docs/design/hook-spec.md).
-# pi collects the same chain (AGENTS.md/CLAUDE.md from cwd upwards), so the precondition is not
-# claude's alone. Called from main() rather than run at load time: the reviewer's adapter can come
-# from the rulebook, which is not parsed yet up here.
+# Called from main() after parsing the rulebook, which can select Claude as the reviewer.
 warn_worktrees_in_home() {
   local a
   for a in "$NIGHTSHIFT_AGENT" "$(review_stage_agent)"; do
-    case "$a" in claude|pi) ;; *) continue ;; esac
+    [ "$a" = claude ] || continue
     [ -n "${HOME:-}" ] || continue
     local home_p wt_p
     home_p="$(cd "$HOME" 2>/dev/null && pwd -P)" || continue
@@ -115,16 +113,15 @@ BASE_RESOLUTION_WARN_MISSING=1
 source "$NIGHTSHIFT_HOME/lib/base_resolution.sh"
 # Rulebook-declared model per adapter (ADR 0020); empty = the rulebook declares none. Kept separate
 # from the NIGHTSHIFT_*_MODEL env vars so the precedence env > rulebook > CLI default stays legible.
-RB_CLAUDE_MODEL="" RB_CODEX_MODEL="" RB_CODEX_EFFORT="" RB_PI_MODEL="" RB_PI_PROVIDER="" RB_PI_EXTENSIONS="" RB_MAX_VERIFY=""
+RB_CLAUDE_MODEL="" RB_CODEX_MODEL="" RB_CODEX_EFFORT="" RB_MAX_VERIFY=""
 # Which adapter serves the Review stage (ADR 0031); empty = the night's own adapter, as before.
 RB_REVIEW_AGENT=""
 # `review_agent: auto` resolves to this, refreshed before every Review stage (refresh_review_vendor).
 REVIEW_VENDOR=""
 # Which adapters advise on every open branch each night (ADR 0038), comma-separated; empty = none.
 RB_ADVISORS=""
-# The night's own adapter as declared by the rulebook (empty = the env/default decides), and whether
-# pi may serve the write-capable Fix stage (ADR 0031 refuses it unless the host says otherwise).
-RB_PRIMARY_AGENT="" RB_PI_ALLOW_FIX="false"
+# The night's own adapter as declared by the rulebook (empty = the env/default decides).
+RB_PRIMARY_AGENT=""
 # Announce which model the night will REQUEST, and where that choice came from (ADR 0020). Not which
 # model serves it: with no --model the CLI picks for itself, and even a given id may be an alias that
 # resolves elsewhere — that answer only exists afterwards, in `runs.jsonl` (`model_id`). Announcing
@@ -174,13 +171,9 @@ load_rulebook() {
       claude_model)          RB_CLAUDE_MODEL="$a" ;;
       codex_model)           RB_CODEX_MODEL="$a" ;;
       codex_effort)          RB_CODEX_EFFORT="$a" ;;
-      pi_model)              RB_PI_MODEL="$a" ;;
-      pi_provider)           RB_PI_PROVIDER="$a" ;;
-      pi_extensions)         RB_PI_EXTENSIONS="$a" ;;
       review_agent)          RB_REVIEW_AGENT="$a" ;;
       advisors)              RB_ADVISORS="$a" ;;
       primary_agent)         RB_PRIMARY_AGENT="$a" ;;
-      pi_allow_fix)          RB_PI_ALLOW_FIX="$a" ;;
       dimension)             DIMENSIONS+=("$a") ;;
       repo)
         raw_path="${a#path=}"
@@ -536,8 +529,8 @@ verify_artifact_usable() { # item_dir -> a complete finding-verification result
 # that message or was dropped. On 2026-09-06 an agent could not delete a scratch file it had made
 # and said so in its worknote; that is the shape of note this exists for.
 #
-# The agent writes it INSIDE its worktree, which is the only place it may write (ADR 0032), and the
-# Runner moves it out. So this adds no write surface at all: nothing here relaxes the sandbox.
+# The agent writes the note inside its worktree, and the Runner moves it out. See
+# docs/design/hook-spec.md for the adapter write boundaries.
 #
 # Read back by a human, never by an agent. Feeding these notes into a later stage would turn model
 # output into model input, and an agent's note may quote a file from the repository it was reading —
@@ -590,8 +583,7 @@ run_agent() { # stage workdir item_dir [attempt]
     mock)   "mock_$stage" "$workdir" "$item_dir" || status=$? ;;
     claude) claude_run "$stage" "$workdir" "$item_dir" || status=$? ;;
     codex)  codex_run "$stage" "$workdir" "$item_dir" || status=$? ;;
-    pi)     pi_run    "$stage" "$workdir" "$item_dir" || status=$? ;;
-    *) log "unknown NIGHTSHIFT_AGENT=$NIGHTSHIFT_AGENT (expected mock, claude, codex, or pi)"; status=2 ;;
+    *) log "unknown NIGHTSHIFT_AGENT=$NIGHTSHIFT_AGENT (expected mock, claude, or codex)"; status=2 ;;
   esac
   # Before anything else looks at the worktree — including the failure paths below and the ship
   # gate — so a note survives a stage that failed, which is when it is most likely to exist. The
@@ -663,7 +655,7 @@ run_agent() { # stage workdir item_dir [attempt]
     # ended a night whose findings budget was untouched. One empty response ended the night.
     #
     # Retried only when the stage failed with status 1 — the parse/answer failure every adapter
-    # reports. Status 2 is an adapter REFUSING to run (an unpermitted tool, a missing sandbox): a
+    # reports. Status 2 is an adapter refusing to run because of its configuration: a
     # deterministic configuration verdict that a second identical call can only repeat.
     if [ -z "$AGENT_FATAL" ] && [ "$status" -eq 1 ] \
        && [ "$attempt" -le "$EMPTY_ANSWER_RETRIES" ] \
@@ -748,44 +740,6 @@ run_review_stage() { # workdir item_dir
   # exists to differ from, so a reviewer that cannot reach its model aborts the night instead.
   local NIGHTSHIFT_AGENT="$ra" NIGHTSHIFT_QUOTA_FALLBACK_AGENT=""
   run_agent review "$1" "$2"
-}
-
-# pi resolves a `--model` against a CATALOG it caches on disk, and a stale catalog rejects a model
-# the provider already serves: verified 2026-08-30, where `z-ai/glm-5.3-flash` was refused as unknown
-# by a 13-day-old store and accepted immediately after a refresh. So a host that runs any stage on pi
-# refreshes it once a day, before the first stage of that day — `--all` (pi itself plus the installed
-# extensions, as the host asked for) followed by `--models`, which `--all` does NOT cover and which is
-# the half the model resolution actually depends on.
-#
-# Once a DAY, not once a run: the stamp holds the date the refresh last succeeded, so a second run
-# the same night costs nothing. Failure is logged and never fatal — an update that cannot reach the
-# network is not a reason to skip a night, and the previous catalog is still on disk. The whole thing
-# is skipped unless a pi stage is actually configured, and NIGHTSHIFT_PI_UPDATE=0 opts out entirely.
-#
-# Note for the operator: `pi update --all` hard-resets pi-managed git clones under ~/.pi/agent/git/
-# (`git reset --hard` + `git clean -fdx`). Nightshift runs it because the host asked it to; local
-# edits parked in those clones would not survive it.
-pi_daily_update() {
-  [ "${NIGHTSHIFT_PI_UPDATE:-1}" = 1 ] || return 0
-  [ "$NIGHTSHIFT_AGENT" = pi ] || [ "$(review_stage_agent)" = pi ] || return 0
-  PATH="$(pi_path_prefix)$PATH" command -v pi >/dev/null 2>&1 \
-    || { log "pi update skipped — no pi on PATH"; return 0; }
-  local stamp="$STATE_DIR/.pi-update-day" today
-  today="$(date +%F)"
-  [ "$(cat "$stamp" 2>/dev/null || true)" != "$today" ] || return 0
-  local out rc
-  log "pi update: refreshing pi, extensions and model catalogs (once per day)"
-  rc=0; out="$(PATH="$(pi_path_prefix)$PATH" timeout "${NIGHTSHIFT_PI_UPDATE_TIMEOUT:-900}" pi update --all 2>&1)" || rc=$?
-  [ "$rc" -eq 0 ] || log "pi update --all failed (exit $rc): $(printf '%s' "$out" | tail -n 1 | cut -c1-200)"
-  # The catalog refresh is the half that decides whether a declared model resolves at all, so its
-  # status ALONE is what the stamp records — each call gets its own status, or a failed `--all`
-  # would suppress tomorrow's catalog refresh too, which is the failure this exists to prevent.
-  rc=0; out="$(PATH="$(pi_path_prefix)$PATH" timeout "${NIGHTSHIFT_PI_UPDATE_TIMEOUT:-900}" pi update --models 2>&1)" || rc=$?
-  if [ "$rc" -eq 0 ]; then
-    printf '%s\n' "$today" > "$stamp"
-  else
-    log "pi update --models failed (exit $rc): $(printf '%s' "$out" | tail -n 1 | cut -c1-200)"
-  fi
 }
 
 # ----------------------------------------------------------- commit subject ----
@@ -1574,7 +1528,7 @@ open_pr() { # repo wt branch item_dir base -> echoes PR url ("" if none)
 
 # Claude loads these from a stage's cwd (`--setting-sources project,local`) and runs the hooks and
 # MCP servers they name, unsandboxed, as the operator (docs/design/hook-spec.md). The PreToolUse
-# guard keeps a CLAUDE Fix away from them; a codex or pi Fix can write the worktree freely, and the
+# guard keeps a CLAUDE Fix away from them; a Codex Fix can write the worktree freely, and the
 # Review stage or a branch advisor may well be Claude. So the Runner checks the result itself, for
 # every adapter. `.claude` is listed on its own because a symlink in its place would redirect all
 # three paths without git ever naming them.
@@ -2148,9 +2102,9 @@ resolve_advisors() {
   for a in "${parts[@]}"; do
     a="${a#"${a%%[![:space:]]*}"}"; a="${a%"${a##*[![:space:]]}"}"
     case "$a" in
-      claude|codex|pi|mock) ;;
+      claude|codex|mock) ;;
       "") log "invalid branch advisors '$raw': empty entry"; return 1 ;;
-      *)  log "invalid branch advisor '$a' (expected claude, codex, pi, or mock)"; return 1 ;;
+      *)  log "invalid branch advisor '$a' (expected claude, codex, or mock)"; return 1 ;;
     esac
     if [ "$a" != mock ] && [[ "$seen" == *",$a,"* ]]; then
       log "invalid branch advisors '$raw': '$a' is listed twice"; return 1
@@ -2165,7 +2119,6 @@ advisor_model() { # adapter slot
   case "$1" in
     claude) printf '%s' "${NIGHTSHIFT_CLAUDE_MODEL-${RB_CLAUDE_MODEL:-}}" ;;
     codex)  printf '%s' "${NIGHTSHIFT_CODEX_MODEL-${RB_CODEX_MODEL:-}}" ;;
-    pi)     printf '%s/%s' "${NIGHTSHIFT_PI_PROVIDER-${RB_PI_PROVIDER:-}}" "${NIGHTSHIFT_PI_MODEL-${RB_PI_MODEL:-}}" ;;
     *)      printf '%s-%s' "$1" "$2" ;;
   esac
 }
@@ -2393,8 +2346,8 @@ main() {
   fi
   refresh_review_vendor
   case "$(review_stage_agent)" in
-    claude|codex|pi|mock) ;;
-    *) log "invalid review agent '$(review_stage_agent)' (expected claude, codex, pi, or mock)"
+    claude|codex|mock) ;;
+    *) log "invalid review agent '$(review_stage_agent)' (expected claude, codex, or mock)"
        return 2 ;;
   esac
   # Same for NIGHTSHIFT_ADVISORS / NIGHTSHIFT_ADVISOR_AGENT: the rulebook list is parser-validated,
@@ -2402,7 +2355,6 @@ main() {
   local adv
   resolve_advisors || return 2
   warn_worktrees_in_home
-  pi_daily_update
   guard_state_remote_incoherence
   guard_ledger_valid
   write_claude_settings
@@ -2421,7 +2373,6 @@ main() {
     case "$1" in
       claude) log_model_selection claude NIGHTSHIFT_CLAUDE_MODEL "$RB_CLAUDE_MODEL" ;;
       codex)  log_model_selection codex  NIGHTSHIFT_CODEX_MODEL  "$RB_CODEX_MODEL"  ;;
-      pi)     log_model_selection pi     NIGHTSHIFT_PI_MODEL     "$RB_PI_MODEL"     ;;
     esac
   }
   announce_agent_model "$NIGHTSHIFT_AGENT"

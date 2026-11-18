@@ -4,7 +4,7 @@ unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this
 
 # .claude/settings.json, .claude/settings.local.json and .mcp.json are Runner control data
 # (docs/design/hook-spec.md): Claude loads them from a stage's cwd and runs the hooks and MCP servers
-# they name on the host. The PreToolUse guard stops only a CLAUDE Fix from writing them; a codex or pi
+# they name on the host. The PreToolUse guard stops only a CLAUDE Fix from writing them; a Codex
 # Fix can, and a Claude Review stage or branch advisor would then execute the result. This pins the
 # Runner-side check that holds for every adapter: the worktree check right after Fix, and the branch
 # check advise_branches asks before it checks a branch out.

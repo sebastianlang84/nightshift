@@ -4,7 +4,7 @@ This directory includes proposed designs, superseded alternatives, and implement
 specifications. Each note states its status; the ADRs record accepted decisions.
 
 - [memory-model.md](memory-model.md) — the ledger: two-tier (episodic log + semantic memory),
-  hybrid format, self-authored backlog, reflect/compaction. **Superseded for v1** by
+  hybrid format, self-authored backlog, and log compaction. **Superseded for v1** by
   [documentation-system.md](documentation-system.md) + [ADR 0004](../adr/0004-v1-scope-branch-isolated-steward.md) (see banner).
 - [constitution-and-rulebook.md](constitution-and-rulebook.md) — three safety layers, the four
   pillars of the system prompt, `rulebook.md`, the guiding asymmetry. **Stakes framing swept** to the

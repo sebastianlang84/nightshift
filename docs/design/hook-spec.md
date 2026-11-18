@@ -67,9 +67,8 @@ The exceptions inside the root are `.claude/settings.json`, `.claude/settings.lo
 Fix may not create or edit them. A repository that intentionally changes those files needs human
 handling.
 
-The guard only confines a *Claude* Fix. A codex Fix (`workspace-write`) or a pi Fix (bwrap with the
-worktree writable) can still write those files, and the Review stage or a branch advisor may be
-Claude. So the Runner enforces the same rule for every adapter (`worktree_control_files_clean` in
+A Codex Fix (`workspace-write`) can still write those files. The Review stage or a branch advisor
+may be Claude. So the Runner enforces the same rule for every adapter (`worktree_control_files_clean` in
 `bin/nightshift.sh`): right after Fix, at the `.git`-pointer choke point, a worktree in which any of the
 three files — or `.claude` itself, which a symlink could replace — is changed, untracked or ignored is
 refused as `worktree-tampered` before Review runs. `advise_branches` asks the same of a pushed branch
@@ -172,43 +171,6 @@ contains **only** a symlink to the operator's `auth.json` — credentials in, pe
 `AGENTS.md` unaffected. `NIGHTSHIFT_CODEX_STAGE_HOME` overrides it; empty reverts to the operator's
 home. With no `auth.json` to link, the stage still runs isolated: an auth failure is loud, a reopened
 leak is not.
-
-**pi — mechanism (verified against pi 0.84.2, 2026-08-30).** Same shape as codex, for the same
-reason. `--no-extensions`, `--no-skills` and `--no-prompt-templates` switch off every discovery
-source pi documents, and none of them covers `~/.pi/agent/AGENTS.md`: a stage launched with all three,
-from a cwd outside `$HOME`, still named that file as an injected instruction file when asked.
-`--no-context-files` is all-or-nothing and would drop the *target repo's* `AGENTS.md` with it. pi
-resolves its agent directory from `$PI_CODING_AGENT_DIR`, so `pi_stage_home()` builds
-`state/pi-home` containing nothing but symlinks to `auth.json` and the model catalogs
-(`models.json`, `models-store.json` — without them a declared model id does not resolve at all).
-Verified with the same probe: the isolated stage answered `NONE`. `NIGHTSHIFT_PI_STAGE_HOME`
-overrides it; empty reverts to the operator's own directory.
-
-**pi is read-only, and that is a confinement decision (ADR 0031).** Layer 2(b) above is a Claude
-Code `PreToolUse` hook, and codex's equivalent is its OS-level `workspace-write` sandbox. pi has
-neither: it can withhold `write`/`edit`/`bash` from a stage entirely — which is what makes its
-read-only profile safe, since no write primitive exists to confine — but nothing in it could bound an
-absolute path once `write` were granted. So `pi_run` declines the `fix` stage rather than run an
-unconfined writer, and pi serves review/explore/recon/verify/advise by default.
-
-**`agent.pi_allow_fix: true` lets a host serve the Fix stage on pi anyway** (ADR 0031, amendment),
-and since 2026-09-06 that stage is confined by a mechanism rather than by hope: `pi_sandbox_argv`
-wraps the agent process in the same `bwrap` hull the ship gate runs in (ADR 0026, ADR 0032). The
-worktree and the stage's own agent dir are the only writable paths, so the realistic failure — a
-confused absolute path between a worktree named `web-app` and a live repo at `~/web-app` — is
-refused by the kernel. It fails closed: no bwrap, no Fix stage. `NIGHTSHIFT_PI_SANDBOX=none` is the
-documented opt-out and restores the unconfined writer, out loud in the log.
-
-An out-of-worktree write can leave an unrelated marker or alter configuration while the
-reviewed branch remains correct. The filesystem boundary prevents that separate failure path.
-
-**What it still does not bound: the network.** The pi Fix hull keeps the host's namespace
-(`--share-net`), because the ADR 0028 vetting proxy forwards to public addresses only and a
-configured model gateway may be a private address — isolating the namespace would not narrow the stage, it would
-remove the one connection it exists to make. So this stage's network reach is exactly what it was
-before the hull existed; only its filesystem reach is narrowed. Private gateway egress remains an open isolation question.
-`bash` stays refused on every pi profile including this one, so such a stage can edit files but
-never execute a command.
 
 **Rejected alternatives.** `--bare` and `--safe-mode` both remove the personal config, but they also
 disable hooks — that is Layer 2, i.e. the confinement itself — and `--bare` additionally forces

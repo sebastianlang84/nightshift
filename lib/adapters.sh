@@ -17,7 +17,7 @@ codex_stage_home() {
   # Reaching the operator's own directory is a supported escape hatch, but never a silent one: it
   # reopens the AGENTS.md leak this function exists to close, and a stage worknote is pushed.
   [ "$(cd "$stage" && pwd -P)" != "$(cd "$real" 2>/dev/null && pwd -P || echo "$real")" ] || {
-    log "WARNING: pi stage home IS the operator's pi directory ($real) — stages inherit its AGENTS.md"
+    log "WARNING: codex stage home IS the operator's codex directory ($real) — stages inherit its AGENTS.md"
     printf '%s' "$stage"; return 0; }
   if [ -e "$real/auth.json" ]; then
     ln -sfn "$real/auth.json" "$stage/auth.json"
@@ -30,41 +30,6 @@ codex_stage_home() {
   printf '%s' "$stage"
 }
 
-# The Runner-owned agent dir a pi stage runs under (ADR 0019 / ADR 0031) — echoes the path, empty on
-# failure. pi resolves ~/.pi/agent from $PI_CODING_AGENT_DIR, and that directory holds the operator's
-# global AGENTS.md, which pi injects into EVERY stage: verified 2026-08-30 against pi 0.84.2, a stage
-# launched with --no-extensions --no-skills --no-prompt-templates and a cwd outside $HOME still named
-# ~/.pi/agent/AGENTS.md as an injected instruction file. `--no-context-files` is the wrong lever — it
-# is all-or-nothing and would drop the TARGET repo's AGENTS.md too, which a stage legitimately needs.
-# So the same shape as codex_stage_home: a Runner-owned dir holding NOTHING but symlinks to the
-# credential store and the model catalogs — personal config out, repo AGENTS.md unaffected. Verified
-# with the same probe: the stage answered NONE.
-# NIGHTSHIFT_PI_STAGE_HOME overrides the location; set it EMPTY to run under the operator's real pi
-# dir instead (escape hatch — reopens the leak).
-pi_stage_home() {
-  local real stage f
-  real="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
-  stage="${NIGHTSHIFT_PI_STAGE_HOME-$STATE_DIR/pi-home}"
-  [ -n "$stage" ] || { printf '%s' "$real"; return 0; }
-  mkdir -p "$stage" || { log "pi stage home $stage not creatable"; return 1; }
-  # Reaching the operator's own directory is a supported escape hatch, but never a silent one: it
-  # reopens the AGENTS.md leak this function exists to close, and a stage worknote is pushed.
-  [ "$(cd "$stage" && pwd -P)" != "$(cd "$real" 2>/dev/null && pwd -P || echo "$real")" ] || {
-    log "WARNING: pi stage home IS the operator's pi directory ($real) — stages inherit its AGENTS.md"
-    printf '%s' "$stage"; return 0; }
-  # auth.json carries the credentials; the models*.json catalogs are what let pi RESOLVE a model id
-  # at all — without them a `--model` the operator declared is rejected as unknown before any
-  # request is made. Both are re-linked per stage, which self-heals a stale link after `pi auth`.
-  for f in auth.json models.json models-store.json; do
-    if [ -e "$real/$f" ]; then
-      ln -sfn "$real/$f" "$stage/$f"
-    else
-      rm -f "$stage/$f"
-      [ "$f" != auth.json ] || log "pi: no auth.json under $real — stage home carries no credentials"
-    fi
-  done
-  printf '%s' "$stage"
-}
 # Credential-failure signatures, matched against what the CLI says about ITSELF: the stage's
 # captured stderr, plus the CLI's own verdict inside raw stdout (the claude CLI reports the failure
 # as a JSON result object there, codex on stderr). Deliberately broad, because a false negative
@@ -105,17 +70,6 @@ agent_diagnosis() { # raw_file -> what the CLI said about the run, on stdout
         return 0 ;;
     esac
   fi
-  if [ "${NIGHTSHIFT_AGENT:-}" = pi ]; then
-    # Same hazard the claude branch above exists for: pi's event stream carries the user prompt and
-    # every tool result verbatim, i.e. the REPO's words, and matching credential prose against that
-    # is how a lens that merely READ about logging in aborted a healthy night. pi states its own
-    # verdict in one place — `errorMessage` on a message whose stopReason is "error" — so only that
-    # is offered for diagnosis. A stream with no such message has nothing the CLI said about itself.
-    jq -rs '[ .[] | select(type=="object" and .type=="message_end") | .message
-              | select(type=="object" and .stopReason=="error") | .errorMessage // "" ] | join("\n")' \
-      "$f" 2>/dev/null || true
-    return 0
-  fi
   cat "$f"
 }
 
@@ -140,18 +94,6 @@ AGENT_WALL_SECONDS=30     # a stage that ran longer did reach something, whateve
 
 agent_hit_a_wall() { # usage_file elapsed_seconds -> 0 if the failed stage never reached the model
   ! agent_reached_the_api "$1" && [ "$2" -le "$AGENT_WALL_SECONDS" ]
-}
-
-# ---------------------------------------------------------------- pi update ----
-# What to put in FRONT of PATH for a pi subprocess (empty unless the launcher supplied it). pi is an
-# npm-global under nvm and its `#!/usr/bin/env node` shebang takes whatever node comes first — under
-# the unattended launcher's PATH that is /usr/bin/node v18, while pi requires >= 22.19. Prepending is
-# confined to the pi subprocess on purpose: the Runner's own PATH keeps the system dirs first so
-# nothing under $HOME can shadow its unqualified jq/git/python3 calls (risk-analysis.md R10/N4).
-pi_path_prefix() { # -> "dir:" or ""
-  local p="${NIGHTSHIFT_PI_PATH:-}"
-  [ -n "$p" ] || return 0
-  printf '%s:' "$p"
 }
 
 # ---- mock adapter (deterministic; the tested path) ----
@@ -514,7 +456,7 @@ codex_run() { # stage workdir item_dir
   events="$id/.raw_$stage"
   # The repo's toolchain goes in FRONT of PATH for this subprocess alone (ADR 0037): under the
   # unattended launcher /usr/bin comes first and its node is v18, which a Node 24 repo's pnpm refuses
-  # to start under. Prepended here and nowhere else, like pi_path_prefix, so the Runner's own
+  # to start under. This prefix applies only to Codex, so the Runner's own
   # unqualified calls keep resolving to the system dirs (R10/N4). The binary is resolved first, so
   # the prepended directory can never decide which `codex` runs.
   local cx_bin
@@ -561,267 +503,6 @@ codex_run() { # stage workdir item_dir
       cache_creation_tokens: null,
       context_window:        null,
       cost_usd:              null,
-      model_cost_usd:        null }' \
-    "$events" > "$id/.usage_$stage" 2>/dev/null || true
-  materialize_stage_output "$stage" "$id" || parse_rc=$?
-  [ "$rc" -eq 0 ] || return "$rc"
-  return "$parse_rc"
-}
-
-# ---- pi adapter (first-party CLI headless, ADR 0031) ----
-# READ-ONLY STAGES BY DEFAULT, and that is a safety boundary, not a convenience. The Fix stage's write
-# confinement (R8, hook-spec.md Layer 2b) is enforced per adapter: claude by a PreToolUse guard that
-# rejects Write/Edit outside the worktree, codex by an OS-level `--sandbox workspace-write`. pi has
-# NEITHER — its tool allowlist can withhold `edit`/`write`/`bash` entirely, but it offers no hook and
-# no sandbox that could bound an absolute path once `write` is granted. A read-only stage needs no
-# such bound (no write primitive exists to confine), so pi is admitted for exactly those and refuses
-# `fix` unless the host opts in (`pi_allow_fix`, pi_run below) — and then only inside the hull below,
-# unless the host also turns the hull off (NIGHTSHIFT_PI_SANDBOX=none).
-# The write confinement pi itself cannot provide (hook-spec.md Layer 2b): the same bwrap hull the
-# ship gate runs in (ADR 0026), wrapped around the AGENT process instead of the test command. It is
-# what turns `pi_allow_fix` from an accepted risk into a bounded one — the worktree and the stage's
-# own agent dir are the only writable paths, so a confused absolute path to `~/web-app` or `/tmp`
-# is refused by the kernel rather than landing invisibly outside every diff.
-#
-# `host` networking, deliberately: the model gateway is a LAN address and the ADR 0028 vetting proxy
-# forwards to public addresses only, so an isolated namespace would not narrow this stage, it would
-# stop it working. The stage's network reach is therefore unchanged from before this existed; only
-# its filesystem reach is narrowed. Private gateway egress remains an open isolation question.
-#
-# Fails CLOSED: no bwrap means no confinement, and an unconfined writer is what pi_allow_fix was
-# supposed to stop being. `NIGHTSHIFT_PI_SANDBOX=none` is the documented opt-out and restores the
-# pre-2026-09-06 behaviour, i.e. an agent that may write anywhere this account may.
-pi_sandbox_argv() { # worktree pi_home item_dir -> fills TEST_SANDBOX_ARGV (empty when opted out)
-  local wd="$1" pi_home="$2" id="$3" f real p
-  TEST_SANDBOX_ARGV=()
-  if [ "${NIGHTSHIFT_PI_SANDBOX:-bwrap}" = none ]; then
-    log "  pi fix stage: sandbox disabled by NIGHTSHIFT_PI_SANDBOX=none — writes are NOT confined"
-    return 0
-  fi
-  if ! command -v bwrap >/dev/null 2>&1; then
-    log "pi cannot serve the fix stage: bwrap is missing, so the write confinement has no mechanism"
-    printf 'nightshift: the pi fix stage needs bwrap for its write confinement (see hook-spec.md Layer 2b)\n' \
-      > "$id/fix.err"
-    return 1
-  fi
-  build_test_sandbox "$wd" "$pi_home" host "$id"
-  # The stage home holds SYMLINKS into the operator's pi directory (pi_stage_home), and $HOME is not
-  # bound — so each link target is bound read-only on its own path or it dangles and pi starts
-  # without credentials or catalogs. Read-only: a stage has no business rewriting auth.json.
-  for f in auth.json models.json models-store.json; do
-    [ -e "$pi_home/$f" ] || continue
-    real="$(realpath -e "$pi_home/$f" 2>/dev/null || true)"
-    [ -n "$real" ] && [ "$real" != "$pi_home/$f" ] && _test_robind "$real"
-  done
-  # pi and node live under nvm, i.e. under $HOME, which is not bound. Two directories are bound and
-  # put on PATH: NIGHTSHIFT_PI_PATH, the host's declared pi location, and the directory `pi` ACTUALLY
-  # resolves from — they are the same in production, and binding only the former would leave the
-  # sandbox without the binary on any host that installs pi somewhere else entirely. Resolved with
-  # the same PATH prefix pi_run launches under, so the two can never disagree.
-  local pidir
-  p="${NIGHTSHIFT_PI_PATH:-}"
-  pidir="$(PATH="$(pi_path_prefix)$PATH" command -v pi 2>/dev/null || true)"
-  [ -n "$pidir" ] && pidir="$(dirname -- "$(realpath -e "$pidir" 2>/dev/null || printf '%s' "$pidir")")"
-  for f in "$p" "$pidir"; do
-    [ -n "$f" ] && [ -d "$f" ] || continue
-    # node resolves its own lib/ relative to `..`, so an nvm bin dir needs its prefix bound too.
-    [ -x "$f/node" ] && [ -d "$(dirname -- "$f")/lib/node_modules" ] && _test_robind "$(dirname -- "$f")"
-    _test_robind "$f"
-  done
-  # Extensions loaded BY PATH (`-e`, pi_run below) — on this host the auth extension that stamps the
-  # device header, i.e. the difference between a working call and a 403 that reads like a revoked
-  # credential. They live under the operator's pi directory, which is not bound, so each one's
-  # PACKAGE ROOT is bound read-only: the entry file alone is not enough, a TypeScript entry resolves
-  # imports and its package.json relative to that root.
-  local exts ext root
-  exts="${NIGHTSHIFT_PI_EXTENSIONS-${RB_PI_EXTENSIONS:-}}"
-  if [ -n "$exts" ]; then
-    local IFS=,
-    for ext in $exts; do
-      ext="$(printf '%s' "$ext" | tr -d '[:space:]')"
-      [ -n "$ext" ] && [ -e "$ext" ] || continue
-      root="$(dirname -- "$ext")"
-      while [ "$root" != / ] && [ ! -e "$root/package.json" ]; do root="$(dirname -- "$root")"; done
-      [ "$root" != / ] || root="$(dirname -- "$ext")"
-      _test_robind "$root"
-    done
-    unset IFS
-  fi
-  # A resolver, unlike the gate's sandbox. There the deliberate absence of /etc/resolv.conf is what
-  # forces every name through the vetting proxy, which resolves it on the host and checks the answer
-  # against the address policy. This stage has the host's own namespace and no such proxy, so
-  # withholding the resolver would not add a check — it would only break a provider addressed by
-  # name (this host's gateway is an IP literal; another host's need not be).
-  TEST_SANDBOX_ARGV+=( --ro-bind-try /etc/resolv.conf /etc/resolv.conf )
-  # --clearenv dropped the caller's environment, so what pi needs is re-declared here. GIT_CONFIG_*
-  # carries the Layer 1 pre-push hook, which is why HOOKS_DIR is bound read-only too.
-  _test_robind "$HOOKS_DIR"
-  TEST_SANDBOX_ARGV+=(
-    --setenv PATH "${p:+$p:}${pidir:+$pidir:}${NIGHTSHIFT_TEST_PATH:+$NIGHTSHIFT_TEST_PATH:}/usr/local/bin:/usr/bin:/bin"
-    --setenv PI_CODING_AGENT_DIR "$pi_home"
-    --setenv GIT_CONFIG_COUNT 1
-    --setenv GIT_CONFIG_KEY_0 core.hooksPath
-    --setenv GIT_CONFIG_VALUE_0 "$HOOKS_DIR"
-    --setenv NIGHTSHIFT_PI_SANDBOX_ACTIVE 1
-  )
-  return 0
-}
-
-pi_run() { # stage workdir item_dir
-  local stage="$1" wd="$2" id="$3" prompt model provider tools rc=0 parse_rc=0
-  # The Fix stage is refused unless the HOST explicitly opts in (`agent.pi_allow_fix: true`, env
-  # NIGHTSHIFT_PI_ALLOW_FIX=1). The other two adapters confine a Fix-stage write to the worktree by a
-  # MECHANISM of their own — claude's PreToolUse guard rejects a Write/Edit resolving outside it,
-  # codex's OS sandbox makes the write impossible — and pi has neither, so the Runner supplies one:
-  # pi_sandbox_argv's bwrap hull (ADR 0032), below at launch, leaves only the worktree and the stage's
-  # agent dir writable and refuses the stage when bwrap is missing. The failure it bounds is not
-  # malice but a confused absolute path: a worktree named `web-app` and a live repo at ~/web-app
-  # are one keystroke apart, and such a write appears in NO diff, so the morning branch review
-  # cannot catch it — which is exactly what NIGHTSHIFT_PI_SANDBOX=none brings back. The hull shares
-  # the host's network, so only filesystem reach is narrowed. `bash` stays withheld regardless (see
-  # the profile below), so a fix can still edit files but never execute anything.
-  local allow_fix="${NIGHTSHIFT_PI_ALLOW_FIX:-}"
-  [ -n "$allow_fix" ] || { [ "${RB_PI_ALLOW_FIX:-false}" = true ] && allow_fix=1; }
-  if [ "$stage" = fix ] && [ "${allow_fix:-0}" != 1 ]; then
-    log "pi cannot serve the fix stage: no write confinement mechanism (see hook-spec.md Layer 2b)"
-    printf 'nightshift: the pi adapter is read-only and refuses the fix stage\n' > "$id/$stage.err"
-    return 2
-  fi
-  # `-ne` (no extension discovery) is not merely a context-hygiene flag here: on a host whose models
-  # are served through a gateway, AUTHENTICATION ITSELF is provided by a pi extension that stamps the
-  # caller's device header, and dropping it makes every call fail with a 403 naming a device
-  # mismatch — a message that reads like a revoked credential and is not. Verified 2026-08-30 against
-  # this host's proxy. So discovery stays off (the operator's memory/subagent/websearch extensions
-  # have no business in a stage) and the auth extension is loaded back BY PATH, which `-e` does even
-  # under `-ne`. A host whose provider needs no such extension declares none and loses nothing.
-  local -a args=(-p --mode json --no-session --no-extensions --no-skills --no-prompt-templates
-    --no-approve)
-  local exts ext
-  exts="${NIGHTSHIFT_PI_EXTENSIONS-${RB_PI_EXTENSIONS:-}}"
-  if [ -n "$exts" ]; then
-    local IFS=,
-    for ext in $exts; do
-      [ -n "$ext" ] || continue
-      # Absolute, because the check happens in the RUNNER's cwd while pi runs in the worktree: a
-      # relative path that exists here can be missing there, which produces exactly the 403 the log
-      # line below exists to prevent.
-      ext="$(realpath -m -- "$ext" 2>/dev/null || printf '%s' "$ext")"
-      if [ -e "$ext" ]; then
-        args+=(-e "$ext")
-      else
-        # Naming an extension that is not there is a config error, and the failure it causes without
-        # this line is a 403 the operator would read as an auth problem. Say it once, here.
-        log "pi: declared extension not found: $ext"
-      fi
-    done
-  fi
-  # Same precedence as the other adapters: env if SET (empty = pass no flag), else the rulebook's
-  # `agent.pi_model` / `agent.pi_provider` (ADR 0020), else whatever pi resolves by itself.
-  model="${NIGHTSHIFT_PI_MODEL-${RB_PI_MODEL:-}}"
-  [ -z "$model" ] || args+=(--model "$model")
-  provider="${NIGHTSHIFT_PI_PROVIDER-${RB_PI_PROVIDER:-}}"
-  [ -z "$provider" ] || args+=(--provider "$provider")
-  # Capability profile, same principle as the claude half: enforce the stage's rules by which tools
-  # EXIST. Verified 2026-08-30 that pi honours the allowlist — a stage granted read,grep,find,ls was
-  # told to write a file and answered that it had no tool to do it, and no file appeared.
-  #
-  # For the other two adapters the tool profile is one layer over a mechanism (the PreToolUse guard,
-  # the OS sandbox). For pi it is the WHOLE confinement, so it may not be a knob an operator can
-  # widen by accident: a tuning snippet adding `bash` "so the reviewer can run the tests" would hand
-  # an unconfined shell to a stage on the Runner's host. The override may narrow the profile, never
-  # widen it past read-only — a write or exec tool in it aborts the stage.
-  # The Fix stage needs edit/write, and gets them ONLY on the stage the host opted into above —
-  # never on a read-only stage, where a write tool has no purpose and only widens the blast radius.
-  # `bash` is in neither profile and is rejected below whatever the host declares: an executing
-  # stage could run git, gh, curl or rm on the Runner's host, which no allowlist can then bound.
-  local permitted
-  if [ "$stage" = fix ]; then
-    tools="${NIGHTSHIFT_PI_FIX_TOOLS:-read,grep,find,ls,edit,write}"
-    permitted='read|grep|find|ls|glob|edit|write'
-  else
-    tools="${NIGHTSHIFT_PI_READONLY_TOOLS:-read,grep,find,ls}"
-    permitted='read|grep|find|ls|glob'
-  fi
-  local t
-  local IFS_SAVE="$IFS"
-  IFS=,
-  for t in $tools; do
-    t="$(printf '%s' "$t" | tr -d '[:space:]')"
-    [ -n "$t" ] && ! printf '%s' "$t" | grep -qxE "$permitted" && {
-      IFS="$IFS_SAVE"
-      log "pi: refusing tool '$t' on stage $stage — pi has no mechanism to confine a shell, and a write only where the host opted in"
-      printf 'nightshift: the pi %s profile may not grant %s\n' "$stage" "$t" > "$id/$stage.err"
-      return 2
-    }
-  done
-  IFS="$IFS_SAVE"
-  args+=(--tools "$tools")
-  prompt="$(stage_prompt "$stage" "$wd" "$id")"
-  # Stage isolation (ADR 0019): a Runner-owned agent dir with no AGENTS.md in it. The discovery
-  # flags above cover extensions, skills and prompt templates — none of which cover that file.
-  local pi_home
-  pi_home="$(pi_stage_home)"
-  [ -n "$pi_home" ] || return 2   # configuration refusal, not a wall (see claude_run)
-  # Same capture contract as the other adapters: stderr to $stage.err, the unparsed event stream to
-  # .raw_$stage. GIT_CONFIG_* injects the pre-push confinement for consistency with the other
-  # adapters even though this profile grants no shell — the hook costs nothing and the profile is
-  # the only thing standing between a future `bash` grant and an unconfined push.
-  local events="$id/.raw_$stage"
-  # The Fix stage runs inside the filesystem sandbox; every read-only stage runs as before (it has
-  # no write primitive to confine, so a sandbox would buy nothing and could only break a read).
-  local -a launch=()
-  if [ "$stage" = fix ]; then
-    pi_sandbox_argv "$wd" "$pi_home" "$id" || return 2
-    launch=( "${TEST_SANDBOX_ARGV[@]}" )
-  fi
-  (cd "$wd" && \
-    PATH="$(pi_path_prefix)$PATH" \
-    GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="$HOOKS_DIR" \
-    PI_CODING_AGENT_DIR="$pi_home" \
-    ${launch[@]+"${launch[@]}"} \
-    pi "${args[@]}" -- "$prompt" </dev/null) > "$events" 2>"$id/$stage.err" || rc=$?
-  # pi streams JSONL events and the ANSWER is the text content of the last assistant message that
-  # actually stopped. `.role=="assistant"` alone is not enough: the same stream carries thinking
-  # blocks and tool calls, and an aborted turn carries an empty content array.
-  jq -rs '[ .[] | select(type=="object" and .type=="message_end") | .message
-            | select(type=="object" and .role=="assistant" and .stopReason=="stop") ]
-          | last // {} | [(.content // [])[] | select(type=="object" and .type=="text") | .text]
-          | join("")' \
-    "$events" > "$id/$stage.out" 2>/dev/null || : > "$id/$stage.out"
-  # pi reports a provider/transport failure INSIDE the stream (stopReason "error" + errorMessage) and
-  # still exits 0 — verified 2026-08-30, where a 403 from the model gateway produced rc=0 and an
-  # empty answer. Left alone that is the exact failure ADR 0023 exists to prevent: a stage that never
-  # reached a model, recorded as one that ran and found nothing. So the stream's own verdict, not the
-  # exit code, decides whether the stage failed.
-  #
-  # An error event is not by itself a failed stage: pi retries a turn (its own stream says
-  # `willRetry`), so a transient rejection can be followed by a completed answer. Failing on the
-  # error alone would turn a provider hiccup into a lost review on the gate that decides shipping.
-  # What decides is whether an ANSWER survived — the error is recorded either way, because a stage
-  # that needed a retry is worth seeing in the morning.
-  local pi_err
-  pi_err="$(jq -rs '[ .[] | select(type=="object" and .type=="message_end") | .message
-                      | select(type=="object" and .role=="assistant" and .stopReason=="error")
-                      | .errorMessage // "unspecified error" ] | last // ""' \
-              "$events" 2>/dev/null || true)"
-  if [ -n "$pi_err" ]; then
-    printf 'pi: %s\n' "$pi_err" >> "$id/$stage.err"
-    [ "$rc" -ne 0 ] || [ -s "$id/$stage.out" ] || rc=1
-  fi
-  # Telemetry sidecar — same object contract as the other adapters. pi's usage rides on each
-  # assistant message and is PER MESSAGE, not cumulative, so the counters are summed across the
-  # stage's turns; the model id is taken from the last message that reports one. pi reports no
-  # context window, so that field degrades to null rather than being inferred.
-  jq -sc '[ .[] | select(type=="object" and .type=="message_end") | .message
-            | select(type=="object" and .role=="assistant") ] as $m |
-    [ $m[] | .usage | select(type=="object") ] as $u |
-    { model_id: ([ $m[] | .model | select(type=="string" and . != "") ] | last // null),
-      output_tokens:         ([ $u[] | .output    // 0 ] | add // null),
-      input_tokens:          ([ $u[] | .input     // 0 ] | add // null),
-      cache_read_tokens:     ([ $u[] | .cacheRead // 0 ] | add // null),
-      cache_creation_tokens: ([ $u[] | .cacheWrite // 0 ] | add // null),
-      context_window:        null,
-      cost_usd:              ([ $u[] | .cost.total // 0 ] | add // null),
       model_cost_usd:        null }' \
     "$events" > "$id/.usage_$stage" 2>/dev/null || true
   materialize_stage_output "$stage" "$id" || parse_rc=$?

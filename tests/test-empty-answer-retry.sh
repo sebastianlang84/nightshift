@@ -11,30 +11,29 @@ TMP="$(mktemp -d)"
 trap 'rc=$?; [ "$rc" -eq 0 ] || cat "$TMP/err" 2>/dev/null || true; rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/state" "$TMP/runs" "$TMP/digests" "$TMP/worktrees" "$TMP/wd" "$TMP/item"
 
-export NIGHTSHIFT_SOURCED=1 NIGHTSHIFT_AGENT=pi
+export NIGHTSHIFT_SOURCED=1 NIGHTSHIFT_AGENT=codex
 export NIGHTSHIFT_STATE_DIR="$TMP/state" NIGHTSHIFT_RUNS_DIR="$TMP/runs"
 export NIGHTSHIFT_DIGEST_DIR="$TMP/digests" NIGHTSHIFT_WORKTREES="$TMP/worktrees"
 source "$ROOT/bin/nightshift.sh"
 
 calls=0
 
-# The shape observed on 2026-09-11: the provider accepted the turn, billed it, and the stopped
-# assistant message carried an empty content array — so the answer file exists and is empty.
-pi_run() {
+# Codex completed a billed turn without an assistant message, leaving the answer file empty.
+codex_run() {
   local stage="$1" id="$3"
   calls=$((calls + 1))
   : > "$id/$stage.err"
   if [ "$calls" -eq 1 ]; then
-    printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"stop"}}' \
+    printf '%s\n' '{"type":"turn.completed","usage":{"output_tokens":25,"input_tokens":8622}}' \
       > "$id/.raw_$stage"
-    printf '%s\n' '{"model_id":"z-ai/glm-5.3-flash","output_tokens":25,"input_tokens":8622}' \
+    printf '%s\n' '{"model_id":"gpt-6.2-sol","output_tokens":25,"input_tokens":8622}' \
       > "$id/.usage_$stage"
     : > "$id/$stage.out"
     return 1
   fi
-  printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"{}"}],"stopReason":"stop"}}' \
+  printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"found\":false}"}}' \
     > "$id/.raw_$stage"
-  printf '%s\n' '{"model_id":"z-ai/glm-5.3-flash","output_tokens":900,"input_tokens":8622}' \
+  printf '%s\n' '{"model_id":"gpt-6.2-sol","output_tokens":900,"input_tokens":8622}' \
     > "$id/.usage_$stage"
   printf '{"found":false}\n' > "$id/$stage.out"
   printf '{"found":false}\n' > "$id/finding.json"
@@ -49,7 +48,7 @@ set -e
 [ "$calls" -eq 2 ] || { echo "expected one retry, got $calls attempt(s)" >&2; exit 1; }
 [ -z "$AGENT_FATAL" ] || { echo "a recovered empty answer still ended the night: $AGENT_FATAL" >&2; exit 1; }
 grep -q 'empty answer' "$TMP/err" || { echo "the retry was not announced" >&2; cat "$TMP/err" >&2; exit 1; }
-grep -q '"content":\[\]' "$TMP/item/.raw_explore.empty-answer-1" \
+grep -Fq '"type":"turn.completed"' "$TMP/item/.raw_explore.empty-answer-1" \
   || { echo "the empty attempt's evidence was not preserved" >&2; exit 1; }
 
 # Both attempts are telemetry: the empty turn cost tokens and the ledger must be able to show it.
@@ -61,7 +60,7 @@ jq -se 'length==2
 # An answer that ARRIVED and did not parse is the model's verdict on the repo, not a dropped turn.
 calls=0
 mkdir -p "$TMP/item-2"
-pi_run() {
+codex_run() {
   local stage="$1" id="$3"
   calls=$((calls + 1))
   : > "$id/$stage.err"; : > "$id/.raw_$stage"
@@ -78,10 +77,9 @@ set -e
 # Status 2 is an adapter refusing to run — a configuration verdict a second identical call repeats.
 calls=0
 mkdir -p "$TMP/item-3"
-pi_run() {
+codex_run() {
   local stage="$1" id="$3"
   calls=$((calls + 1))
-  printf 'nightshift: the pi %s profile may not grant bash\n' "$stage" > "$id/$stage.err"
   : > "$id/$stage.out"
   return 2
 }
@@ -96,7 +94,7 @@ set -e
 EMPTY_ANSWER_RETRIES=0
 calls=0
 mkdir -p "$TMP/item-4"
-pi_run() {
+codex_run() {
   local stage="$1" id="$3"
   calls=$((calls + 1))
   : > "$id/$stage.err"; : > "$id/.raw_$stage"; : > "$id/$stage.out"
