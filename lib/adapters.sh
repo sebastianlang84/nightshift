@@ -359,7 +359,7 @@ claude_run() { # stage workdir item_dir
   (cd "$wd" && \
     GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="$HOOKS_DIR" \
     NIGHTSHIFT_WORKTREE="$wd" CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 \
-    claude -p "$prompt" --output-format json --settings "$STATE_DIR/claude-settings.json" --tools "$tools" "${model_arg[@]}" "${sources_arg[@]}" $flags </dev/null) >"$rawf" 2>"$errf" || rc=$?
+    claude -p --output-format json --settings "$STATE_DIR/claude-settings.json" --tools "$tools" "${model_arg[@]}" "${sources_arg[@]}" $flags < <(printf '%s' "$prompt")) >"$rawf" 2>"$errf" || rc=$?
   out="$(cat "$rawf")"
   # `claude -p --output-format json` is NOT a stable shape. Sometimes it is a single
   # result object ({result,usage,total_cost_usd}); sometimes a JSON ARRAY of events with

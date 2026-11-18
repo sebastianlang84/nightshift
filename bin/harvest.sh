@@ -370,7 +370,7 @@ retract_night() { # <night> [reason]
   # a second pile of retraction rows.
   rows=$(jq -sc --arg n "$night" \
     '[.[]|select(.outcome=="retracted")|.item] as $done
-     | [.[]|select(.night==$n and .outcome=="empty" and ([.item]|inside($done)|not))]' "$LEDGER")
+     | [.[]|select(.night==$n and .outcome=="empty" and (.item | IN($done[]) | not))]' "$LEDGER")
   if [ "$rows" = "[]" ]; then
     echo "nothing to retract for $night (no un-retracted \`empty\` rows)"; return 0
   fi

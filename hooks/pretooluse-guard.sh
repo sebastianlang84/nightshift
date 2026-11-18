@@ -36,9 +36,10 @@ deny() {
 }
 
 # ---- (1) Bash: anti-bypass for the git-confinement hook ----
-# Keyed on the presence of a command (not tool_name) so the check is robust to
-# contract variation and never regresses the git confinement.
-cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null || true)"
+# Require one complete tool call and accept a command for Bash or an unnamed tool.
+cmd="$(jq -sr 'if length == 1 then .[0] else error("expected one tool call") end
+  | select(.tool_name == "Bash" or .tool_name == null) | .tool_input.command | strings' \
+  <<< "$input" 2>/dev/null)" || deny "invalid tool call payload"
 if [ -n "$cmd" ]; then
   case "$cmd" in
     *--no-verify*)             deny "git --no-verify would bypass the pre-push confinement hook" ;;
@@ -66,8 +67,11 @@ if [ -n "$cmd" ]; then
 fi
 
 # ---- (2) Write/Edit/MultiEdit/NotebookEdit: worktree write confinement ----
-path="$(printf '%s' "$input" | jq -r '.tool_input.file_path // .tool_input.notebook_path // empty' 2>/dev/null || true)"
-[ -z "$path" ] && exit 0   # no path to check — allow
+# NotebookEdit writes notebook_path; every other write tool writes file_path.
+path="$(jq -r 'select(.tool_name != "Bash")
+  | if .tool_name == "NotebookEdit" then .tool_input.notebook_path else .tool_input.file_path end | strings' \
+  <<< "$input" 2>/dev/null)" || deny "invalid tool call payload"
+[ -n "$path" ] || deny "tool call is missing a command or write path"
 
 # Worktree root, most-authoritative first: the Runner-injected env (we control it),
 # then the hook payload's cwd (claude runs in the worktree), then this process's cwd.

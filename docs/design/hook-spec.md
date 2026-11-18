@@ -94,7 +94,8 @@ otherwise emit malformed JSON from the very call that is supposed to block the w
 unavailable the guard still denies, with a fixed reason — this path fails closed.
 
 **Matcher.** The guard is registered for `Bash|Write|Edit|MultiEdit|NotebookEdit` — a `matcher:"Bash"`
-alone would never fire on a `Write`, leaving (b) dead.
+alone would never fire on a `Write`, leaving (b) dead. The guard denies malformed input and calls
+missing the command or write path required by the matched tool.
 
 ## Implementation (prototype) — how the layers are actually activated
 

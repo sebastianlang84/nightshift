@@ -11,3 +11,7 @@ def latest_branch_verdicts:
 def latest_fingerprint_verdicts(identity):
   map(select(.outcome == "verdict" and .fingerprint != null))
   | group_by(identity) | map(last);
+
+def unretracted_rows:
+  [.[] | select(.outcome == "retracted") | .item] as $void
+  | .[] | select(.item | IN($void[]) | not);

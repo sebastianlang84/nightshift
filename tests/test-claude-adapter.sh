@@ -45,10 +45,10 @@ EOF
 cat > "$TMP/bin/claude" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-prompt="" outfmt="" settings="" tools="" skip=0 maxturns=""
+prompt="$(cat)" outfmt="" settings="" tools="" skip=0 maxturns=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    -p) prompt="$2"; shift 2 ;;
+    -p) shift ;;
     --output-format) outfmt="$2"; shift 2 ;;
     --settings) settings="$2"; shift 2 ;;
     --tools) tools="$2"; shift 2 ;;

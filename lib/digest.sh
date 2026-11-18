@@ -146,7 +146,7 @@ write_digest() { # made open status [advice]
     # recon repeating itself (which would be a circular doom loop).
     [ -f "$LEDGER" ] && jq -rs '
       [.[]|select(.outcome=="retracted")|.item] as $void
-      | [.[] | select(.dimension!=null and ([.item]|inside($void)|not)
+      | [.[] | select(.dimension!=null and (.item | IN($void[]) | not)
                       and (.outcome=="empty" or .outcome=="finding" or .outcome=="shipped" or .outcome=="abandoned"))]
       | group_by([.repo,.dimension])
       | map(.[-3:])
@@ -161,7 +161,7 @@ write_digest() { # made open status [advice]
     # names only `empty` rows by their exact item, so the retraction filter never meets an -fN id.
     [ -f "$LEDGER" ] && jq -rs '
       [.[]|select(.outcome=="retracted")|.item] as $void
-      | [.[] | select(.dimension!=null and .item!=null and ([.item]|inside($void)|not)
+      | [.[] | select(.dimension!=null and .item!=null and (.item | IN($void[]) | not)
                       and (.outcome=="empty" or .outcome=="finding" or .outcome=="shipped" or .outcome=="abandoned"))
              | {d:.dimension, p:(.item|sub("-f[0-9]+$";"")), e:(.outcome=="empty")}]
       | group_by(.d)
@@ -277,10 +277,9 @@ write_digest() { # made open status [advice]
 # An in-flight stage may have no runs.jsonl row yet, so explicitly call its outcome unknown.
 interrupted_digest() { # signal exit-code; main's counters are dynamically scoped in Bash
   [ "$BASHPID" = "${runner_pid:-}" ] || return 0
-  trap '' TERM INT
+  trap '' TERM INT PIPE
   set +e  # Reporting failure must not replace the signal's nonzero exit status.
   local signal="$1" rc="$2" tmp
-  log "night ABORTED: interrupted by SIG$signal — preserving recorded results"
   tmp=$(mktemp "$DIGEST_DIR/.interrupted.XXXXXX") || exit "$rc"
   {
     echo "# nightshift digest — $NIGHT"
@@ -305,5 +304,6 @@ interrupted_digest() { # signal exit-code; main's counters are dynamically scope
     fi
   } > "$tmp"
   mv -f "$tmp" "$DIGEST_DIR/$NIGHT.md"
+  log "night ABORTED: interrupted by SIG$signal — see $DIGEST_DIR/$NIGHT.md" || true
   exit "$rc"
 }

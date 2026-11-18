@@ -127,22 +127,33 @@ fi
 if [ -n "${NIGHTSHIFT_TEST_SANDBOX_ROBIND:-}" ]; then
   echo "[nightshift-cron] test gates bind read-only $NIGHTSHIFT_TEST_SANDBOX_ROBIND" | tee -a "$LOG"
 fi
-# The orchestrator's exit status is the thing this launcher exists to record, so the
-# pipeline below must NOT be allowed to kill the shell: under `set -e` + `pipefail` a
-# nonzero exit from nightshift.sh (e.g. a rulebook parse error, or the split-state
-# guard) fails the pipeline and terminates the launcher right here — leaving the
-# unattended log with a `start` line, no `done rc=` footer, and no recorded status,
-# which is precisely the case the footer is for.
-#
-# `set +e` rather than `|| true`: `||` runs a second command on the failure path, and
-# every command — a bare `true` included — resets PIPESTATUS. Nothing may execute
-# between the pipeline and the capture.
+# A stop signal is forwarded to the runner, which writes its own digest; the launcher then ends
+# normally (footer, fallback digest). systemd's stop timeout bounds the wait.
+stop_signal=""
+forward_stop() { # signal
+  stop_signal="$1"
+  [ -z "${runner_pid:-}" ] || kill -s "$1" "$runner_pid" 2>/dev/null || true
+}
+
 night="$(date +%Y-%m-%d)"
 run_start=$(date +%s)
-set +e
-"$NIGHTSHIFT_HOME/bin/nightshift.sh" 2>&1 | tee -a "$LOG"
-rc=${PIPESTATUS[0]}
-set -e
+trap 'forward_stop TERM' TERM
+trap 'forward_stop INT' INT
+# tee ignores TERM so a stop signal to the whole cgroup cannot close the runner's pipe early.
+exec {log_fd}> >(trap '' TERM; exec tee -a "$LOG")
+tee_pid=$!
+env --default-signal=INT "$NIGHTSHIFT_HOME/bin/nightshift.sh" >&"$log_fd" 2>&1 {log_fd}>&- &
+runner_pid=$!
+exec {log_fd}>&-
+[ -z "$stop_signal" ] || kill -s "$stop_signal" "$runner_pid" 2>/dev/null || true
+# A trap interrupts `wait`; wait again until the runner itself is reaped (it then leaves the job table).
+while :; do
+  wait "$runner_pid" && rc=0 || rc=$?
+  jobs -p | grep -qx "$runner_pid" || break
+done
+trap '' TERM INT
+runner_pid=""
+wait "$tee_pid" || true
 echo "=== nightshift done rc=$rc $(date -Iseconds) ===" | tee -a "$LOG"
 # The digest is the only report. The Runner writes one on a normal end, an agent abort and a signal,
 # but not when it exits before or outside write_digest (a rulebook parse error, the split-state

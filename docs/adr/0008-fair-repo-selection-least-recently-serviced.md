@@ -26,15 +26,14 @@ Order repos by **when nightshift last serviced them, ascending** — the longest
 first. Human commit-recency is demoted to a **tiebreaker** (descending), so among equally- or
 never-serviced repos the hotter code still wins.
 
-- "Last serviced" = the timestamp of the most recent **work-item** ledger entry for the repo:
-  outcome `finding`, `shipped`, or `abandoned`. Harvest `verdict` reconcile rows are excluded —
-  they are bookkeeping, not attention spent, and would otherwise make a just-merged repo look
-  freshly serviced and unfairly sink it. Implemented by `last_serviced_epoch()`.
+- "Last serviced" is the timestamp of the most recent recorded runner outcome for the repo,
+  including `empty` and failures. `last_serviced_epoch()` excludes harvest bookkeeping and uses
+  the same retraction filter as the dimension cadence calculation.
 - Never-serviced repo → epoch `0` → sorts first (cold-start priority).
 - Cold start (empty ledger): every repo ties at `0`, so night one orders purely by
   commit-recency — identical to the prior behavior.
 
-After nightshift ships or records a finding for a repo, that repo's last-serviced time becomes
+After nightshift records an outcome for a repo, that repo's last-serviced time becomes
 the newest, so it sinks to the bottom of the next pass and the previously-neglected repos rise.
 The order self-balances instead of fixating.
 
@@ -46,14 +45,6 @@ The order self-balances instead of fixating.
   `nightshift → …` to `auth-extension → web-app → service-stack → nightshift`.
 - "Review hottest code first" survives only as a tiebreaker, not the primary policy. This is a
   deliberate trade of recency-relevance for fleet coverage; the operator asked for coverage.
-- Signal gap (accepted): an explore that finds **nothing** does not count as a service here. It
-  does write an `empty` row now, which the explore-cadence index counts, but `last_serviced_epoch()`
-  deliberately leaves `empty` out, so a repo that
-  keeps yielding no findings does not advance its last-serviced time and keeps sorting first —
-  it re-consumes the first explore slot each pass until it finally produces something. Bounded
-  in practice (every repo is explored once per pass regardless of order; a no-finding explore is
-  cheap) and arguably correct (a never-productive repo should keep getting first look). If it
-  ever bites, the fix is to persist a `last_explored` marker rather than derive from the ledger.
 - `select_order()` now runs one small `jq` slurp of the ledger per repo per pass (via
   `last_serviced_epoch`). The ledger is a short append-only file; cost is negligible.
 - Does not touch the shallow "one-finding-per-repo, first-found-wins" exploration behavior —

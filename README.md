@@ -93,7 +93,7 @@ Common settings include:
 
 | Setting | Purpose |
 | --- | --- |
-| `NIGHTSHIFT_AGENT` | `claude` (default), `codex`, or `mock` |
+| `NIGHTSHIFT_AGENT` | `claude`, `codex`, or `mock`. Manual runs require this setting or `agent.primary` in the rulebook. The scheduler falls back to `claude`. |
 | `agent.review_agent` | Separate adapter for Review |
 | `limits.max_open_branches` | Maximum branches awaiting a verdict across repositories |
 | `limits.max_run_minutes` | Optional run budget; an in-flight stage may finish |

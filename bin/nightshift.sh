@@ -15,12 +15,7 @@ PATH="$(printf '%s' "$PATH" | tr ':' '\n' | grep '^/' | paste -sd: - || true)"
 export PATH
 
 NIGHTSHIFT_HOME="${NIGHTSHIFT_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-# Was the adapter chosen by the CALLER, or is this the built-in default? The rulebook may name the
-# night's adapter (agent.primary), but an explicit env var has to keep winning — that is how a
-# one-off hand run picks a different adapter without editing host governance. Recording it before
-# the default is applied is the only way to tell the two apart afterwards.
-NIGHTSHIFT_AGENT_FROM_ENV="${NIGHTSHIFT_AGENT+1}"
-NIGHTSHIFT_AGENT="${NIGHTSHIFT_AGENT:-mock}"
+NIGHTSHIFT_AGENT="${NIGHTSHIFT_AGENT:-}"
 RUN_PRIMARY_AGENT="$NIGHTSHIFT_AGENT"
 RUN_AGENT_ROUTE="$NIGHTSHIFT_AGENT"
 # After pushing a nightshift/* branch, optionally open a PR for it (1=on). OFF by default:
@@ -120,7 +115,7 @@ RB_REVIEW_AGENT=""
 REVIEW_VENDOR=""
 # Which adapters advise on every open branch each night (ADR 0038), comma-separated; empty = none.
 RB_ADVISORS=""
-# The night's own adapter as declared by the rulebook (empty = the env/default decides).
+# The night's own adapter as declared by the rulebook.
 RB_PRIMARY_AGENT=""
 # Announce which model the night will REQUEST, and where that choice came from (ADR 0020). Not which
 # model serves it: with no --model the CLI picks for itself, and even a given id may be an alias that
@@ -218,14 +213,9 @@ load_rulebook() {
   # Per-run safety ceiling: the rulebook wins; NIGHTSHIFT_MAX_RUN_BRANCHES stays as an
   # ops override for when it is not set there; 50 is the last-resort default.
   MAX_RUN_BRANCHES="${rb_run_branches:-${NIGHTSHIFT_MAX_RUN_BRANCHES:-50}}"
-  # Apply the rulebook's adapter only when the caller did not name one. Both RUN_PRIMARY_AGENT and
-  # RUN_AGENT_ROUTE were captured from the pre-rulebook value at load time and feed the digest's
-  # route line, so they have to move with it or the morning would read the wrong adapter.
-  if [ -z "${NIGHTSHIFT_AGENT_FROM_ENV:-}" ] && [ -n "$RB_PRIMARY_AGENT" ]; then
-    NIGHTSHIFT_AGENT="$RB_PRIMARY_AGENT"
-    RUN_PRIMARY_AGENT="$NIGHTSHIFT_AGENT"
-    RUN_AGENT_ROUTE="$NIGHTSHIFT_AGENT"
-  fi
+  NIGHTSHIFT_AGENT="${NIGHTSHIFT_AGENT:-$RB_PRIMARY_AGENT}"
+  RUN_PRIMARY_AGENT="$NIGHTSHIFT_AGENT"
+  RUN_AGENT_ROUTE="$NIGHTSHIFT_AGENT"
   export NIGHTSHIFT_BRANCH_PREFIX="$BRANCH_PREFIX"
 }
 
@@ -423,15 +413,12 @@ search_history() { # repo -> prior receipts and latest terminal decisions, never
   ' "$LEDGER" 2>/dev/null || true
 }
 
-last_serviced_epoch() { # repo -> epoch of the last WORK-ITEM nightshift produced for it (0 if never)
-  # Fairness signal for select_order (ADR 0008): the more recently nightshift last serviced a
-  # repo, the LATER it sorts. Only work-item outcomes count (finding/shipped/abandoned) — the
-  # harvest `verdict` reconcile rows are bookkeeping, not attention spent, and would otherwise
-  # make a just-merged repo look freshly serviced and sink it unfairly.
+last_serviced_epoch() { # repo -> epoch of the last recorded service (0 if never)
   local repo="$1" iso
   [ -f "$LEDGER" ] || { echo 0; return; }
-  iso=$(jq -rs --arg r "$repo" \
-    '[.[]|select(.repo==$r and (.outcome=="finding" or .outcome=="shipped" or .outcome=="abandoned"))|.ts]
+  iso=$(jq -L "$NIGHTSHIFT_HOME/lib" -rs --arg r "$repo" '
+     include "ledger";
+     [unretracted_rows | select(.repo==$r and .outcome!=null and .outcome!="verdict" and .source!="orphan-adopt") | .ts]
      | max // empty' "$LEDGER" 2>/dev/null || true)
   [ -n "$iso" ] || { echo 0; return; }
   date -d "$iso" +%s 2>/dev/null || echo 0
@@ -716,7 +703,7 @@ refresh_review_vendor() {
   local out
   # Its answer counts only from a command that succeeded: one that printed `claude` and then failed
   # or timed out has not shown that the quota allows it.
-  out="$(timeout "${NIGHTSHIFT_REVIEW_VENDOR_TIMEOUT:-150}" sh -c "$NIGHTSHIFT_REVIEW_VENDOR_CMD" 2>/dev/null)" || out=""
+  out="$(timeout "${NIGHTSHIFT_REVIEW_VENDOR_TIMEOUT:-150}" sh -c "$NIGHTSHIFT_REVIEW_VENDOR_CMD" </dev/null 2>/dev/null)" || out=""
   out="$(printf '%s\n' "$out" | head -n 1 | tr -d '[:space:]')"
   case "$out" in claude|codex) REVIEW_VENDOR="$out" ;; *) REVIEW_VENDOR=codex
     log "review vendor command gave '${out:-nothing}'; reviewing on codex" ;; esac
@@ -1266,9 +1253,9 @@ refresh_ledger_gap_index() { # rebuild LEDGER_GAP_INDEX (repo\tservices\tmedian_
   # Keep item identity for the converter: item-<epoch>-fN siblings are ONE Explore service.
   # Filter retractions first so a withdrawn row cannot supply that pass's timestamp.
   # On a jq/converter failure keep any existing index and retry next call, as above.
-  rows=$(jq -rs '
-            [.[]|select(.outcome=="retracted")|.item] as $void
-            | .[]|select(.repo!=null and ([.item]|inside($void)|not)
+  rows=$(jq -L "$NIGHTSHIFT_HOME/lib" -rs '
+            include "ledger";
+            unretracted_rows | select(.repo!=null
                          and (.outcome=="finding" or .outcome=="shipped" or .outcome=="abandoned" or .outcome=="empty"))
             | [.repo,.ts,.item] | @tsv' \
           "$LEDGER" 2>/dev/null \
@@ -1671,7 +1658,7 @@ report_blocked_base() { # repo sha state log — once per red spell, through the
   ( flock -w 60 9 || exit 1
     [ -f "$BLOCKED_REPORTED" ] && awk -F'\t' -v r="$repo" '$1==r{f=1} END{exit !f}' "$BLOCKED_REPORTED" && exit 0
     timeout "${NIGHTSHIFT_BLOCKED_BASE_TIMEOUT:-60}" sh -c "$NIGHTSHIFT_BLOCKED_BASE_CMD" sh \
-      "$repo" "$sha" "$state" "$logf" >/dev/null 2>&1 || exit 1
+      "$repo" "$sha" "$state" "$logf" </dev/null >/dev/null 2>&1 || exit 1
     printf '%s\t%s\n' "$repo" "$sha" >> "$BLOCKED_REPORTED"
   ) 9>"$BLOCKED_REPORTED.lock" \
     || log "  $(basename "$repo"): reporting the blocked base failed — tried again next night"
@@ -2326,6 +2313,10 @@ guard_ledger_valid() {
 # --------------------------------------------------------------------- main ----
 main() {
   load_rulebook
+  if [ -z "$NIGHTSHIFT_AGENT" ]; then
+    log "no agent configured. Set NIGHTSHIFT_AGENT or agent.primary in $RULEBOOK"
+    return 2
+  fi
   case "${NIGHTSHIFT_QUOTA_FALLBACK_AGENT:-}" in
     "") ;;
     codex)
@@ -2444,7 +2435,10 @@ main() {
     # was shipped. Only shipping keeps the multi-pass loop alive: shipped work is bounded by the
     # branch caps, whereas a nondeterministic Findings-only repo could surface new findings forever.
     progress=0; ship_progress=0
-  while IFS=$'\t' read -r repo mode cfgbase; do
+  # Read the queue up front: no subprocess may inherit (and drain) it through stdin or an fd.
+  mapfile -t queue < <(select_order)
+  for row in ${queue[@]+"${queue[@]}"}; do
+    IFS=$'\t' read -r repo mode cfgbase <<< "$row"
     [ -n "$repo" ] || continue
     [ "$open" -ge "$MAX_OPEN" ] && { log "open-branch cap reached ($open/$MAX_OPEN) — stop"; stop_reason=backpressure; break; }
     [ "$made" -ge "$MAX_RUN_BRANCHES" ] && { log "safety ceiling ($MAX_RUN_BRANCHES) reached — stop"; stop_reason=ceiling; break; }
@@ -2789,7 +2783,7 @@ main() {
       if [ -n "$AGENT_FATAL" ]; then stop_reason=agent_unavailable; break; fi
     done
     case "$stop_reason" in backpressure|budget|agent_unavailable|ceiling) break ;; esac
-  done < <(select_order)
+  done </dev/null
     case "$stop_reason" in budget|agent_unavailable) break ;; esac
     # Gate on SHIPPABLE progress. Findings surface once (they dedup/latch), so a pass that only
     # surfaced findings must not spin the loop — else a nondeterministic Findings-only fleet never
