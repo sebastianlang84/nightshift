@@ -41,6 +41,7 @@ LEDGER="$STATE_DIR/ledger.jsonl"
 # Freshness snapshot for open findings (lib/probe_findings.py): derived, disposable, rewritten by
 # harvest and by the verify phase. Read by the dashboard's Nightshift tab through the same mount.
 PROBE_SNAPSHOT="$STATE_DIR/findings-probe.json"
+SURVIVAL_SNAPSHOT="$STATE_DIR/fix-survival.json"   # derived by harvest (lib/probe_survival.py), read by the digest
 # Derived, disposable index of the per-(repo,dimension) ledger aggregates the selection loop needs:
 # the last service epoch (last_dim_epoch) and the last SHIPPED epoch (evidence_override). One
 # aggregating jq pass over the append-only ledger, memoized on the ledger's mtime, so their nested
@@ -153,7 +154,7 @@ load_rulebook() {
   # run proceeded on a partial fleet. Fail closed instead: abort the whole run.
   parsed="$(python3 "$NIGHTSHIFT_HOME/lib/parse_rulebook.py" "$RULEBOOK")" \
     || { log "rulebook parse failed ($RULEBOOK) — aborting run"; exit 1; }
-  while IFS=$'\t' read -r tag a b c d e f g h i; do
+  while IFS=$'\t' read -r tag a b c d e f g _protected h i; do
     case "$tag" in
       prefix)                BRANCH_PREFIX="$a" ;;
       max_open)              MAX_OPEN="$a" ;;
@@ -1660,7 +1661,8 @@ provision_worktree() { # repo worktree item_dir -> 0 ran or skipped, 2 not herme
 base_gate_status() { # repo sha item_dir cmd label consequence
   local repo="$1" sha="$2" id="$3" tcmd="$4" label="$5" consequence="$6" bwt brc=0
   bwt="$WORKTREES_DIR/base-gate-$(date +%s%N)"
-  setup_worktree "$repo" "$bwt" "$sha" 2>/dev/null || { log "  $label: no worktree — skipped"; return 2; }
+  setup_worktree "$repo" "$bwt" "$sha" 2>"$id/base-tests.log" \
+    || { log "  $label: no worktree — skipped (see $id/base-tests.log)"; return 2; }
   gate_exec "$repo" "$bwt" "$id" "$tcmd" "$id/base-tests.log" "$label" "$consequence" || brc=$?
   remove_worktree "$repo" "$bwt"
   [ ! -e "$bwt" ] || log "  $label: could not remove $bwt — bin/status.sh lists it as clutter"
@@ -1684,79 +1686,75 @@ base_suite_red() { # repo worktree item_dir cmd
   [ "$st" -eq 1 ]
 }
 
-# Before the FIRST fix per repo and base commit in a night, run the gate once on the unchanged base.
-# A base that is already red (a broken merge, a registry outage) or a gate that cannot run (no
-# bwrap) used to be found only after Fix and Review had been paid for, for every finding, every
-# night, without shipping anything. Checked once per night per base: zero model tokens, one suite
-# run. A gate that cannot run skips the repo's fixes. A red base still gets ONE fix attempt per
-# night, because a finding may be the very breakage and its fix the repair; once that attempt is
-# spent, the repo's other fixes are skipped. Which findings already had their attempt on this red
-# base is kept across nights (BASE_RED_TRIED), so the allowance rotates: an unrelated finding that
-# ranks first cannot take the attempt every night and starve the repair. An attempt is recorded only
-# once its Fix actually starts (base_red_started), and a night in which every finding was already
-# recorded clears the record (base_red_wrap_all), so the rotation starts over instead of running dry.
-# Skipped findings come back.
-declare -gA BASE_PRECHECK=()   # "repo<TAB>sha" -> green | red | red-tried | unavailable, this process only
+# Before Explore, once per repo and base commit in a night, run the gate on the unchanged base.
+# A red base (a broken merge, a registry outage, a suite that needs the host) or a gate that cannot
+# run used to surface only after Explore, Fix and Review: 2026-11-12..16 twenty fixes in three repos
+# ended gate-blocked, the night's work went to the one repo whose suite was green, and nobody was
+# told. Now such a repo is skipped for the night, named at the top of the digest, and reported once
+# per red spell through NIGHTSHIFT_BLOCKED_BASE_CMD so its owner can repair the suite. Zero model
+# tokens, one suite run per base.
+declare -gA BASE_PRECHECK=()       # "repo<TAB>sha" -> green | red | unavailable, this process only
+declare -gA BASE_PRECHECK_LOG=()   # "repo<TAB>sha" -> the pre-check's log
+declare -gA BASE_SKIPPED=()        # repo -> why; a repo skipped once stays skipped for the run
+declare -ga BLOCKED_BASES=()       # "repo<TAB>sha<TAB>red|unavailable<TAB>log", for the digest
 BASE_PRECHECK_WHY=""
-BASE_RED_TRIED="$STATE_DIR/base-red-attempts.tsv"   # repo<TAB>sha<TAB>fingerprint, per red base
-base_red_record() { # repo sha fp — record the attempt; drop entries for this repo's older bases
-  local repo="$1" sha="$2" fp="$3" tmp
-  tmp="$(mktemp "$STATE_DIR/.base-red.XXXXXX")" || return 0
-  { [ -f "$BASE_RED_TRIED" ] && awk -F'\t' -v r="$repo" -v s="$sha" '$1!=r || $2==s' "$BASE_RED_TRIED"
-    printf '%s\t%s\t%s\n' "$repo" "$sha" "$fp"; } > "$tmp" && mv -f "$tmp" "$BASE_RED_TRIED"
-  rm -f "$tmp"
+BLOCKED_REPORTED="$STATE_DIR/blocked-bases.tsv"   # repo<TAB>sha of each repo reported and not green since
+blocked_reported_drop() { # repo — the repo is green again; a later red spell is reported anew
+  [ -f "$BLOCKED_REPORTED" ] || return 0
+  ( flock -w 60 9 || exit 1
+    tmp="$(mktemp "$STATE_DIR/.blocked.XXXXXX")" || exit 1
+    if awk -F'\t' -v r="$1" '$1!=r' "$BLOCKED_REPORTED" > "$tmp" && mv -f "$tmp" "$BLOCKED_REPORTED"; then
+      exit 0
+    fi
+    rm -f "$tmp"; exit 1
+  ) 9>"$BLOCKED_REPORTED.lock" \
+    || log "  $(basename "$1"): could not clear its blocked-base record — its next red spell may go unreported"
 }
-base_red_started() { # repo sha fp ok — after the fix's worktree setup; ok=0 means it failed
-  local key="$1"$'\t'"$2"
-  [ "${BASE_PRECHECK[$key]:-}" = red-tried ] || return 0
-  if [ "$4" = 1 ]; then
-    BASE_PRECHECK[$key]=red-started
-    base_red_record "$1" "$2" "$3"
-  else
-    BASE_PRECHECK[$key]=red    # the attempt never started: the next finding may take it
-  fi
+report_blocked_base() { # repo sha state log — once per red spell, through the host's command
+  local repo="$1" sha="$2" state="$3" logf="$4"
+  [ -n "${NIGHTSHIFT_BLOCKED_BASE_CMD:-}" ] || return 0
+  # One lock around check, send and record, so two overlapping runs cannot both send.
+  ( flock -w 60 9 || exit 1
+    [ -f "$BLOCKED_REPORTED" ] && awk -F'\t' -v r="$repo" '$1==r{f=1} END{exit !f}' "$BLOCKED_REPORTED" && exit 0
+    timeout "${NIGHTSHIFT_BLOCKED_BASE_TIMEOUT:-60}" sh -c "$NIGHTSHIFT_BLOCKED_BASE_CMD" sh \
+      "$repo" "$sha" "$state" "$logf" >/dev/null 2>&1 || exit 1
+    printf '%s\t%s\n' "$repo" "$sha" >> "$BLOCKED_REPORTED"
+  ) 9>"$BLOCKED_REPORTED.lock" \
+    || log "  $(basename "$repo"): reporting the blocked base failed — tried again next night"
 }
-base_red_wrap_all() { # at the end of the night: clear every red base whose attempt nobody could take
-  local key tmp
-  [ -f "$BASE_RED_TRIED" ] || return 0
-  for key in "${!BASE_PRECHECK[@]}"; do
-    [ "${BASE_PRECHECK[$key]}" = red ] || continue
-    tmp="$(mktemp "$STATE_DIR/.base-red.XXXXXX")" || return 0
-    awk -F'\t' -v r="${key%%$'\t'*}" -v s="${key#*$'\t'}" '!($1==r && $2==s)' "$BASE_RED_TRIED" > "$tmp" \
-      && mv -f "$tmp" "$BASE_RED_TRIED"
-    rm -f "$tmp"
-  done
-}
-base_ready_for_fix() { # repo sha item_dir fingerprint -> 0 fix may start; 1 skip (BASE_PRECHECK_WHY says why)
-  local repo="$1" sha="$2" id="$3" fp="${4:-}" key tcmd st=0
+base_precheck() { # repo sha item_dir -> 0 green; 1 red or unavailable (BASE_PRECHECK_WHY says why)
+  local repo="$1" sha="$2" id="$3" key tcmd st=0 state
   key="$repo"$'\t'"$sha"
+  # The base can move between passes (an automatic merge). The digest says the repo was skipped
+  # tonight, so a later pass must not admit it on a newer, green base.
+  if [ -n "${BASE_SKIPPED[$repo]:-}" ]; then
+    BASE_PRECHECK_WHY="${BASE_SKIPPED[$repo]}"
+    return 1
+  fi
   tcmd=$(repo_test_cmd "$repo")
   if [ -z "$tcmd" ]; then
-    BASE_PRECHECK_WHY="not attempted: no test_cmd in the rulebook for $repo"
+    BASE_PRECHECK_WHY="no test_cmd in the rulebook for $repo"
     return 1
   fi
   if [ -z "${BASE_PRECHECK[$key]:-}" ]; then
-    base_gate_status "$repo" "$sha" "$id" "$tcmd" "base pre-check" "skipping this repo's fixes tonight" || st=$?
-    case "$st" in
-      0) BASE_PRECHECK[$key]=green ;;
-      1) BASE_PRECHECK[$key]=red
-         log "  $(basename "$repo"): the suite is red on the unchanged base ${sha:0:12} — one fix attempt tonight, in case it repairs the suite (see $id/base-tests.log)" ;;
-      *) BASE_PRECHECK[$key]=unavailable
-         log "  $(basename "$repo"): the ship gate cannot run on the base ${sha:0:12} — no fixes for this repo tonight (see $id/base-tests.log)" ;;
-    esac
+    base_gate_status "$repo" "$sha" "$id" "$tcmd" "base pre-check" "skipping this repo tonight" || st=$?
+    case "$st" in 0) state=green ;; 1) state=red ;; *) state=unavailable ;; esac
+    BASE_PRECHECK[$key]=$state
+    BASE_PRECHECK_LOG[$key]="$id/base-tests.log"
+    if [ "$state" = green ]; then
+      blocked_reported_drop "$repo"
+    else
+      BLOCKED_BASES+=("$repo"$'\t'"$sha"$'\t'"$state"$'\t'"$id/base-tests.log")
+      report_blocked_base "$repo" "$sha" "$state" "$id/base-tests.log"
+    fi
   fi
   case "${BASE_PRECHECK[$key]}" in
     green) return 0 ;;
-    red)
-      if [ -f "$BASE_RED_TRIED" ] && grep -qxF "$repo"$'\t'"$sha"$'\t'"$fp" "$BASE_RED_TRIED"; then
-        BASE_PRECHECK_WHY="not attempted: the suite is red on the unchanged base and this finding already had its attempt on it"
-        return 1
-      fi
-      BASE_PRECHECK[$key]=red-tried   # base_red_started records it once the Fix really starts
-      return 0 ;;
-    red-tried|red-started) BASE_PRECHECK_WHY="not attempted: the suite is red on the unchanged base and tonight's one attempt is spent" ;;
-    *) BASE_PRECHECK_WHY="not attempted: the ship gate could not run on the base" ;;
+    red) BASE_PRECHECK_WHY="the suite is red on the unchanged base ${sha:0:12}" ;;
+    *)   BASE_PRECHECK_WHY="the ship gate cannot run on the base ${sha:0:12}" ;;
   esac
+  BASE_PRECHECK_WHY="$BASE_PRECHECK_WHY (see ${BASE_PRECHECK_LOG[$key]})"
+  BASE_SKIPPED[$repo]="$BASE_PRECHECK_WHY"
   return 1
 }
 
@@ -2514,6 +2512,11 @@ main() {
     # Findings and each independent fix must describe the exact base tree Explore is reading.
     # $base stays the ref name: finalize hands it to open_pr as the PR base.
     base_sha=$(git -C "$wt" rev-parse HEAD)
+    if [ "$mode" != findings-only ] && ! base_precheck "$repo" "$base_sha" "$id"; then
+      log "  $(basename "$repo"): skipped tonight — $BASE_PRECHECK_WHY"
+      remove_worktree "$repo" "$wt"
+      continue
+    fi
     rfind=$(repo_findings "$repo")
     export NIGHTSHIFT_FINDINGS_N="$rfind"
     # Recon (cached): survey the repo and label each dimension's expected yield. Then pick the review
@@ -2679,7 +2682,8 @@ main() {
         stop_reason=ceiling; continue
       fi
 
-      if ! base_ready_for_fix "$repo" "$base_sha" "$fd" "$fp"; then
+      if ! base_precheck "$repo" "$base_sha" "$fd"; then
+        BASE_PRECHECK_WHY="not attempted: $BASE_PRECHECK_WHY"
         ledger_append "$(basename "$fd")" "$repo" "$fp" "" "" "gate-blocked" "$summary — $BASE_PRECHECK_WHY" "" "" "" "$dim" "" "$csig"
         log "  $(basename "$repo"): fix skipped — $BASE_PRECHECK_WHY ($fp)"
         continue
@@ -2687,10 +2691,8 @@ main() {
       # One finding = one branch = one fresh worktree from base (diffs stay independent).
       wt="$WORKTREES_DIR/$(basename "$id")-f$k"
       if ! setup_worktree "$repo" "$wt" "$base_sha"; then
-        base_red_started "$repo" "$base_sha" "$fp" 0
         log "  $(basename "$repo"): could not create worktree for finding — skip"; continue
       fi
-      base_red_started "$repo" "$base_sha" "$fp" 1
       iter=0; verdict="revise"; gate=""; hook_retry=0; fix_cap="$MAX_FIX_ITER"
       # The outer loop turns at most twice. Its second turn is the ONE retry a hook-rejected commit
       # gets (ADR 0036): the same fix↔review↔gate loop again, from the rejected tree, with the hook's
@@ -2850,10 +2852,6 @@ main() {
       break
     fi
   done
-  # After the whole night, not per item: a later pass's item for the same repo and base must still
-  # see which findings already had their attempt.
-  base_red_wrap_all
-
   # A zero-length run (for example an already-exhausted time budget) has not reached a pass boundary.
   if [ -z "$open" ]; then
     refresh_settled_branches

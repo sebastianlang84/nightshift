@@ -78,11 +78,11 @@ run_night() { # extra env assignments are passed as VAR=VALUE arguments
 set +e
 NIGHTSHIFT_TEST_PATH="" run_night
 set -e
-grep -q "test gate failed" "$d/err" \
+# Since ADR 0041 the base pre-check catches it before Explore: the repo is skipped, not the fix blamed.
+grep -q "skipped tonight — the suite is red on the unchanged base" "$d/err" \
   || { cat "$d/err" >&2; fail "expected the gate to fail when the toolchain is not on PATH"; }
-# RUNS_DIR/<night>/<item>/tests.log — the gate writes the suite's output only when it fails.
-grep -rq 'repo-toolchain' --include=tests.log "$d/runs" \
-  || { find "$d/runs" -name tests.log -exec cat {} \; >&2; fail "the gate failed for some other reason than the missing tool"; }
+grep -rq 'repo-toolchain' --include=base-tests.log "$d/runs" \
+  || { find "$d/runs" -name base-tests.log -exec cat {} \; >&2; fail "the gate failed for some other reason than the missing tool"; }
 if [ -f "$d/state/ledger.jsonl" ] && jq -e 'select(.outcome=="shipped")' "$d/state/ledger.jsonl" >/dev/null 2>&1; then
   fail "a branch shipped although the gate never ran the suite"
 fi

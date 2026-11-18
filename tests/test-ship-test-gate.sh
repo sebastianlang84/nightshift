@@ -102,7 +102,9 @@ grep -qF "tests-failed" "$digest" || { cat "$digest" >&2; fail "the digest hides
 # --- 2. a passing suite ships, and the gate ran against the FIX ---------------
 # `grep 'the demo'` only succeeds in the worktree AFTER the mock fix repairs `teh`. Running the
 # gate in the repo (or before the fix) would fail it — so this pins the working directory too.
-run_night passes 'grep -q "This is the demo" README.md'
+# The base pre-check runs before Explore in a worktree named base-gate-*; it must pass there, or the
+# repo is skipped before anything is found (case 7).
+run_night passes 'case "$PWD" in */base-gate-*) exit 0 ;; esac; grep -q "This is the demo" README.md'
 d="$TMP/passes"; LEDGER="$d/state/ledger.jsonl"
 
 grep -q "test gate passed" "$d/err" "$d/out" || { cat "$d/err" >&2; fail "a passing gate was not reported"; }
@@ -117,10 +119,10 @@ git -C "$d/remote.git" for-each-ref --format='%(refname)' 'refs/heads/nightshift
 # gate purges every ignored file before it runs (ADR 0037), and the sandbox (ADR 0026) gives a
 # test_cmd nowhere else to write. So this case runs unsandboxed and keeps the marker outside the
 # tree; what it pins is the retry, which does not depend on the sandbox.
-# Red for the first TWO runs: the base pre-check before the fix, then the first gate. The base
-# re-check after that red gate is green, so the red is booked on the fix and the loop retries.
+# Base runs (the pre-check before Explore, the re-check after a red gate) pass and are not counted;
+# the fix's first gate is red, the re-check pins that on the fix, and the retry is green.
 NIGHTSHIFT_TEST_SANDBOX=none \
-  run_night retries "n=\$(cat '$TMP/retries.count' 2>/dev/null || echo 0); echo \$((n+1)) > '$TMP/retries.count'; [ \$n -ge 2 ]"
+  run_night retries "case \"\$PWD\" in */base-gate-*) exit 0 ;; esac; n=\$(cat '$TMP/retries.count' 2>/dev/null || echo 0); echo \$((n+1)) > '$TMP/retries.count'; [ \$n -ge 1 ]"
 d="$TMP/retries"; LEDGER="$d/state/ledger.jsonl"
 
 grep -q "gate overrules ship" "$d/err" "$d/out" || { cat "$d/err" >&2; fail "the first red suite was not reported as a retry"; }
@@ -218,9 +220,11 @@ grep -q "no sandbox (bwrap missing)" "$d/err" "$d/out" \
 if [ -f "$LEDGER" ] && jq -e 'select(.outcome=="shipped")' "$LEDGER" >/dev/null 2>&1; then
   jq -c . "$LEDGER" >&2; fail "a branch shipped although the gate could not be sandboxed"
 fi
-jq -e 'select(.outcome=="gate-blocked")' "$LEDGER" >/dev/null 2>&1 \
-  || { jq -c . "$LEDGER" >&2; fail "an unsandboxable gate must be recorded as gate-blocked"; }
-if jq -e 'select(.outcome=="tests-failed")' "$LEDGER" >/dev/null 2>&1; then
+# The pre-check finds it before Explore: the repo is skipped and named at the top of the digest.
+grep -q '^- \*\*Blocked: repo\*\* — the ship gate cannot run' "$d"/digests/*.md \
+  || { cat "$d"/digests/*.md >&2; fail "an unsandboxable gate was not named in the digest"; }
+[ -z "$(find "$d/runs" -name finding.json)" ] || fail "Explore ran although the gate could not run"
+if [ -f "$LEDGER" ] && jq -e 'select(.outcome=="tests-failed")' "$LEDGER" >/dev/null 2>&1; then
   jq -c . "$LEDGER" >&2; fail "an unrunnable gate was misreported as a red suite"
 fi
 [ "$(grep -c "no sandbox (bwrap missing)" "$d/err")" -eq 1 ] \
@@ -241,29 +245,41 @@ if [ -f "$LEDGER" ] && jq -e 'select(.outcome=="shipped")' "$LEDGER" >/dev/null 
   fail "a branch shipped although the test gate timed out"
 fi
 
-# --- 7. a suite that is red on the unchanged base is caught BEFORE the fixes are paid for --------
-# 2026-10-29 and 2026-11-01: the registry refused npm downloads before any test ran, and the Fix
-# stage was sent back to repair a suite it had not touched. Found only after Fix and Review, a red
-# base cost both for every finding, every night. The pre-check runs the gate once on the base; a red
-# base gets ONE fix attempt (case 2 shows such a fix can be the repair), the rest are skipped.
-# Two findings in one item: the second must not reach the Fix stage.
-( export WITH_APP=1; run_night basered 'exit 1' )
+# --- 7. a suite that is red on the unchanged base skips the repo BEFORE Explore -----------------
+# 2026-10-29 and 2026-11-01: the registry refused npm downloads before any test ran; 2026-11-12..16
+# twenty fixes in three repos ended gate-blocked on suites that were red without them. The pre-check
+# runs the gate once on the base; red skips the repo for the night, names it at the top of the
+# digest and reports it once per red spell through NIGHTSHIFT_BLOCKED_BASE_CMD.
+report() { # case -> run the night with a reporting command that logs its arguments
+  ( export WITH_APP=1 NIGHTSHIFT_BLOCKED_BASE_CMD="printf '%s|%s\\n' \"\$1\" \"\$3\" >> '$TMP/reported'"
+    run_night "$1" 'exit 1' )
+}
+report basered
 d="$TMP/basered"; LEDGER="$d/state/ledger.jsonl"
-
-grep -q "the suite is red on the unchanged base" "$d/err" \
-  || { cat "$d/err" >&2; fail "a suite red on the base was not recognised before the fix"; }
-grep -q "red on the unchanged base as well" "$d/err" \
-  || { cat "$d/err" >&2; fail "the one attempt's red gate was booked against the fix"; }
-jq -e 'select(.outcome=="gate-blocked" and (.summary|test("attempt is spent")))' "$LEDGER" >/dev/null 2>&1 \
-  || { jq -c . "$LEDGER" >&2; fail "the second finding on a red base was not skipped and recorded"; }
-[ "$(find "$d/runs" -name worknote.md | wc -l)" -le 1 ] \
-  || { cat "$d/err" >&2; fail "more than one fix ran although the base was already red"; }
-if jq -e 'select(.outcome=="tests-failed" or .outcome=="shipped")' "$LEDGER" >/dev/null 2>&1; then
-  jq -c . "$LEDGER" >&2; fail "a suite red on the base was booked against the fix or shipped"
+grep -q "skipped tonight — the suite is red on the unchanged base" "$d/err" \
+  || { cat "$d/err" >&2; fail "a suite red on the base did not skip the repo"; }
+[ -z "$(find "$d/runs" -name finding.json)" ] || fail "Explore ran although the base was red"
+if [ -f "$LEDGER" ] && jq -e 'select(.outcome=="tests-failed" or .outcome=="shipped")' "$LEDGER" >/dev/null 2>&1; then
+  jq -c . "$LEDGER" >&2; fail "a suite red on the base was booked against a fix or shipped"
 fi
-[ -n "$(find "$d/runs" -name base-tests.log)" ] \
-  || fail "the base run left no log to read"
-[ "$(grep -c "one fix attempt tonight" "$d/err")" -eq 1 ] \
-  || { cat "$d/err" >&2; fail "the base was pre-checked more than once for one repo and base"; }
+[ -n "$(find "$d/runs" -name base-tests.log)" ] || fail "the base run left no log to read"
+grep -q '^- \*\*Blocked: repo\*\* — its suite is red on the unchanged base' "$d"/digests/*.md \
+  || { cat "$d"/digests/*.md >&2; fail "the blocked repo does not lead the digest"; }
+[ "$(cat "$TMP/reported")" = "$d/repo|red" ] || fail "the red base was not reported once: $(cat "$TMP/reported")"
+# A second night on the same red spell does not report again.
+rm -rf "$d/runs" "$d/digests" "$d/worktrees" "$d/remote.git" "$d/repo"; mkdir -p "$d/runs" "$d/digests" "$d/worktrees"
+git init -q --bare "$d/remote.git"; git init -q -b main "$d/repo"; git -C "$d/repo" remote add origin "$d/remote.git"
+echo x > "$d/repo/f"; git -C "$d/repo" add -A; git -C "$d/repo" -c user.name=t -c user.email=t@l commit -qm x
+git -C "$d/repo" push -q -u origin main
+RULEBOOK="$d/rulebook.yaml" NIGHTSHIFT_AGENT=mock NIGHTSHIFT_OPEN_PR=0 NIGHTSHIFT_STATE_DIR="$d/state" \
+  NIGHTSHIFT_RUNS_DIR="$d/runs" NIGHTSHIFT_DIGEST_DIR="$d/digests" NIGHTSHIFT_WORKTREES="$d/worktrees" \
+  NIGHTSHIFT_BLOCKED_BASE_CMD="echo again >> '$TMP/reported'" "$ROOT/bin/nightshift.sh" >/dev/null 2>&1
+[ "$(wc -l < "$TMP/reported")" -eq 1 ] || fail "the same red spell was reported twice"
+# A green night ends the spell, so the next red one is reported anew.
+sed -i 's/test_cmd: exit 1/test_cmd: true/' "$d/rulebook.yaml"
+RULEBOOK="$d/rulebook.yaml" NIGHTSHIFT_AGENT=mock NIGHTSHIFT_OPEN_PR=0 NIGHTSHIFT_STATE_DIR="$d/state" \
+  NIGHTSHIFT_RUNS_DIR="$d/runs" NIGHTSHIFT_DIGEST_DIR="$d/digests" NIGHTSHIFT_WORKTREES="$d/worktrees" \
+  "$ROOT/bin/nightshift.sh" >/dev/null 2>&1
+[ ! -s "$d/state/blocked-bases.tsv" ] || fail "a green base did not end the red spell"
 
 echo "test-ship-test-gate: ok"

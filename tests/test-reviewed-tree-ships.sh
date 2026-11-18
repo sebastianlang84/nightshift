@@ -98,7 +98,8 @@ jq -e 'select(.outcome=="gate-blocked")' "$LEDGER" >/dev/null 2>&1 \
 # --- 2. a well-behaved suite still ships normally -----------------------------
 # The guard must not cost anything when the suite touches nothing — otherwise every honest night
 # pays for this, and the obvious "fix" is to turn it off.
-run_night honest 'grep -q "This is the demo" README.md'
+# The base pre-check (ADR 0041) runs in a base-gate-* worktree before the mock Fix repairs `teh`.
+run_night honest 'case "$PWD" in */base-gate-*) exit 0 ;; esac; grep -q "This is the demo" README.md'
 d="$TMP/honest"; LEDGER="$d/state/ledger.jsonl"
 
 jq -e 'select(.outcome=="shipped")' "$LEDGER" >/dev/null 2>&1 \

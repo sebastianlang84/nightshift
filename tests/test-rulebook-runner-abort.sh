@@ -125,7 +125,7 @@ source "$1/bin/nightshift.sh"
 REPO_PATHS=("$2/repo1")
 REPO_TEST_CMDS=("")
 rc=0
-base_ready_for_fix "$2/repo1" unused "$2/runs" || rc=$?
+base_precheck "$2/repo1" unused "$2/runs" || rc=$?
 [[ $rc = 1 && $BASE_PRECHECK_WHY == *'no test_cmd'* ]]
 rc=0
 run_test_gate "$2/repo1" "$2/repo1" "$2/runs" || rc=$?

@@ -119,7 +119,8 @@ run_night() {
     echo "    base: main"
     [ -n "$2" ] && echo "    setup_cmd: $2"
     # Green only on a purged tree: anything under deps/ means the gate inherited a stage's files.
-    echo '    test_cmd: test ! -e deps && test ! -e .pnpm-store && grep -q "This is the demo" README.md'
+    # The base pre-check (ADR 0041) runs in a base-gate-* worktree before the mock Fix repairs `teh`.
+    echo '    test_cmd: case "$PWD" in */base-gate-*) exit 0 ;; esac; test ! -e deps && test ! -e .pnpm-store && grep -q "This is the demo" README.md'
   } > "$d/rulebook.yaml"
   : > "$d/probe"
   PATH="$TMP/bin:/usr/bin:/bin" RULEBOOK="$d/rulebook.yaml" \

@@ -3,6 +3,8 @@
 
 Handles exactly the shape we control: top-level `branch_prefix`, a `limits:` map,
 and a `repos:` list of `{path, mode}`. Not a general YAML parser on purpose (no deps)."""
+import posixpath
+import re
 import sys
 from pathlib import Path
 
@@ -53,7 +55,7 @@ CODEX_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 # every setting beneath it would silently revert to its default.
 TOP_LEVEL_KEYS = ("branch_prefix", "limits", "recon", "agent", "dimensions", "repos")
 # `test_cmd` MUST stay last — see the emitter at the bottom of main(). A new field goes before it.
-REPO_KEYS = ("path", "mode", "base", "findings", "dimensions", "test_net", "test_robind", "setup_cmd", "test_cmd")
+REPO_KEYS = ("path", "mode", "base", "findings", "dimensions", "test_net", "test_robind", "protected_paths", "setup_cmd", "test_cmd")
 # The modes the Runner actually implements. A repo whose mode is not in here is a typo, not a
 # feature request — see the validation below for why that must abort rather than be skipped.
 REPO_MODES = ("findings-only", "branch-fix")
@@ -473,6 +475,20 @@ def main(path: str) -> None:
             raise SystemExit(
                 f"repo {r.get('path', '')}: test_robind must not contain a tab"
             )
+        # Paths a merge must not take without a human (ADR 0042): comma-separated, relative to the
+        # repo root; an entry ending in `/` covers a directory. The Runner does not read it; an
+        # external merge job does (ADR 0040). Relative and tab-free, so a typo cannot reach outside.
+        protected = []
+        for raw in (x.strip() for x in r.get("protected_paths", "").split(",") if x.strip()):
+            # One canonical spelling for consumers that compare against `git diff --name-only`.
+            norm = posixpath.normpath(raw)
+            if raw.startswith("/") or norm in (".", "..") or norm.startswith(("/", "../")) or "\t" in raw:
+                raise SystemExit(
+                    f"repo {r.get('path', '')}: protected_paths entries must be paths inside the repo, "
+                    f"not its root, got {raw!r}"
+                )
+            protected.append(norm + ("/" if raw.endswith("/") else ""))
+        protected = ",".join(protected)
         # The dependency setup the Runner runs in the gate's sandbox before every Fix stage (ADR 0037),
         # so a Fix stage that can execute commands finds the repo's dependencies installed. Optional;
         # it rides on the row second to last, which is why it may not contain a tab either.
@@ -490,6 +506,7 @@ def main(path: str) -> None:
             f"\tdimensions={r.get('dimensions', '')}"
             f"\ttest_net={test_net}"
             f"\ttest_robind={test_robind}"
+            f"\tprotected_paths={protected}"
             f"\tsetup_cmd={setup_cmd}"
             f"\ttest_cmd={test_cmd}"
         )

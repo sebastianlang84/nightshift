@@ -138,6 +138,7 @@ agent:
 | `NIGHTSHIFT_TEST_MEMORY_MB` | all | the rulebook's `limits.test_memory_mb`, else 4096 (`RLIMIT_DATA`) |
 | `NIGHTSHIFT_TEST_FSIZE_MB` | all | the rulebook's `limits.test_fsize_mb`, else 2048 (`RLIMIT_FSIZE`) |
 | `NIGHTSHIFT_TEST_MAX_PROCS` | all | the rulebook's `limits.test_max_procs`, else 2048 (`RLIMIT_NPROC`) |
+| `NIGHTSHIFT_BLOCKED_BASE_CMD` | all | unset; a shell command run once per red spell with the repo, base commit, `red` or `unavailable` and the log path as `$1`..`$4`, to tell the repo's owner (ADR 0041) |
 
 `NIGHTSHIFT_QUOTA_FALLBACK_AGENT=codex` takes over when Claude could not reach its model two stages
 in a row — each failed within 30 s with no tokens counted, which is how a spent quota or an outage
@@ -343,6 +344,8 @@ these flags, is what confines the agent (see [`docs/design/risk-analysis.md`](de
 | `state/ledger.jsonl` | The memory: findings, shipped, abandoned, verdicts, retractions (append-only) | `NIGHTSHIFT_STATE_DIR` |
 | `state/runs.jsonl` | Per-stage telemetry (real `model_id`, `context_window`, input/output/cache tokens, cost, duration) | `NIGHTSHIFT_STATE_DIR` |
 | `state/findings-probe.json` | Freshness snapshot of every open finding (`untouched` / `code_changed` / `unknown` plus verify results) — derived, disposable, rewritten in place by harvest; world-readable for the dashboard. Never hand-edit it: the ledger is the record ([ADR 0021](adr/0021-closing-open-findings.md)) | `NIGHTSHIFT_STATE_DIR` |
+| `state/fix-survival.json` | Whether each merged fix held 30 days after its verdict (`measured` / `removed` / `pending` / `unknown`), per item and per repo — derived by harvest, cached once measured, read by the digest ([ADR 0043](adr/0043-merged-fixes-are-measured-after-thirty-days.md)). `bin/harvest.sh survival` prints it | `NIGHTSHIFT_STATE_DIR` |
+| `state/blocked-bases.tsv` | Repos whose red base was reported through `NIGHTSHIFT_BLOCKED_BASE_CMD` and not green since ([ADR 0041](adr/0041-a-red-base-skips-the-repo.md)) | `NIGHTSHIFT_STATE_DIR` |
 | `state/recon/` | Per-repo recon caches (derived, disposable) | `NIGHTSHIFT_STATE_DIR` |
 | `state/dim-scans/` | Per-(repo,dim) explore markers driving rotation | `NIGHTSHIFT_STATE_DIR` |
 | `state/.ledger-epoch.idx` | Cached per-(repo,dim) ledger aggregates the rotation reads (last service epoch, last shipped epoch) — derived, disposable, rebuilt from the ledger whenever it changes; safe to delete | `NIGHTSHIFT_STATE_DIR` |

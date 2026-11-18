@@ -35,6 +35,7 @@
 #   harvest.sh todos           # list open findings, numbered, with freshness state
 #   harvest.sh close <item|sel> [reason]          # record `resolved` for one open finding
 #   harvest.sh probe           # re-run the freshness probe, print the table
+#   harvest.sh survival        # re-measure whether merged fixes held (ADR 0043), print per repo
 #   harvest.sh retract <night> [reason]           # withdraw a night's `empty` rows as evidence
 #   harvest.sh --help          # print the usage above (see usage(), which this mirrors)
 # Any other argument is an error (exit 2), never a silent fall-through to the
@@ -54,6 +55,7 @@ LEDGER="${LEDGER:-$STATE_DIR/ledger.jsonl}"
 RULEBOOK="${RULEBOOK:-$NIGHTSHIFT_HOME/rulebook.yaml}"
 [ -f "$RULEBOOK" ] || RULEBOOK="$NIGHTSHIFT_HOME/rulebook.example.yaml"
 PROBE_SNAPSHOT="${PROBE_SNAPSHOT:-$STATE_DIR/findings-probe.json}"
+SURVIVAL_SNAPSHOT="${SURVIVAL_SNAPSHOT:-$STATE_DIR/fix-survival.json}"
 SCHEMA_VERSION=2
 BRANCH_PREFIX="nightshift/"   # overridden by the rulebook's branch_prefix; the orphan sweep needs it
 # The author identity bin/nightshift.sh commits under. It is what marks a recorded sha as OUR work
@@ -284,6 +286,16 @@ run_probe() { # [--print]
     --ledger "$LEDGER" --out "$PROBE_SNAPSHOT" "${args[@]}" "$@"
 }
 
+# Whether merged fixes held (ADR 0043): pure observation like the findings probe, and non-fatal.
+run_survival() { # [--print]
+  local i args=()
+  for i in "${!REPO_PATHS[@]}"; do
+    args+=(--base "${REPO_PATHS[$i]}" "${REPO_BASES[$i]:-}")
+  done
+  python3 "$NIGHTSHIFT_HOME/lib/probe_survival.py" \
+    --ledger "$LEDGER" --out "$SURVIVAL_SNAPSHOT" "${args[@]}" "$@"
+}
+
 # Age in whole days, for the "how long has this been rotting" column.
 age_days() { # iso_ts
   local then now
@@ -395,6 +407,7 @@ EOF
   harvest.sh todos                              list open findings with stable item ids and freshness
   harvest.sh close <item|sel> [reason]          record `resolved` for one open finding
   harvest.sh probe                              re-run the finding freshness probe, print the table
+  harvest.sh survival                           re-measure whether merged fixes held, print per repo
   harvest.sh retract <YYYY-MM-DD> [reason]      withdraw that night's `empty` rows as evidence
                                                 (a night whose stages never ran claimed nothing real)
   harvest.sh --help                             print this
@@ -415,6 +428,7 @@ case "${1:-}" in
   close)     ;;                                  # arity checked below, run after the ledger checks
   todos)     ;;                                  # read-only finding surfaces, run after the checks
   probe)     ;;
+  survival)  ;;
   retract)   ;;                                  # arity checked below, like verdict/close
   *)         printf 'unknown argument: %s\n' "$1" >&2; usage >&2; exit 2 ;;
 esac
@@ -450,6 +464,7 @@ case "${1:-}" in
   todos)   list_todos;        exit 0 ;;
   close)   shift; close_todo "$@"; exit 0 ;;
   probe)   run_probe --print; exit 0 ;;
+  survival) run_survival --print; exit 0 ;;
   retract) shift; retract_night "$@"; exit 0 ;;
 esac
 
@@ -541,4 +556,5 @@ sweep_orphans
 # `todos` and the dashboard see today's state. A --dry-run writes nothing here either.
 if [ "$DRYRUN" -eq 0 ]; then
   run_probe >/dev/null 2>&1 || echo "(findings probe skipped — non-fatal)" >&2
+  run_survival >/dev/null 2>&1 || echo "(fix survival probe skipped — non-fatal)" >&2
 fi

@@ -23,6 +23,7 @@ repos:
     dimensions: docs,tests
     test_net: true
     test_robind: /opt/dep/.git:/srv/shared
+    protected_paths: .//hooks/, lib//sandbox.sh
     setup_cmd: bash scripts/setup.sh --quiet
     test_cmd: make test && ./extra check
 EOF
@@ -33,9 +34,9 @@ actual=$(python3 "$ROOT/lib/parse_rulebook.py" "$TMP/rulebook.yaml" | grep '^rep
 # Every later field, test_net and test_robind (ADR 0026) and setup_cmd (ADR 0037) included, goes
 # BEFORE it.
 expected=$(printf '%s\n' \
-  $'repo\tpath=/srv/no-base\tmode=branch-fix\tbase=\tfindings=5\tdimensions=\ttest_net=false\ttest_robind=\tsetup_cmd=\ttest_cmd=make check' \
-  $'repo\tpath=/srv/no-findings\tmode=findings-only\tbase=develop\tfindings=\tdimensions=security,infra\ttest_net=false\ttest_robind=\tsetup_cmd=\ttest_cmd=' \
-  $'repo\tpath=/srv/all-fields\tmode=branch-fix\tbase=release\tfindings=3\tdimensions=docs,tests\ttest_net=true\ttest_robind=/opt/dep/.git:/srv/shared\tsetup_cmd=bash scripts/setup.sh --quiet\ttest_cmd=make test && ./extra check')
+  $'repo\tpath=/srv/no-base\tmode=branch-fix\tbase=\tfindings=5\tdimensions=\ttest_net=false\ttest_robind=\tprotected_paths=\tsetup_cmd=\ttest_cmd=make check' \
+  $'repo\tpath=/srv/no-findings\tmode=findings-only\tbase=develop\tfindings=\tdimensions=security,infra\ttest_net=false\ttest_robind=\tprotected_paths=\tsetup_cmd=\ttest_cmd=' \
+  $'repo\tpath=/srv/all-fields\tmode=branch-fix\tbase=release\tfindings=3\tdimensions=docs,tests\ttest_net=true\ttest_robind=/opt/dep/.git:/srv/shared\tprotected_paths=hooks/,lib/sandbox.sh\tsetup_cmd=bash scripts/setup.sh --quiet\ttest_cmd=make test && ./extra check')
 
 [ "$actual" = "$expected" ]
 
@@ -72,6 +73,14 @@ EOF
 if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/tabbed-setup.yaml" >/dev/null 2>&1; then
   echo "test-rulebook-parser: a tab in setup_cmd must be rejected" >&2; exit 1
 fi
+
+# protected_paths stay inside the repo (ADR 0042).
+for bad in /etc/passwd ../other hooks/../../x ./ . .//hooks/../..; do
+  printf 'repos:\n  - path: /srv/p\n    mode: findings-only\n    protected_paths: %s\n' "$bad" > "$TMP/prot.yaml"
+  if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/prot.yaml" >/dev/null 2>&1; then
+    echo "test-rulebook-parser: protected_paths accepted $bad" >&2; exit 1
+  fi
+done
 
 # test_timeout_seconds: defaulted when absent, validated when present.
 cat > "$TMP/notimeout.yaml" <<'EOF'

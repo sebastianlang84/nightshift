@@ -35,7 +35,18 @@ write_digest() { # made open status [advice]
     echo
     local fcount=0
     [ -f "$LEDGER" ] && fcount=$(jq -s --arg n "$NIGHT" '[.[]|select(.night==$n and .outcome=="finding")]|length' "$LEDGER" 2>/dev/null || echo 0)
-    echo "- agent: \`$RUN_AGENT_ROUTE\` · shipped this run: ${made} · surfaced (findings): ${fcount} · open (awaiting your verdict): ${open}/${MAX_OPEN} (cap)"
+    echo "- agent: \`$RUN_AGENT_ROUTE\` · shipped this run: ${made} · surfaced (findings): ${fcount} · open (awaiting a merge decision): ${open}/${MAX_OPEN} (cap)"
+    # A repo whose suite is red on its unchanged base was skipped before Explore (base_precheck). It
+    # stays blocked until someone repairs the suite, so it leads the digest.
+    local b brepo bsha bstate blog
+    for b in ${BLOCKED_BASES[@]+"${BLOCKED_BASES[@]}"}; do
+      IFS=$'\t' read -r brepo bsha bstate blog <<< "$b"
+      if [ "$bstate" = red ]; then
+        echo "- **Blocked: $(basename "$brepo")** — its suite is red on the unchanged base \`${bsha:0:12}\`, so nightshift skipped it tonight; repair the suite (\`$blog\`)."
+      else
+        echo "- **Blocked: $(basename "$brepo")** — the ship gate cannot run on its base \`${bsha:0:12}\`, so nightshift skipped it tonight (\`$blog\`)."
+      fi
+    done
     [ "$status" = ceiling ] && echo "- **Stopped: run ceiling reached** (\`max_branches_per_run: ${MAX_RUN_BRANCHES:-?}\`) — no further branch was opened this run; any remaining work waits for the next night."
     [ "$status" = branch_inventory_unavailable ] && echo "- **Stopped: origin branch inventory unavailable.** The open-branch cap could not be checked."
     [ "$status" = budget ] && echo "- **Stopped: time budget exhausted** (\`${MAX_RUN_SECONDS:-?}s\`) — the night ended on the spend cap, not for lack of work."
@@ -78,6 +89,17 @@ write_digest() { # made open status [advice]
       nfail=$(jq -s --arg n "$NIGHT" '[.[]|select(.night==$n and .exit!=0)]|length' "$RUNSLOG" 2>/dev/null || echo 0)
       [ "${nfail:-0}" -gt 0 ] && echo "- **${nfail} stage-invocation(s) did not complete** — those lenses recorded no verdict and did not advance; grep the night log for \`FAILED\`."
     fi
+    # Whether merged fixes held 30 days later (ADR 0043), from the snapshot harvest refreshed at the
+    # start of this night. A merge rate counts what the reviewers accepted; this counts what stayed.
+    [ -f "$SURVIVAL_SNAPSHOT" ] && jq -r '
+      [.repos | to_entries[] | select(.value.measured > 0)
+        | "\(.key) \(.value.held)/\(.value.measured)"
+          + (if .value.reverted > 0 then " (\(.value.reverted) reverted)" else "" end)] as $r
+      | ([.repos[] | .removed] | add // 0) as $gone
+      | select($r | length > 0)
+      | "- fixes that held \(.window_days) days after merge: \($r | join(" · "))"
+          + (if $gone > 0 then " — \($gone) whose code was later removed are not counted" else "" end)
+    ' "$SURVIVAL_SNAPSHOT" 2>/dev/null || true
     # Harvest scoreboard (all-time, from bin/harvest verdict events): the human
     # feedback loop made visible. A branch with no terminal verdict counts as open. The terminal
     # set comes from lib/ledger.jq (ADR 0025): resolved/wontfix are decided too, so they are
