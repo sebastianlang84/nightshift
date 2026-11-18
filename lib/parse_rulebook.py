@@ -1,0 +1,499 @@
+#!/usr/bin/env python3
+"""Minimal YAML-subset parser for the nightshift rulebook — emits tagged TSV for bash.
+
+Handles exactly the shape we control: top-level `branch_prefix`, a `limits:` map,
+and a `repos:` list of `{path, mode}`. Not a general YAML parser on purpose (no deps)."""
+import sys
+from pathlib import Path
+
+# Every mapping section's key set is CLOSED: the emitters at the bottom of main() read exactly
+# these keys and nothing else, so a key outside the set can only be a typo — and tolerating one is
+# silent, which is the worst way for governance to fail. `max_open_branchs: 12` leaves the ONLY
+# throughput cap at its default 2; `test-cmd:` on a repo leaves `test_cmd` empty, so that repo ships
+# UNGATED past its ADR 0022 ship gate; `ttl-days:` or a misspelled `enabled` quietly re-enables recon
+# or resets its TTL. Reject the complement instead — the standard `agent:` has always applied.
+LIMIT_KEYS = (
+    "max_open_branches",
+    "max_branches_per_run",
+    "max_fix_iterations",
+    "max_files_per_change",
+    "max_lines_per_change",
+    "max_run_minutes",
+    "test_timeout_seconds",
+    "test_memory_mb",
+    "test_max_procs",
+    "test_fsize_mb",
+    "max_findings_per_item",
+    "max_verifies_per_run",
+)
+RECON_KEYS = ("enabled", "ttl_days")
+AGENT_KEYS = (
+    "primary",
+    "claude_model",
+    "codex_model",
+    "codex_effort",
+    "pi_model",
+    "pi_provider",
+    "pi_extensions",
+    "pi_allow_fix",
+    "review_agent",
+    "advisors",
+)
+# Adapters the Runner implements. `review_agent` names one of these; anything else is a typo, and
+# a typo here would silently leave Review on the night's primary adapter — the opposite of what the
+# host asked for, with no signal that the routing never took effect.
+REVIEW_AGENTS = ("claude", "codex", "pi", "mock")
+# Reasoning efforts the codex adapter may request. codex itself does NOT validate the value: an
+# unknown one passes `--strict-config` and reaches the API (verified 2026-09-24, codex-cli 0.155.1),
+# so a typo here would silently spend a night on a request the provider rejects or reinterprets.
+# The set is the CLI's own `ReasoningEffort` variants as serialized in that binary; `none` is left
+# out because it could not be confirmed there.
+CODEX_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+# The emitter below reads only these top-level sections. A typo here would otherwise be ignored and
+# every setting beneath it would silently revert to its default.
+TOP_LEVEL_KEYS = ("branch_prefix", "limits", "recon", "agent", "dimensions", "repos")
+# `test_cmd` MUST stay last — see the emitter at the bottom of main(). A new field goes before it.
+REPO_KEYS = ("path", "mode", "base", "findings", "dimensions", "test_net", "test_robind", "setup_cmd", "test_cmd")
+# The modes the Runner actually implements. A repo whose mode is not in here is a typo, not a
+# feature request — see the validation below for why that must abort rather than be skipped.
+REPO_MODES = ("findings-only", "branch-fix")
+# A dimension is serviceable when prompts/dimensions/<id>.md exists — the built-in catalog and the
+# custom lenses ADR 0010 allows alike. Any other id would be recorded as serviced with no lens prompt.
+LENS_DIR = Path(__file__).resolve().parent.parent / "prompts" / "dimensions"
+LENSES = tuple(sorted(f.name[:-3] for f in LENS_DIR.glob("*.md") if f.is_file() and len(f.name) > 3))
+
+
+def val(raw: str) -> str:
+    """Take a scalar value, dropping any trailing inline `# comment`."""
+    return raw.split(" #", 1)[0].strip()
+
+
+def quoted_val(raw: str) -> str:
+    """Scalar that may be quoted, so its value may legitimately contain `#`.
+
+    `val()` splits on ` #` before it knows whether it is inside quotes, which
+    truncates `"gpt-5 #2"` to `"gpt-5`. Only a `# comment` may follow the closing
+    quote: anything else would be dropped, and `test_cmd: "cd" sub && make test`
+    would become a ship gate that runs a bare `cd` and always passes. That and an
+    unterminated quote are typos, not values — say so."""
+    s = raw.strip()
+    if s[:1] in ("'", '"'):
+        end = s.find(s[0], 1)
+        if end == -1:
+            raise SystemExit(f"unterminated quoted value: {s}")
+        # In a double-quoted YAML scalar every backslash starts an escape, and this subset
+        # decodes none: `"true \" # x\" && false"` would end at the escaped quote and run
+        # `true \`. Refuse rather than read a value YAML would read differently.
+        if s[0] == '"' and "\\" in s[1:end + 1]:
+            raise SystemExit(f"escape sequences in double-quoted values are not supported: {s}")
+        # A comment needs whitespace before its `#`, as in val(): `"true"#x && false` is
+        # not a comment, and dropping it would leave a gate that runs `true`.
+        rest = s[end + 1 :]
+        if rest.strip() and not (rest[:1] in " \t" and rest.lstrip().startswith("#")):
+            raise SystemExit(f"unexpected text after closing quote: {s}")
+        return s[1:end]
+    return val(raw)
+
+
+def put(
+    target: dict[str, str],
+    section: str,
+    s: str,
+    allowed: tuple[str, ...],
+    read=val,
+) -> None:
+    """Record one `key: value` line of a mapping section, refusing anything off its key set.
+
+    A missing colon, an unknown key, or the same key twice are all misconfigs, and every one of
+    them has the same silent outcome if waved through: the knob falls back to the parser's default
+    and the night runs on governance the human did not write. Fail loudly instead."""
+    k, sep, v = s.partition(":")
+    key = k.strip()
+    if not sep:
+        raise SystemExit(f"{section}: expected `key: value`, got: {s}")
+    if key not in allowed:
+        raise SystemExit(f"{section}: unknown key '{key}' (expected one of: {', '.join(allowed)})")
+    if key in target:
+        raise SystemExit(f"{section}: duplicate key '{key}'")
+    target[key] = read(v)
+
+
+def main(path: str) -> None:
+    prefix = "nightshift/"
+    limits: dict[str, str] = {}
+    recon: dict[str, str] = {}
+    agent: dict[str, str] = {}
+    repos: list[dict[str, str]] = []
+    dims: list[str] = []
+    cur: dict[str, str] | None = None
+    section: str | None = None
+    seen_top_level: set[str] = set()
+
+    with open(path, encoding="utf-8") as fh:
+        for raw in fh:
+            line = raw.rstrip("\n")
+            if not line.strip() or line.strip().startswith("#"):
+                continue
+            # Indentation is what assigns a line to a section, and it is counted in SPACES. A
+            # tab-indented line measures as indent 0, so it would be read as a new top-level key and
+            # its section silently lost every entry. Refuse it instead of misreading it.
+            if "\t" in line[: len(line) - len(line.lstrip())]:
+                raise SystemExit(f"indent with spaces, not tabs: {line.strip()}")
+            indent = len(line) - len(line.lstrip(" "))
+            s = line.strip()
+            # A section header carries no payload, so everything from the first `#` is a comment.
+            # Comparing the raw line instead silently demoted `repos: # the fleet` to "no section",
+            # which dropped every entry under it without a word.
+            head = s.split("#", 1)[0].rstrip()
+            # YAML permits sequence items at the same indentation as their section key:
+            # `repos:\n- path: …`. Keep the active sequence section for that standard shape;
+            # resetting it here used to accept the file while silently emitting an empty fleet.
+            same_indent_item = (
+                indent == 0
+                and s.startswith("- ")
+                and section in ("dimensions", "repos")
+            )
+            if indent == 0 and not same_indent_item:
+                section = None
+                top_level_key = s.split(":", 1)[0].strip()
+                if top_level_key not in TOP_LEVEL_KEYS:
+                    raise SystemExit(
+                        f"unknown top-level key '{top_level_key}' "
+                        f"(expected one of: {', '.join(TOP_LEVEL_KEYS)})"
+                    )
+                if top_level_key in seen_top_level:
+                    raise SystemExit(f"duplicate top-level key '{top_level_key}'")
+                seen_top_level.add(top_level_key)
+                if top_level_key == "branch_prefix":
+                    prefix = quoted_val(s.split(":", 1)[1])
+                elif not head.endswith(":") or head[:-1].strip() != top_level_key:
+                    # `limits: 5`, a flow `limits: {…}` or a bare `limits` used to set no section,
+                    # so every line under it was dropped without a word — the knob silently reverted.
+                    raise SystemExit(f"section '{top_level_key}' must be a bare `{top_level_key}:` header")
+                else:
+                    # Dispatch on the key, not the raw header: `limits :` is the same key, and
+                    # matching the literal `limits:` left its entries unread.
+                    section = top_level_key
+            elif section == "limits":
+                put(limits, "limits", s, LIMIT_KEYS)
+            elif section == "recon":
+                put(recon, "recon", s, RECON_KEYS)
+            elif section == "agent":
+                # A model id may legitimately be quoted (and contain a `#`), so this section — and
+                # only this one — reads its scalars with quoted_val.
+                put(agent, "agent", s, AGENT_KEYS, quoted_val)
+            elif section == "dimensions":
+                if s.startswith("- "):
+                    dims.append(quoted_val(s[2:]))
+            elif section == "repos":
+                if s.startswith("- "):
+                    if cur:
+                        repos.append(cur)
+                    cur = {}
+                    s = s[2:].strip()
+                    if s:
+                        put(cur, "repos", s, REPO_KEYS, quoted_val)
+                elif cur is not None:
+                    put(cur, "repos", s, REPO_KEYS, quoted_val)
+        if cur:
+            repos.append(cur)
+
+    if not repos:
+        raise SystemExit("repos must contain at least one repository")
+
+    # The pre-push hook appends `*` to this value. Without a trailing slash, a
+    # prefix such as `m` also authorizes `main`; require a distinct branch
+    # namespace and reject whitespace that would corrupt the TSV transport.
+    if (
+        not prefix.endswith("/")
+        or prefix.startswith("/")
+        or "//" in prefix
+        or any(ch.isspace() for ch in prefix)
+    ):
+        raise SystemExit(
+            "branch_prefix must name a dedicated namespace ending in '/'"
+        )
+
+    print(f"prefix\t{prefix}")
+    max_open = limits.get("max_open_branches", "2")
+    if not max_open.isdecimal() or int(max_open) < 1:
+        raise SystemExit("limits.max_open_branches must be a positive integer")
+    print(f"max_open\t{max_open}")
+    # Emitted empty when absent so bash can apply the env override before its default
+    # (precedence: rulebook -> NIGHTSHIFT_MAX_RUN_BRANCHES -> default). The others have
+    # no env counterpart, so the parser owns their defaults directly.
+    max_run_branches = limits.get("max_branches_per_run", "")
+    if max_run_branches and (
+        not max_run_branches.isdecimal() or int(max_run_branches) < 1
+    ):
+        raise SystemExit("limits.max_branches_per_run must be a positive integer")
+    print(f"max_branches_per_run\t{max_run_branches}")
+    # A hand-set 0 would make the fix<->review loop never run — every finding then
+    # abandons silently. Require >= 1 so the misconfig fails loudly (with the runner's
+    # fail-closed parse handling) instead of doing nothing.
+    mfi = limits.get("max_fix_iterations", "3")
+    if not mfi.isdecimal() or int(mfi) < 1:
+        raise SystemExit("limits.max_fix_iterations must be a positive integer")
+    print(f"max_fix_iterations\t{mfi}")
+    # These values are prompt guidance, but zero or non-numeric input still makes that guidance
+    # useless or contradictory. Reject it here rather than passing malformed limits to a stage.
+    mfc = limits.get("max_files_per_change", "15")
+    if not mfc.isdecimal() or int(mfc) < 1:
+        raise SystemExit("limits.max_files_per_change must be a positive integer")
+    print(f"max_files\t{mfc}")
+    mlc = limits.get("max_lines_per_change", "400")
+    if not mlc.isdecimal() or int(mlc) < 1:
+        raise SystemExit("limits.max_lines_per_change must be a positive integer")
+    print(f"max_lines\t{mlc}")
+    # Wall-clock spend budget for the whole night (ADR 0013). Empty = no time cap (bash applies the
+    # NIGHTSHIFT_MAX_RUN_SECONDS env override first). Validate a present value as a positive integer.
+    mrm = limits.get("max_run_minutes", "")
+    if mrm and (not mrm.isdecimal() or int(mrm) < 1):
+        raise SystemExit("limits.max_run_minutes must be a positive integer")
+    print(f"max_run_minutes\t{mrm}")
+    # Wall-clock ceiling for ONE repo's `test_cmd` (ADR 0022). A hanging suite must not eat the
+    # night, so the gate always runs under a timeout. Default 600s; a hand-set 0 would make every
+    # gated run time out instantly and silently ship nothing, so require a positive integer.
+    tts = limits.get("test_timeout_seconds", "600")
+    if not tts.isdecimal() or int(tts) < 1:
+        raise SystemExit("limits.test_timeout_seconds must be a positive integer")
+    print(f"test_timeout_seconds\t{tts}")
+    # Resource ceilings for the sandboxed gate (ADR 0026), applied as rlimits inside the sandbox.
+    # `test_memory_mb` is RLIMIT_DATA — the heap. NOT RLIMIT_AS: a WASM runtime reserves
+    # multi-GB of address space it never touches, so an address-space cap large enough for a real
+    # JS suite bounds nothing at all (measured: vitest fails at 16 GiB). 0 = no cap.
+    tmb = limits.get("test_memory_mb", "4096")
+    if not tmb.isdecimal():
+        raise SystemExit("limits.test_memory_mb must be a non-negative integer")
+    print(f"test_memory_mb\t{tmb}")
+    # RLIMIT_NPROC. The kernel charges this to the ACCOUNT, not to the sandbox, so a value below the
+    # host's idle process count makes every gate fail to fork. 0 = no process cap.
+    tmp_ = limits.get("test_max_procs", "2048")
+    if not tmp_.isdecimal():
+        raise SystemExit("limits.test_max_procs must be a non-negative integer")
+    print(f"test_max_procs\t{tmp_}")
+    # RLIMIT_FSIZE. The worktree and the scratch HOME are on real disk, so without this a suite can
+    # fill the filesystem — the one host-DoS route the tmpfs caps do not cover. 0 = no cap.
+    tfs = limits.get("test_fsize_mb", "2048")
+    if not tfs.isdecimal():
+        raise SystemExit("limits.test_fsize_mb must be a non-negative integer")
+    print(f"test_fsize_mb\t{tfs}")
+    # Findings emitted per repo per pass. Default 1 keeps a rulebook that omits the key at the
+    # pre-v2 single-finding behavior; the live rulebook sets it explicitly (ADR 0011).
+    # A hand-set 0 forces n_find=0 in the Runner (MAX_FINDINGS=0 → repo_findings 0 → the
+    # `n_find -le 0` guard), so every repo without a per-repo override silently no-ops; a
+    # non-numeric value detonates later in bash integer arithmetic. Require a positive
+    # integer so the misconfig fails loudly, matching every sibling limit above.
+    mfp = limits.get("max_findings_per_item", "1")
+    if not mfp.isdecimal() or int(mfp) < 1:
+        raise SystemExit("limits.max_findings_per_item must be a positive integer")
+    print(f"max_findings_per_item\t{mfp}")
+    # Open findings the verify phase may re-check per night — one read-only stage call each, so
+    # this is the ceiling on what closing the finding loop can cost. 0 is a legitimate value
+    # ("never spend a model on closure"); the free deterministic probe runs either way. A
+    # non-numeric value would detonate in bash arithmetic — fail loudly like every sibling.
+    mvr = limits.get("max_verifies_per_run", "5")
+    if not mvr.isdecimal():
+        raise SystemExit("limits.max_verifies_per_run must be a non-negative integer")
+    print(f"max_verifies_per_run\t{mvr}")
+    # Recon stage: on by default. This is a closed boolean domain: accepting YAML-ish synonyms
+    # such as `no` while bash only recognises the literal `false` silently leaves Recon enabled.
+    renabled = recon.get("enabled", "true")
+    if renabled not in ("true", "false"):
+        raise SystemExit("recon.enabled must be true or false")
+    print(f"recon_enabled\t{renabled}")
+    # A malformed ttl_days silently became 0 in bash arithmetic → the cache was never fresh →
+    # recon re-ran every pass. Require a positive integer so the misconfig fails loudly instead.
+    ttl = recon.get("ttl_days", "7")
+    if not ttl.isdecimal() or int(ttl) < 1:
+        raise SystemExit("recon.ttl_days must be a positive integer")
+    print(f"recon_ttl_days\t{ttl}")
+    # Which MODEL a stage runs on (ADR 0020). The host declares it here because stage isolation
+    # (ADR 0019) drops the CLI's `user` settings scope, so a machine-wide pin in
+    # ~/.claude/settings.json no longer reaches a stage. OMITTING the key means "let the CLI resolve
+    # its own default"; writing the key with no value is a half-finished edit, and treating that as
+    # "no model" would silently run the night on something else. Model ID *syntax* stays
+    # unvalidated — it belongs to the CLI vendor and any pattern here would go stale — but a tab
+    # would corrupt the TSV transport to bash.
+    for key in ("claude_model", "codex_model", "pi_model", "pi_provider", "pi_extensions"):
+        model = agent.get(key, "")
+        if key in agent and not model:
+            raise SystemExit(
+                f"agent.{key} is empty — give it a value, or omit the key entirely"
+            )
+        if "\t" in model:
+            raise SystemExit(f"agent.{key} must not contain a tab")
+        print(f"{key}\t{model}")
+    # The codex adapter's reasoning effort, declared beside its model and resolved the same way:
+    # NIGHTSHIFT_CODEX_REASONING_EFFORT if set > this key > the CLI default. Unlike a model id, the
+    # domain is small and fixed, so it is closed (CODEX_EFFORTS).
+    effort = agent.get("codex_effort", "")
+    if "codex_effort" in agent and not effort:
+        raise SystemExit("agent.codex_effort is empty — give it a value, or omit the key entirely")
+    if effort and effort not in CODEX_EFFORTS:
+        raise SystemExit(
+            f"agent.codex_effort: unknown effort {effort!r} — "
+            f"expected one of {', '.join(CODEX_EFFORTS)}"
+        )
+    print(f"codex_effort\t{effort}")
+    # Which adapter serves the Review stage (ADR 0031). Omitted = Review runs on the night's own
+    # adapter, which is the pre-0031 behaviour. Validated against the implemented set for the same
+    # reason `mode` is: an unrecognised value cannot be a feature request, and tolerating one would
+    # leave the routing silently off.
+    # Which adapter runs the night. Omitted = whatever $NIGHTSHIFT_AGENT says, which is the
+    # pre-existing behaviour; the env var still wins when explicitly set, so a one-off hand run needs
+    # no rulebook edit. Declared here for the same reason the models are (ADR 0020): the host owns
+    # this file, and which agent ran the night is governance, not an invocation detail.
+    primary = agent.get("primary", "")
+    if "primary" in agent and not primary:
+        raise SystemExit("agent.primary is empty - name an adapter, or omit the key entirely")
+    if primary and primary not in REVIEW_AGENTS:
+        raise SystemExit(
+            f"agent.primary: unknown adapter {primary!r} - "
+            f"expected one of {', '.join(sorted(REVIEW_AGENTS))}"
+        )
+    print(f"primary_agent\t{primary}")
+    # Whether the read-only pi adapter may also serve the FIX stage, which it declines by default
+    # (ADR 0031). Only `true` turns it on; any other spelling is refused rather than interpreted, so
+    # a typo cannot decide this by accident.
+    allow_fix = agent.get("pi_allow_fix", "")
+    if allow_fix and allow_fix not in ("true", "false"):
+        raise SystemExit(f"agent.pi_allow_fix must be true or false, got {allow_fix!r}")
+    print(f"pi_allow_fix\t{allow_fix or 'false'}")
+    review_agent = agent.get("review_agent", "")
+    if "review_agent" in agent and not review_agent:
+        raise SystemExit(
+            "agent.review_agent is empty — name an adapter, or omit the key entirely"
+        )
+    if review_agent and review_agent != "auto" and review_agent not in REVIEW_AGENTS:
+        raise SystemExit(
+            f"agent.review_agent: unknown adapter {review_agent!r} — "
+            f"expected one of {', '.join(sorted(REVIEW_AGENTS))}"
+        )
+    print(f"review_agent\t{review_agent}")
+    # Which adapters give every open branch its nightly merge/fix/reject recommendation (ADR 0038).
+    # A comma-separated scalar (block-style only, like a repo's `dimensions`). Omitted = no branch
+    # review. Each entry names an ADAPTER and is validated like review_agent; a duplicate would ask
+    # the same model twice, which is one opinion billed as two. `mock` alone may repeat: it is the
+    # test adapter, and each of its slots stands in for a distinct model.
+    advisors_raw = agent.get("advisors", "")
+    if "advisors" in agent and not advisors_raw:
+        raise SystemExit("agent.advisors is empty — name one or more adapters, or omit the key entirely")
+    advisors = [a.strip() for a in advisors_raw.split(",")] if advisors_raw else []
+    for a in advisors:
+        if a not in REVIEW_AGENTS:
+            raise SystemExit(
+                f"agent.advisors: unknown adapter {a!r} — "
+                f"expected a comma-separated list of {', '.join(sorted(REVIEW_AGENTS))}"
+            )
+    real = [a for a in advisors if a != "mock"]
+    if len(set(real)) != len(real):
+        raise SystemExit("agent.advisors: an adapter is listed twice")
+    print(f"advisors\t{','.join(advisors)}")
+    # Global review-dimension set; ORDER is the cold-start / tie priority in the Runner.
+    for d in dims:
+        if d not in LENSES:
+            raise SystemExit(
+                f"dimensions: unknown lens {d!r} — "
+                f"expected a lens file in {LENS_DIR}: {', '.join(LENSES)}"
+            )
+        print(f"dimension\t{d}")
+    for r in repos:
+        path = r.get("path", "")
+        if not path or not path.startswith("/"):
+            raise SystemExit(
+                f"repo path must be absolute and non-empty, got {path!r}"
+            )
+        # base is optional: empty means "auto-detect" (base_ref) in the Runner.
+        # findings is optional: empty means "inherit max_findings_per_item".
+        # dimensions is optional (comma-separated scalar): empty means "inherit the global set".
+        # Bash treats tab as IFS whitespace and collapses adjacent delimiters. Prefixing each
+        # optional value with its key keeps every field non-empty (`base=`) and position-stable.
+        findings = r.get("findings", "")
+        if findings and (not findings.isdecimal() or int(findings) < 1):
+            raise SystemExit(
+                f"repo {path}: findings must be a positive integer"
+            )
+        # The Runner's select_order() skips any repo whose mode it does not recognise, WITHOUT a log
+        # line — so `mode: brnach-fix` silently removed the repo from every night and the operator's
+        # only clue was that it never appeared in a digest again. Closed key sets already protect
+        # every other knob from a typo (LIMIT_KEYS/RECON_KEYS/AGENT_KEYS/REPO_KEYS); the mode VALUE
+        # was the one place a typo still degraded the run quietly. Fail closed, same as the keys.
+        mode = r.get("mode", "findings-only")
+        if mode not in REPO_MODES:
+            raise SystemExit(
+                f"repo {r.get('path', '')}: unknown mode {mode!r} — "
+                f"expected one of {', '.join(sorted(REPO_MODES))}"
+            )
+        repo_dimensions = r.get("dimensions", "")
+        for dimension in (d.strip() for d in repo_dimensions.split(",") if d.strip()):
+            if dimension not in LENSES:
+                raise SystemExit(
+                    f"repo {r.get('path', '')}: unknown lens {dimension!r} — "
+                    f"expected a lens file in {LENS_DIR}: {', '.join(LENSES)}"
+                )
+        # test_cmd MUST stay last on the row — a command legitimately contains spaces, and bash's
+        # `read` soaks the remainder into the final variable. A tab would split it in two.
+        test_cmd = r.get("test_cmd", "")
+        if "\t" in test_cmd:
+            raise SystemExit(
+                f"repo {r.get('path', '')}: test_cmd must not contain a tab"
+            )
+        # ADR 0026 closes the ungated ship path that ADR 0022 §4 left open. A `branch-fix` repo
+        # pushes machine-written code that a human is invited to merge, and the Review stage only
+        # ever proves the FINDING is fixed — never that nothing else broke. Shipping with no suite
+        # at all was a silent gap: `shipping UNGATED` scrolled past in a log nobody reads at 04:00.
+        # A repo with no runnable suite is not a repo nightshift may write branches for; say so with
+        # `mode: findings-only`, which reports without ever pushing. Refuse the silence instead.
+        if mode == "branch-fix" and not test_cmd:
+            raise SystemExit(
+                f"repo {r.get('path', '')}: mode branch-fix requires a test_cmd (ADR 0026) — "
+                "give the repo its ship gate, or set mode: findings-only"
+            )
+        # Whether that gate's sandbox gets network egress (ADR 0026). Default false: `npm ci` and
+        # `uv run --with-requirements` need it, most suites do not, and the flag makes the repos
+        # that do an explicit, per-repo host decision rather than a fleet-wide default.
+        test_net = r.get("test_net", "false")
+        if test_net not in ("true", "false"):
+            raise SystemExit(
+                f"repo {r.get('path', '')}: test_net must be true or false, got {test_net!r}"
+            )
+        # Extra paths bound READ-ONLY into THIS repo's gate sandbox (ADR 0026), `:`-separated like the
+        # host-wide NIGHTSHIFT_TEST_SANDBOX_ROBIND. Per repo because the usual case is one repo's
+        # dependency on a local checkout (`git+file:///…`), and the host-wide knob would show that
+        # checkout to every other repo's suite too. Absolute paths only: a relative one would resolve
+        # against whatever directory the Runner happens to be in.
+        test_robind = r.get("test_robind", "")
+        for p in test_robind.split(":"):
+            if p and not p.startswith("/"):
+                raise SystemExit(
+                    f"repo {r.get('path', '')}: test_robind entries must be absolute paths, got {p!r}"
+                )
+        if "\t" in test_robind:
+            raise SystemExit(
+                f"repo {r.get('path', '')}: test_robind must not contain a tab"
+            )
+        # The dependency setup the Runner runs in the gate's sandbox before every Fix stage (ADR 0037),
+        # so a Fix stage that can execute commands finds the repo's dependencies installed. Optional;
+        # it rides on the row second to last, which is why it may not contain a tab either.
+        setup_cmd = r.get("setup_cmd", "")
+        if "\t" in setup_cmd:
+            raise SystemExit(
+                f"repo {r.get('path', '')}: setup_cmd must not contain a tab"
+            )
+        print(
+            "repo"
+            f"\tpath={r.get('path', '')}"
+            f"\tmode={r.get('mode', 'findings-only')}"
+            f"\tbase={r.get('base', '')}"
+            f"\tfindings={findings}"
+            f"\tdimensions={r.get('dimensions', '')}"
+            f"\ttest_net={test_net}"
+            f"\ttest_robind={test_robind}"
+            f"\tsetup_cmd={setup_cmd}"
+            f"\ttest_cmd={test_cmd}"
+        )
+
+
+if __name__ == "__main__":
+    main(sys.argv[1])

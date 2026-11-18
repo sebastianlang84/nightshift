@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
+
+# harvest manual-verdict UX + ledger hardening:
+#  - a corrupt ledger line aborts loudly (never a silent no-op exiting 0);
+#  - re-recording an identical manual verdict appends nothing (idempotent);
+#  - a selector spanning >1 repo-scoped identity is refused and shows stable item ids.
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+LEDGER="$TMP/ledger.jsonl"
+RB="$ROOT/rulebook.example.yaml"
+run() { STATE_DIR="$TMP" LEDGER="$LEDGER" RULEBOOK="$RB" bash "$ROOT/bin/harvest.sh" "$@"; }
+
+ship() { # branch sha fingerprint
+  jq -nc --arg b "$1" --arg s "$2" --arg fp "$3" \
+    '{night:"2026-07-13",item:("i-"+$s),repo:"/r",fingerprint:$fp,branch:$b,sha:$s,
+      outcome:"shipped",pr_url:null,schema_version:2}' >> "$LEDGER"
+}
+
+# --- idempotent manual verdict -----------------------------------------------------
+ship "nightshift/b1" "sha1" "/r:x:L1"
+run verdict nightshift/b1 merged >/dev/null
+n1=$(wc -l < "$LEDGER")
+run verdict nightshift/b1 merged >/dev/null   # identical -> must append nothing
+n2=$(wc -l < "$LEDGER")
+[ "$n1" = "$n2" ] || { echo "idempotency: re-recording appended a row ($n1 -> $n2)" >&2; exit 1; }
+# a genuine change still records
+run verdict nightshift/b1 wontfix >/dev/null
+[ "$(wc -l < "$LEDGER")" -gt "$n2" ] || { echo "verdict change was not recorded" >&2; exit 1; }
+
+# --- ambiguous selectors fail closed ------------------------------------------------
+ship "nightshift/b2" "sha2" "/r:shared:L9"
+ship "nightshift/b3" "sha3" "/r:shared:L9"   # same fingerprint, two branches
+before=$(wc -l < "$LEDGER")
+rc=0; run verdict "/r:shared:L9" merged >"$TMP/out" 2>"$TMP/err" || rc=$?
+[ "$rc" = 2 ] || { echo "ambiguous fingerprint should exit 2, got $rc" >&2; exit 1; }
+grep -q "ambiguous selector" "$TMP/err" || { echo "ambiguity was not explained" >&2; exit 1; }
+[ "$(wc -l < "$LEDGER")" = "$before" ] || { echo "ambiguous verdict still wrote the ledger" >&2; exit 1; }
+
+# The same branch name can exist in two repos. Branch-only counting called that one target and
+# silently chose the newest row; repo-scoped identity must reject it too.
+jq -nc '{night:"2026-07-13",item:"other-item",repo:"/other",fingerprint:"other:fp",branch:"nightshift/b1",sha:"other-sha",outcome:"shipped",schema_version:2}' >> "$LEDGER"
+rc=0; run verdict nightshift/b1 merged >"$TMP/out" 2>"$TMP/err" || rc=$?
+[ "$rc" = 2 ] || { echo "cross-repo branch selector should exit 2, got $rc" >&2; exit 1; }
+grep -q 'use an item id' "$TMP/err"
+
+# --- unrecognised arguments are rejected, never silently harvested -----------------
+# A typo'd preview flag must NOT fall through to the argument-less (ledger-writing) path.
+before=$(wc -l < "$LEDGER")
+for bad in --dryrun -n --dry_run nightshift/b1 verdict "verdict nightshift/b1"; do
+  rc=0
+  # shellcheck disable=SC2086 -- deliberate word-splitting: these are argv fixtures
+  run $bad >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || { echo "arg '$bad' should exit 2, got $rc" >&2; exit 1; }
+done
+rc=0; run --dry-run stray >/dev/null 2>&1 || rc=$?
+[ "$rc" = 2 ] || { echo "trailing argument should exit 2, got $rc" >&2; exit 1; }
+rc=0; run verdict nightshift/b1 merged unquoted multi word >/dev/null 2>&1 || rc=$?
+[ "$rc" = 2 ] || { echo "unquoted multi-word reason should exit 2, got $rc" >&2; exit 1; }
+[ "$(wc -l < "$LEDGER")" = "$before" ] \
+  || { echo "a rejected invocation still wrote to the ledger" >&2; exit 1; }
+run --help > "$TMP/help.out"   # exits 0 and prints usage on stdout
+grep -q -- '--dry-run' "$TMP/help.out" || { echo "--help did not print usage" >&2; exit 1; }
+
+# --- corrupt ledger aborts loudly --------------------------------------------------
+printf 'not json at all\n' >> "$LEDGER"
+if run --dry-run >/dev/null 2>&1; then
+  echo "corrupt ledger did NOT abort (silent no-op)" >&2; exit 1
+fi
+
+echo "test-harvest-manual-verdict: ok"

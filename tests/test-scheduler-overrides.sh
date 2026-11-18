@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
+
+# schedule.sh must surface systemd drop-in overrides (which can silently change the effective
+# cadence) in `status`, and `uninstall` must remove the drop-in directory rather than leaving a
+# hidden schedule behind.
+#
+# XDG_CONFIG_HOME isolates the unit FILES. It does NOT isolate the session BUS: `systemctl --user`
+# talks to the operator's live systemd no matter where the unit files live. So `uninstall` — whose
+# first act is `systemctl --user disable --now nightshift.timer` — silently DISARMED the real
+# nightly timer every time this suite ran on a machine with a user session. (Observed 2026-08-04:
+# the live timer went from `enabled/waiting` to `disabled` mid-session; nothing reported it, and
+# the next night simply would not have fired. The ship gate of ADR 0022 made it worse — it runs
+# this very suite in a worktree, so a gated nightshift ship would disarm the scheduler nightly.)
+# The stub below intercepts the unqualified `systemctl` on PATH, so the test exercises the real
+# code path and records the calls instead of executing them.
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+mkdir -p "$TMP/bin"
+# `show` reports the timer off unless STUB_TIMER_ON=1 (a disable that did not take) or
+# STUB_SYSTEMCTL_DOWN=1 (no user manager: every call fails). schedule.sh must then fail instead of
+# reporting the timer off — and uninstall must leave the units in place.
+cat > "$TMP/bin/systemctl" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$TMP/systemctl.calls"
+[ "\${STUB_SYSTEMCTL_DOWN:-0}" = 1 ] && exit 1
+case " \$* " in
+  *" show "*)
+    if [ "\${STUB_TIMER_ON:-0}" = 1 ]; then printf 'ActiveState=active\nUnitFileState=enabled\n'
+    else printf 'ActiveState=inactive\nUnitFileState=disabled\n'; fi ;;
+esac
+exit 0
+EOF
+chmod +x "$TMP/bin/systemctl"
+export PATH="$TMP/bin:$PATH"
+
+export XDG_CONFIG_HOME="$TMP/config"
+UNIT_DIR="$XDG_CONFIG_HOME/systemd/user"
+mkdir -p "$UNIT_DIR/nightshift.timer.d"
+printf '[Timer]\nOnCalendar=\nOnCalendar=hourly\n' > "$UNIT_DIR/nightshift.timer.d/override.conf"
+
+out="$(bash "$ROOT/bin/schedule.sh" status 2>&1 || true)"
+grep -q "override.conf" <<<"$out" || { echo "status did not report the drop-in override" >&2; echo "$out" >&2; exit 1; }
+grep -q "may change the EFFECTIVE schedule" <<<"$out" || { echo "status did not warn about effective cadence" >&2; echo "$out" >&2; exit 1; }
+
+uout="$(bash "$ROOT/bin/schedule.sh" uninstall 2>&1 || true)"
+grep -q "override.conf" <<<"$uout" || { echo "uninstall did not report the removed drop-in" >&2; echo "$uout" >&2; exit 1; }
+[ ! -d "$UNIT_DIR/nightshift.timer.d" ] || { echo "drop-in dir survived uninstall" >&2; exit 1; }
+
+# uninstall genuinely tries to disable the unit — the stub is what keeps that off the live bus.
+# This assertion is the reason the stub must stay: it pins that the suite would otherwise reach
+# the operator's systemd, so removing the stub fails loudly rather than silently disarming a timer.
+grep -q -- "--user disable --now nightshift.timer" "$TMP/systemctl.calls" \
+  || { echo "uninstall did not attempt to disable the timer" >&2; cat "$TMP/systemctl.calls" >&2; exit 1; }
+
+# A disable that leaves the timer enabled or active is a failure, not "timer disabled".
+if dout="$(STUB_TIMER_ON=1 bash "$ROOT/bin/schedule.sh" disable 2>&1)"; then
+  echo "disable reported success while the timer stayed on: $dout" >&2; exit 1
+fi
+grep -q "still enabled or active" <<<"$dout" || { echo "disable failed without saying why: $dout" >&2; exit 1; }
+if dout="$(STUB_SYSTEMCTL_DOWN=1 bash "$ROOT/bin/schedule.sh" disable 2>&1)"; then
+  echo "disable reported success although the timer state could not be read: $dout" >&2; exit 1
+fi
+bash "$ROOT/bin/schedule.sh" disable >/dev/null || { echo "disable failed although the timer is off" >&2; exit 1; }
+mkdir -p "$UNIT_DIR"; touch "$UNIT_DIR/nightshift.timer"
+if STUB_SYSTEMCTL_DOWN=1 bash "$ROOT/bin/schedule.sh" uninstall >/dev/null 2>&1; then
+  echo "uninstall reported success although the timer state could not be read" >&2; exit 1
+fi
+[ -f "$UNIT_DIR/nightshift.timer" ] || { echo "uninstall removed the units without knowing the timer is off" >&2; exit 1; }
+
+echo "test-scheduler-overrides: ok"

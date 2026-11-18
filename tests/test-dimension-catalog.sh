@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
+
+# Built-in lenses have prompt + Recon + mock representations. The default candidate set is smaller:
+# `knowledge` is deliberately opt-in per repo, so ordinary code repos do not eventually spend a pass
+# on wiki maintenance merely because Recon's finite low weight keeps every configured lens rotating.
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+builtins=(correctness security infra docs tests perf ui-ux deps bloat knowledge general craft)
+defaults=(correctness security infra docs tests perf ui-ux deps bloat craft)
+mapfile -t configured < <(
+  python3 "$ROOT/lib/parse_rulebook.py" "$ROOT/rulebook.example.yaml" |
+    awk -F '\t' '$1=="dimension" {print $2}'
+)
+[ "${configured[*]}" = "${defaults[*]}" ] || {
+  echo "dimension template drift: got '${configured[*]}'" >&2; exit 1;
+}
+
+# Both global dimensions and per-repo overrides select serviced lenses, so reject an id with no
+# prompts/dimensions/<id>.md file instead of recording a lens for which the Runner has no prompt.
+reject_unknown_dimension() { # label rulebook body expected error
+  printf '%s\n' "$2" > "$TMP/invalid-dimensions.yaml"
+  if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/invalid-dimensions.yaml" \
+      >"$TMP/stdout" 2>"$TMP/stderr"; then
+    echo "parser accepted $1" >&2
+    exit 1
+  fi
+  grep -q "$3" "$TMP/stderr" || {
+    echo "$1: wrong error: $(cat "$TMP/stderr")" >&2
+    exit 1
+  }
+}
+reject_unknown_dimension "an unknown global lens" 'dimensions:
+  - securty
+repos:
+  - path: /srv/example
+    mode: findings-only' "dimensions: unknown lens 'securty'"
+reject_unknown_dimension "an unknown per-repo lens" 'repos:
+  - path: /srv/example
+    mode: findings-only
+    dimensions: docs,securityy' "repo /srv/example: unknown lens 'securityy'"
+
+# A custom lens (ADR 0010) is serviceable once its prompt file exists: a parser installed next to
+# prompts/dimensions/my-lens.md accepts it globally and per repo.
+mkdir -p "$TMP/home/lib" "$TMP/home/prompts/dimensions"
+cp "$ROOT/lib/parse_rulebook.py" "$TMP/home/lib/"
+cp "$ROOT"/prompts/dimensions/*.md "$TMP/home/prompts/dimensions/"
+echo "custom lens" > "$TMP/home/prompts/dimensions/my-lens.md"
+printf '%s\n' 'dimensions:' '  - my-lens' 'repos:' '  - path: /srv/example' '    mode: findings-only' \
+  '    dimensions: docs,my-lens' > "$TMP/custom-dimensions.yaml"
+out="$(python3 "$TMP/home/lib/parse_rulebook.py" "$TMP/custom-dimensions.yaml")" || {
+  echo "parser rejected a custom lens backed by a prompt file" >&2; exit 1;
+}
+grep -qx $'dimension\tmy-lens' <<<"$out" || { echo "custom global lens not emitted" >&2; exit 1; }
+grep -q 'dimensions=docs,my-lens' <<<"$out" || { echo "custom per-repo lens not emitted: $out" >&2; exit 1; }
+# A directory named like a lens is no lens file: the Runner would append nothing for it.
+mkdir "$TMP/home/prompts/dimensions/audit.md"
+printf '%s\n' 'dimensions:' '  - audit' 'repos:' '  - path: /srv/example' '    mode: findings-only' \
+  > "$TMP/dir-dimension.yaml"
+if python3 "$TMP/home/lib/parse_rulebook.py" "$TMP/dir-dimension.yaml" >/dev/null 2>&1; then
+  echo "parser accepted a lens id backed by a directory" >&2; exit 1
+fi
+
+mapfile -t prompt_files < <(
+  find "$ROOT/prompts/dimensions" -maxdepth 1 -type f -name '*.md' -printf '%f\n' |
+    sed 's/\.md$//' | sort
+)
+mapfile -t expected_sorted < <(printf '%s\n' "${builtins[@]}" | sort)
+[ "${prompt_files[*]}" = "${expected_sorted[*]}" ] || {
+  echo "dimension prompt catalog drift: got '${prompt_files[*]}'" >&2; exit 1;
+}
+
+for dim in "${builtins[@]}"; do
+  grep -q -- "^- $dim —" "$ROOT/prompts/recon.md" || {
+    echo "recon does not describe dimension '$dim'" >&2; exit 1;
+  }
+  grep -q -- "\"$dim\":" "$ROOT/prompts/recon.md" || {
+    echo "recon output contract omits dimension '$dim'" >&2; exit 1;
+  }
+done
+
+cat > "$TMP/rulebook.yaml" <<EOF
+repos:
+  - path: $TMP/repo
+    mode: findings-only
+EOF
+mkdir -p "$TMP/repo" "$TMP/state" "$TMP/runs" "$TMP/digests" "$TMP/worktrees"
+export RULEBOOK="$TMP/rulebook.yaml" NIGHTSHIFT_STATE_DIR="$TMP/state" \
+  NIGHTSHIFT_RUNS_DIR="$TMP/runs" NIGHTSHIFT_DIGEST_DIR="$TMP/digests" \
+  NIGHTSHIFT_WORKTREES="$TMP/worktrees"
+# shellcheck disable=SC1090
+NIGHTSHIFT_SOURCED=1 source "$ROOT/bin/nightshift.sh"
+load_rulebook
+[ "${DIMENSIONS[*]}" = "${defaults[*]}" ] || {
+  echo "runner fallback drift: got '${DIMENSIONS[*]}'" >&2; exit 1;
+}
+
+mkdir -p "$TMP/item"
+printf '%s\n' '{"languages":["py"],"has_knowledge":true}' > "$TMP/item/signals.json"
+mock_recon "$TMP/repo" "$TMP/item"
+expected_json="$(printf '%s\n' "${builtins[@]}" | jq -R . | jq -sc .)"
+jq -e --argjson expected "$expected_json" '
+  ((.dimensions | keys | sort) == ($expected | sort)) and
+  all(.dimensions[]; (.yield == "high" or .yield == "normal" or .yield == "low")) and
+  (.dimensions.bloat.yield == "normal") and
+  (.dimensions.knowledge.yield == "high")
+' "$TMP/item/recon.json" >/dev/null || {
+  echo "mock recon dimension catalog or yield drift" >&2; exit 1;
+}
+
+NIGHTSHIFT_DIMENSION=bloat stage_prompt explore "$TMP/repo" "$TMP/item" > "$TMP/explore.prompt"
+grep -q "^## Tonight's lens: bloat$" "$TMP/explore.prompt" || {
+  echo "explore prompt did not select bloat" >&2; exit 1;
+}
+grep -q '^## Lens: BLOAT$' "$TMP/explore.prompt" || {
+  echo "explore prompt did not inject the bloat lens" >&2; exit 1;
+}
+
+git init -q "$TMP/repo"
+printf '# Knowledge fixture\n' > "$TMP/repo/README.md"
+git -C "$TMP/repo" -c user.name=test -c user.email=test@localhost add README.md
+git -C "$TMP/repo" -c user.name=test -c user.email=test@localhost commit -q -m fixture
+python3 "$ROOT/lib/knowledge_probe.py" "$TMP/repo" > "$TMP/item/knowledge-probe.json"
+NIGHTSHIFT_DIMENSION=knowledge stage_prompt explore "$TMP/repo" "$TMP/item" > "$TMP/knowledge.prompt"
+grep -q "^## Tonight's lens: knowledge$" "$TMP/knowledge.prompt" || {
+  echo "explore prompt did not select knowledge" >&2; exit 1;
+}
+grep -q '^## Lens: KNOWLEDGE$' "$TMP/knowledge.prompt" || {
+  echo "explore prompt did not inject the knowledge lens" >&2; exit 1;
+}
+grep -q '^## knowledge_probe ' "$TMP/knowledge.prompt" || {
+  echo "explore prompt did not inject deterministic knowledge evidence" >&2; exit 1;
+}
+
+NIGHTSHIFT_DIMENSION=general stage_prompt explore "$TMP/repo" "$TMP/item" > "$TMP/general.prompt"
+grep -q '^## Free search$' "$TMP/general.prompt" || {
+  echo "explore prompt did not select free search" >&2; exit 1;
+}
+grep -q '^## General improvement search$' "$TMP/general.prompt" || {
+  echo "explore prompt did not inject general search" >&2; exit 1;
+}
+if grep -q 'Rank findings WITHIN it' "$TMP/general.prompt"; then
+  echo "free search retained the restrictive lens wrapper" >&2; exit 1
+fi
+
+echo "test-dimension-catalog: ok"

@@ -1,0 +1,269 @@
+#!/usr/bin/env bash
+set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
+
+# ADR 0022 — the Review stage proves the FINDING is fixed; it never proves nothing ELSE broke.
+# Until the gate existed, a regression only surfaced if the host repo happened to have CI, and one
+# of four did. (Observed 2026-08-04: repo-a PR #10 removed a dependency that looked unused
+# in src/ but was imported by tests across a service boundary — three tests broke and it shipped.)
+# The gate runs the repo's declared `test_cmd` in the WORKTREE, INSIDE the fix<->review loop:
+#   fails  -> the failing output goes back to the Fix stage, which repairs its own regression
+#   fails every iteration -> ledger `tests-failed`, no branch anywhere, the finding stays unlatched
+#   passes -> ships exactly as before
+#   absent on a branch-fix repo -> the run ABORTS (ADR 0026; ADR 0022 §4 used to ship it ungated)
+#   unsandboxable -> `gate-blocked`, without retrying, because that is a host problem (ADR 0026)
+# Throwing the fix away on the first red suite was the wrong reaction: the Fix stage caused the
+# breakage, is still in the loop with budget left, and is the thing best placed to repair it.
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+# Builds a throwaway fleet-of-one and runs one night with the given `test_cmd` line.
+# $1 = case name, $2 = the `test_cmd:` line to splice into the rulebook ("" = omit the key).
+run_night() {
+  local case="$1" cmdline="${2:-}" d="$TMP/$1"
+  mkdir -p "$d/state" "$d/runs" "$d/digests" "$d/worktrees"
+  git init -q --bare "$d/remote.git"
+  git init -q -b main "$d/repo"
+  git -C "$d/repo" remote add origin "$d/remote.git"
+  # `teh` is what the mock Explore stage finds and the mock Fix stage repairs.
+  printf '# Demo\n\nThis is teh demo.\n' > "$d/repo/README.md"
+  # Since ADR 0026 the gate is sandboxed, so a `test_cmd` can write nowhere but the worktree. The
+  # cases below that need a marker surviving between fix iterations therefore keep it IN the tree
+  # and out of the commit by ignoring it — finalize's `git add -A` honours .gitignore.
+  printf '.gate-marker\n' > "$d/repo/.gitignore"
+  # WITH_APP=1 plants a second mock defect, so one item carries two findings.
+  [ "${WITH_APP:-0}" = 1 ] && printf '# retrun value\n' > "$d/repo/app.py"
+  git -C "$d/repo" -c user.name=test -c user.email=test@localhost add -A
+  git -C "$d/repo" -c user.name=test -c user.email=test@localhost commit -q -m initial
+  git -C "$d/repo" push -q -u origin main
+
+  {
+    echo "branch_prefix: nightshift/"
+    echo "limits:"
+    echo "  max_open_branches: 5"
+    [ "${WITH_APP:-0}" = 1 ] && echo "  max_findings_per_item: 2"
+    echo "recon:"
+    echo "  enabled: false"
+    echo "dimensions:"
+    echo "  - docs"
+    echo "repos:"
+    echo "  - path: $d/repo"
+    echo "    mode: branch-fix"
+    echo "    base: main"
+    [ -n "$cmdline" ] && echo "    test_cmd: $cmdline"
+  } > "$d/rulebook.yaml"
+
+  RULEBOOK="$d/rulebook.yaml" NIGHTSHIFT_AGENT=mock NIGHTSHIFT_OPEN_PR=0 \
+  NIGHTSHIFT_STATE_DIR="$d/state" NIGHTSHIFT_RUNS_DIR="$d/runs" \
+  NIGHTSHIFT_DIGEST_DIR="$d/digests" NIGHTSHIFT_WORKTREES="$d/worktrees" \
+    "$ROOT/bin/nightshift.sh" >"$d/out" 2>"$d/err"
+}
+
+fail() { echo "test-ship-test-gate: $*" >&2; exit 1; }
+
+# --- 1. a suite the fix keeps red through every attempt blocks the ship ------
+# Green on the base (it still says `teh`), red once the mock fix repairs the typo.
+run_night fails 'grep -q teh README.md'
+d="$TMP/fails"; LEDGER="$d/state/ledger.jsonl"
+
+grep -q "test gate failed" "$d/err" "$d/out" || { cat "$d/err" >&2; fail "the failed gate was not reported"; }
+# It must have RETRIED, not given up on the first red suite.
+grep -q "gate overrules ship" "$d/err" "$d/out" || { cat "$d/err" >&2; fail "the gate did not send the fix back for another attempt"; }
+[ "$(grep -c "test gate failed" "$d/err")" -ge 2 ] \
+  || { cat "$d/err" >&2; fail "the gate ran only once — the fix<->review loop did not retry"; }
+
+if [ -f "$LEDGER" ] && jq -e 'select(.outcome=="shipped")' "$LEDGER" >/dev/null 2>&1; then
+  jq -c . "$LEDGER" >&2; fail "a branch shipped although the test gate failed"
+fi
+
+row="$(jq -sc '[.[]|select(.outcome=="tests-failed")][0] // empty' "$LEDGER" 2>/dev/null || true)"
+[ -n "$row" ] || { jq -c . "$LEDGER" >&2; fail "no tests-failed row in the ledger"; }
+# No branch/sha: nothing was created, so the row must not imply a pushed artifact.
+jq -e '.branch==null and .sha==null' <<<"$row" >/dev/null \
+  || fail "tests-failed row names a branch/sha that never existed: $row"
+
+# The gate must not cost a branch — it runs BEFORE the branch is created.
+if git -C "$d/remote.git" for-each-ref --format='%(refname)' 'refs/heads/nightshift/*' | grep -q .; then
+  fail "a nightshift/* branch reached the remote despite the failed gate"
+fi
+if git -C "$d/repo" branch --list 'nightshift/*' | grep -q .; then
+  fail "a local nightshift/* branch was left behind after the failed gate"
+fi
+
+# The suite's output is kept for diagnosis, next to the finding it belongs to.
+find "$d/runs" -name tests.log | grep -q . || fail "no tests.log written for the failed gate"
+
+digest=""; for f in "$d/digests"/*.md; do digest="$f"; done
+[ -f "$digest" ] || fail "no digest written"
+grep -qF "tests-failed" "$digest" || { cat "$digest" >&2; fail "the digest hides the failed gate"; }
+
+# --- 2. a passing suite ships, and the gate ran against the FIX ---------------
+# `grep 'the demo'` only succeeds in the worktree AFTER the mock fix repairs `teh`. Running the
+# gate in the repo (or before the fix) would fail it — so this pins the working directory too.
+run_night passes 'grep -q "This is the demo" README.md'
+d="$TMP/passes"; LEDGER="$d/state/ledger.jsonl"
+
+grep -q "test gate passed" "$d/err" "$d/out" || { cat "$d/err" >&2; fail "a passing gate was not reported"; }
+jq -e 'select(.outcome=="shipped")' "$LEDGER" >/dev/null 2>&1 \
+  || { jq -c . "$LEDGER" >&2; fail "nothing shipped although the test gate passed"; }
+git -C "$d/remote.git" for-each-ref --format='%(refname)' 'refs/heads/nightshift/*' | grep -q . \
+  || fail "no nightshift/* branch on the remote although the gate passed"
+
+
+# --- 2b. red once, green on the retry: the item ships instead of dying --------
+# The marker has to survive from one gate to the next, and nothing inside the worktree does: the
+# gate purges every ignored file before it runs (ADR 0037), and the sandbox (ADR 0026) gives a
+# test_cmd nowhere else to write. So this case runs unsandboxed and keeps the marker outside the
+# tree; what it pins is the retry, which does not depend on the sandbox.
+# Red for the first TWO runs: the base pre-check before the fix, then the first gate. The base
+# re-check after that red gate is green, so the red is booked on the fix and the loop retries.
+NIGHTSHIFT_TEST_SANDBOX=none \
+  run_night retries "n=\$(cat '$TMP/retries.count' 2>/dev/null || echo 0); echo \$((n+1)) > '$TMP/retries.count'; [ \$n -ge 2 ]"
+d="$TMP/retries"; LEDGER="$d/state/ledger.jsonl"
+
+grep -q "gate overrules ship" "$d/err" "$d/out" || { cat "$d/err" >&2; fail "the first red suite was not reported as a retry"; }
+grep -q "test gate passed"    "$d/err" "$d/out" || { cat "$d/err" >&2; fail "the retry never went green"; }
+jq -e 'select(.outcome=="shipped")' "$LEDGER" >/dev/null 2>&1 \
+  || { jq -c . "$LEDGER" >&2; fail "a fix that went green on the retry must ship, not be thrown away"; }
+if [ -f "$LEDGER" ] && jq -e 'select(.outcome=="tests-failed")' "$LEDGER" >/dev/null 2>&1; then
+  fail "a recovered item must not also be recorded as tests-failed"
+fi
+# The log is deleted the moment the suite is green — its presence is the Fix stage's signal, so a
+# stale one would ask the next attempt to repair damage that is already repaired.
+find "$d/runs" -name tests.log | grep -q . && fail "tests.log survived a passing gate"
+
+# --- 2c. the failing output actually reaches the Fix stage --------------------
+# The mock adapter never reads a prompt, so this pins the wiring where it lives: stage_prompt.
+pid="$TMP/promptitem"; mkdir -p "$pid"
+echo '{"file":"README.md","summary":"s","fingerprint":"f"}' > "$pid/finding.json"
+prompt_with() { # tests.log content ("" = no log) -> the fix prompt on stdout
+  rm -f "$pid/tests.log"
+  [ -n "$1" ] && printf '%s' "$1" > "$pid/tests.log"
+  ( set +u; NIGHTSHIFT_SOURCED=1 . "$ROOT/bin/nightshift.sh" >/dev/null 2>&1
+    stage_prompt fix "$TMP" "$pid" )
+}
+if prompt_with "" | grep -q "previous attempt broke"; then
+  fail "the regression block appears in the fix prompt without a tests.log"
+fi
+withlog="$(prompt_with 'FAILED tests/test_thing.py::test_it
+E   AssertionError')"
+grep -q "previous attempt broke" <<<"$withlog" || fail "the Fix stage is never told its change broke the suite"
+grep -q "test_thing.py::test_it" <<<"$withlog" || fail "the Fix stage does not receive the failing output"
+rm -f "$pid/tests.log"
+
+# --- 2d. a red gate must not outlive its iteration ----------------------------
+# `tests-failed` and `abandoned` are distinct outcomes on purpose (ADR 0022 §3), and only
+# `abandoned` latches the finding (already_acted). So a gate failure from an EARLIER iteration must
+# not classify an item that the reviewer then gave up on — otherwise the night reports that the
+# suite refused a fix nobody ever tried to ship, and the abandoned finding stays eligible for a
+# fresh attempt every subsequent night.
+# Iteration 1: the reviewer ships, the suite goes red (and arms the sentinel on its way out).
+# Iteration 2: the sentinel makes the reviewer abandon, which breaks out before the gate runs.
+# A relative sentinel resolves against the worktree (mock_review) and is gitignored, so it never
+# reaches a commit — the sandboxed gate cannot write anywhere else.
+( export NIGHTSHIFT_MOCK_ABANDON_IF=".gate-marker"
+  run_night abandons 'grep -q teh README.md && exit 0; touch .gate-marker; exit 1' )
+d="$TMP/abandons"; LEDGER="$d/state/ledger.jsonl"
+
+grep -q "gate overrules ship" "$d/err" "$d/out" \
+  || { cat "$d/err" >&2; fail "the red first suite was not reported as a retry"; }
+jq -e 'select(.outcome=="abandoned")' "$LEDGER" >/dev/null 2>&1 \
+  || { jq -c . "$LEDGER" >&2; fail "a reviewer abandon was not recorded as abandoned"; }
+if jq -e 'select(.outcome=="tests-failed")' "$LEDGER" >/dev/null 2>&1; then
+  jq -c . "$LEDGER" >&2
+  fail "a stale gate=fail relabelled the reviewer's abandon as tests-failed — the finding never latches"
+fi
+
+# --- 3. no test_cmd on a branch-fix repo: the night refuses to start ----------
+# ADR 0026 revises ADR 0022 §4. "Ships ungated, and the log says so" was the last silent path to a
+# merge-ready branch with no regression check at all, and its warning scrolled past at 04:00. A repo
+# with no suite to declare belongs in `findings-only`, which reports without ever pushing.
+set +e
+run_night ungated ''
+rc=$?
+set -e
+d="$TMP/ungated"; LEDGER="$d/state/ledger.jsonl"
+
+[ "$rc" -ne 0 ] || { cat "$d/err" >&2; fail "a branch-fix repo with no test_cmd must abort the run"; }
+grep -q "requires a test_cmd" "$d/err" \
+  || { cat "$d/err" >&2; fail "the abort does not name the missing ship gate"; }
+if [ -f "$LEDGER" ] && jq -e 'select(.outcome=="shipped")' "$LEDGER" >/dev/null 2>&1; then
+  jq -c . "$LEDGER" >&2; fail "an ungated branch-fix repo shipped anyway"
+fi
+
+# --- 3b. no sandbox for the gate: refused, and WITHOUT burning fix iterations -
+# The gate executes candidate-authored code (ADR 0026), so a missing sandbox is a refusal to ship,
+# never a licence to run it unconfined. And it is not a regression: handing a host problem back to
+# the Fix stage would spend every remaining iteration, every night, on something no model can fix.
+# The PATH below mirrors the system bin dirs with exactly one binary removed, so the night fails for
+# the reason under test rather than because the Runner lost `jq`.
+NOBWRAP="$TMP/nobwrap"; mkdir -p "$NOBWRAP"
+for dir in /usr/local/bin /usr/bin /bin; do
+  [ -d "$dir" ] || continue
+  for p in "$dir"/*; do
+    n="${p##*/}"; [ "$n" = bwrap ] && continue
+    [ -e "$NOBWRAP/$n" ] || ln -s "$p" "$NOBWRAP/$n" 2>/dev/null || true
+  done
+done
+# NIGHTSHIFT_TEST_SANDBOX is set explicitly so the case holds on a host that opted the rest of the
+# suite out (a CI runner without user namespaces) — and, because bwrap is absent from the PATH
+# above, it holds identically on a host that has bwrap. The refusal is what is under test.
+( export PATH="$NOBWRAP" NIGHTSHIFT_TEST_SANDBOX=bwrap; run_night nosandbox 'true' )
+d="$TMP/nosandbox"; LEDGER="$d/state/ledger.jsonl"
+
+grep -q "no sandbox (bwrap missing)" "$d/err" "$d/out" \
+  || { cat "$d/err" >&2; fail "a gate with no sandbox did not say why it could not run"; }
+if [ -f "$LEDGER" ] && jq -e 'select(.outcome=="shipped")' "$LEDGER" >/dev/null 2>&1; then
+  jq -c . "$LEDGER" >&2; fail "a branch shipped although the gate could not be sandboxed"
+fi
+jq -e 'select(.outcome=="gate-blocked")' "$LEDGER" >/dev/null 2>&1 \
+  || { jq -c . "$LEDGER" >&2; fail "an unsandboxable gate must be recorded as gate-blocked"; }
+if jq -e 'select(.outcome=="tests-failed")' "$LEDGER" >/dev/null 2>&1; then
+  jq -c . "$LEDGER" >&2; fail "an unrunnable gate was misreported as a red suite"
+fi
+[ "$(grep -c "no sandbox (bwrap missing)" "$d/err")" -eq 1 ] \
+  || { cat "$d/err" >&2; fail "the unrunnable gate was retried — a host problem is not a revision request"; }
+if git -C "$d/remote.git" for-each-ref --format='%(refname)' 'refs/heads/nightshift/*' | grep -q .; then
+  fail "a nightshift/* branch reached the remote although the gate could not run"
+fi
+
+# --- 4. a hanging suite is bounded, not waited on -----------------------------
+( export NIGHTSHIFT_TEST_TIMEOUT=1; run_night hangs 'grep -q teh README.md && exit 0; sleep 30' )
+d="$TMP/hangs"; LEDGER="$d/state/ledger.jsonl"
+
+grep -q "test gate TIMED OUT" "$d/err" "$d/out" \
+  || { cat "$d/err" >&2; fail "a hanging suite was not reported as a timeout"; }
+jq -e 'select(.outcome=="tests-failed")' "$LEDGER" >/dev/null 2>&1 \
+  || { jq -c . "$LEDGER" >&2; fail "a timed-out gate must be recorded as tests-failed"; }
+if [ -f "$LEDGER" ] && jq -e 'select(.outcome=="shipped")' "$LEDGER" >/dev/null 2>&1; then
+  fail "a branch shipped although the test gate timed out"
+fi
+
+# --- 7. a suite that is red on the unchanged base is caught BEFORE the fixes are paid for --------
+# 2026-10-29 and 2026-11-01: the registry refused npm downloads before any test ran, and the Fix
+# stage was sent back to repair a suite it had not touched. Found only after Fix and Review, a red
+# base cost both for every finding, every night. The pre-check runs the gate once on the base; a red
+# base gets ONE fix attempt (case 2 shows such a fix can be the repair), the rest are skipped.
+# Two findings in one item: the second must not reach the Fix stage.
+( export WITH_APP=1; run_night basered 'exit 1' )
+d="$TMP/basered"; LEDGER="$d/state/ledger.jsonl"
+
+grep -q "the suite is red on the unchanged base" "$d/err" \
+  || { cat "$d/err" >&2; fail "a suite red on the base was not recognised before the fix"; }
+grep -q "red on the unchanged base as well" "$d/err" \
+  || { cat "$d/err" >&2; fail "the one attempt's red gate was booked against the fix"; }
+jq -e 'select(.outcome=="gate-blocked" and (.summary|test("attempt is spent")))' "$LEDGER" >/dev/null 2>&1 \
+  || { jq -c . "$LEDGER" >&2; fail "the second finding on a red base was not skipped and recorded"; }
+[ "$(find "$d/runs" -name worknote.md | wc -l)" -le 1 ] \
+  || { cat "$d/err" >&2; fail "more than one fix ran although the base was already red"; }
+if jq -e 'select(.outcome=="tests-failed" or .outcome=="shipped")' "$LEDGER" >/dev/null 2>&1; then
+  jq -c . "$LEDGER" >&2; fail "a suite red on the base was booked against the fix or shipped"
+fi
+[ -n "$(find "$d/runs" -name base-tests.log)" ] \
+  || fail "the base run left no log to read"
+[ "$(grep -c "one fix attempt tonight" "$d/err")" -eq 1 ] \
+  || { cat "$d/err" >&2; fail "the base was pre-checked more than once for one repo and base"; }
+
+echo "test-ship-test-gate: ok"

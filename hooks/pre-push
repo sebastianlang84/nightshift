@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# nightshift git-confinement hook — Layer 1 (hook-spec.md).
+#
+# git feeds us the ALREADY-RESOLVED refs on stdin, one per line:
+#   <local ref> <local sha> <remote ref> <remote sha>
+# so we never parse the command string. Every bypass spelling (+main, :branch,
+# --all, --mirror, HEAD:main, config-driven push) has already been resolved by
+# git into the ref list below — we just check the result.
+set -euo pipefail
+
+# The allowed namespace is Runner-owned PROCESS ENV (bin/nightshift.sh exports it from the
+# rulebook's branch_prefix). It is trusted input: any non-empty value widens what is accepted
+# below — `NIGHTSHIFT_BRANCH_PREFIX=m` makes refs/heads/main match. An agent command that sets
+# it is therefore denied at Layer 2 (hooks/pretooluse-guard.sh), alongside GIT_CONFIG_*.
+prefix="refs/heads/${NIGHTSHIFT_BRANCH_PREFIX:-nightshift/}"
+# git passes the null object id of the repository's OWN hash: 40 zeros under SHA-1, 64 under
+# SHA-256. No real object has an all-zero id, so matching any all-zero id widens nothing.
+is_null_oid() { [[ "$1" =~ ^0+$ ]]; }
+
+reject() {
+  echo "nightshift pre-push: REJECTED — $1" >&2
+  exit 1
+}
+
+while read -r _local_ref local_sha remote_ref remote_sha; do
+  [ -z "${remote_ref:-}" ] && continue
+  case "$remote_ref" in
+    refs/tags/*) reject "tag push not allowed ($remote_ref) — nightshift makes branches, not releases" ;;
+  esac
+  # A delete presents an all-zero LOCAL sha.
+  if is_null_oid "$local_sha"; then
+    reject "ref delete not allowed ($remote_ref)"
+  fi
+  case "$remote_ref" in
+    "$prefix"*) : ;;  # inside the allowed branch namespace — OK
+    *) reject "push outside ${prefix}* not allowed ($remote_ref) — no main, no merge" ;;
+  esac
+  # Namespace ownership does not permit rewriting its published history. Git has already resolved
+  # `+branch`, `--force` and `--force-with-lease` to these object ids; require the remote tip to be
+  # an ancestor of the proposed tip. An unavailable old object fails closed as well.
+  if ! is_null_oid "$remote_sha" \
+     && ! git merge-base --is-ancestor "$remote_sha" "$local_sha" >/dev/null 2>&1; then
+    reject "non-fast-forward update not allowed ($remote_ref)"
+  fi
+done
+
+exit 0

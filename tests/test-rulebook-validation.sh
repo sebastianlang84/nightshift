@@ -1,0 +1,410 @@
+#!/usr/bin/env bash
+set -euo pipefail
+unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+cat > "$TMP/rulebook.yaml" <<'EOF'
+repos:
+  - path: /srv/example
+    mode: branch-fix
+    findings: security,infra
+EOF
+
+if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/rulebook.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
+  echo "parser accepted a non-numeric findings override" >&2
+  exit 1
+fi
+grep -q "repo /srv/example: findings must be a positive integer" "$TMP/stderr"
+
+# max_fix_iterations: 0 would make the fix<->review loop never run — reject it too.
+cat > "$TMP/rulebook2.yaml" <<'EOF'
+limits:
+  max_fix_iterations: 0
+repos:
+  - path: /srv/example
+    mode: branch-fix
+EOF
+
+if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/rulebook2.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
+  echo "parser accepted max_fix_iterations: 0" >&2
+  exit 1
+fi
+grep -q "limits.max_fix_iterations must be a positive integer" "$TMP/stderr"
+
+# A malformed recon.ttl_days silently became 0 in bash arithmetic (constant recon refresh) — reject it.
+cat > "$TMP/rulebook3.yaml" <<'EOF'
+recon:
+  ttl_days: soon
+repos:
+  - path: /srv/example
+    mode: branch-fix
+EOF
+
+if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/rulebook3.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
+  echo "parser accepted a non-numeric ttl_days" >&2
+  exit 1
+fi
+grep -q "recon.ttl_days must be a positive integer" "$TMP/stderr"
+
+# A bare prefix broadens the hook glob (for example, m* includes main). Require a
+# slash-terminated namespace so the wildcard can only match branches beneath it.
+cat > "$TMP/rulebook4.yaml" <<'EOF'
+branch_prefix: m
+repos:
+  - path: /srv/example
+    mode: branch-fix
+EOF
+
+if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/rulebook4.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
+  echo "parser accepted a branch prefix without a dedicated namespace" >&2
+  exit 1
+fi
+grep -q "branch_prefix must name a dedicated namespace ending in '/'" "$TMP/stderr"
+
+# The `agent:` block decides which MODEL does the work (ADR 0020). Every way of getting it subtly
+# wrong must fail loudly, because the fallback — running the night on the CLI's own default — is
+# silent and is the exact failure this block exists to prevent. Each case below produced a valid
+# parse with an empty model before it was rejected.
+reject() { # label yaml-body expected-message
+  printf '%s\nrepos:\n  - path: /srv/example\n    mode: findings-only\n' "$2" > "$TMP/agent.yaml"
+  if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/agent.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
+    echo "parser accepted $1" >&2
+    exit 1
+  fi
+  grep -q "$3" "$TMP/stderr" || {
+    echo "$1: wrong error: $(cat "$TMP/stderr")" >&2
+    exit 1
+  }
+}
+reject "an unknown agent key"       'agent:
+  claude-model: m'                  "agent: unknown key 'claude-model'"
+reject "a duplicated agent key"     'agent:
+  claude_model: a
+  claude_model: b'                  "agent: duplicate key 'claude_model'"
+reject "an agent key with no value" 'agent:
+  claude_model:'                    "agent.claude_model is empty"
+reject "an agent key with no colon" 'agent:
+  claude_model'                     'agent: expected `key: value`'
+reject "an unterminated quote"      'agent:
+  claude_model: "m'                 "unterminated quoted value"
+# `review_agent` names an ADAPTER, not a model (ADR 0031), so it is validated against the set the
+# Runner implements. A typo here would leave Review on the night's own adapter with nothing said —
+# i.e. the fix judged by its own author, which is exactly what the key exists to prevent.
+reject "an unknown review agent"    'agent:
+  review_agent: gemini'             "unknown adapter 'gemini'"
+reject "an empty review agent"      'agent:
+  review_agent:'                    "agent.review_agent is empty"
+reject "an empty pi model"          'agent:
+  pi_model:'                        "agent.pi_model is empty"
+reject "an unknown primary agent"   'agent:
+  primary: gemini'                  "agent.primary: unknown adapter 'gemini'"
+reject "an empty primary agent"     'agent:
+  primary:'                         "agent.primary is empty"
+# `pi_allow_fix` hands the write-capable Fix stage to an adapter that cannot confine a write, so a
+# value it does not understand must abort rather than be read as either answer. `yes` and `1` are
+# the spellings a human reaches for, and both used to be falsy by accident.
+reject "a non-boolean pi_allow_fix" 'agent:
+  pi_allow_fix: yes'                "agent.pi_allow_fix must be true or false"
+# codex does not check a reasoning effort itself — an unknown one passes `--strict-config` and reaches
+# the API — so the parser holds the closed set. `High` and `extra-high` are the plausible typos.
+reject "an unknown codex effort"     'agent:
+  codex_effort: extra-high'         "agent.codex_effort: unknown effort 'extra-high'"
+reject "a capitalised codex effort"  'agent:
+  codex_effort: High'               "agent.codex_effort: unknown effort 'High'"
+reject "an empty codex effort"       'agent:
+  codex_effort:'                    "agent.codex_effort is empty"
+
+# The same standard applies to EVERY mapping section, not just `agent:`. Each section's key set is
+# closed — the parser reads exactly those keys — so a key outside one is a typo, and the only other
+# outcome is the knob silently reverting to a default the human never wrote: `max_open_branchs: 12`
+# capping throughput at 2, a misspelled `ttl_days` resetting recon's TTL.
+reject "an unknown limits key"      'limits:
+  max_open_branchs: 12'             "limits: unknown key 'max_open_branchs'"
+reject "a duplicated limits key"    'limits:
+  max_open_branches: 2
+  max_open_branches: 9'             "limits: duplicate key 'max_open_branches'"
+reject "a limits key with no colon" 'limits:
+  max_open_branches 2'              'limits: expected `key: value`'
+reject "a non-numeric open cap"     'limits:
+  max_open_branches: many'          'limits.max_open_branches must be a positive integer'
+reject "a zero open cap"            'limits:
+  max_open_branches: 0'             'limits.max_open_branches must be a positive integer'
+reject "a non-numeric run cap"      'limits:
+  max_branches_per_run: many'       'limits.max_branches_per_run must be a positive integer'
+reject "a zero run cap"             'limits:
+  max_branches_per_run: 0'          'limits.max_branches_per_run must be a positive integer'
+reject "an unknown recon key"       'recon:
+  ttl-days: 3'                      "recon: unknown key 'ttl-days'"
+reject "a non-boolean recon switch" 'recon:
+  enabled: no'                      'recon.enabled must be true or false'
+
+# A misspelled top-level section used to be ignored, reverting every setting beneath it to the
+# parser's defaults. Top-level keys are closed just like nested mapping keys.
+reject "an unknown top-level section" 'limts:
+  max_open_branches: 99'             "unknown top-level key 'limts'"
+# A section header with an inline value set no section, so its entries were dropped unread.
+reject "a section with an inline value" 'limits: 5'  "section 'limits' must be a bare"
+# The key decides, not the literal header: `branch_prefix :` and `limits :` used to parse clean and
+# silently keep the defaults.
+printf 'branch_prefix : custom/\nlimits :\n  max_open_branches: 7\nrepos:\n  - path: /srv/example\n    mode: findings-only\n' \
+  > "$TMP/spaced.yaml"
+python3 "$ROOT/lib/parse_rulebook.py" "$TMP/spaced.yaml" > "$TMP/stdout"
+grep -qx "$(printf 'prefix\tcustom/')" "$TMP/stdout" || { echo "a spaced branch_prefix was ignored" >&2; exit 1; }
+grep -qx "$(printf 'max_open\t7')" "$TMP/stdout" || { echo "a spaced limits header dropped its entries" >&2; exit 1; }
+
+# Top-level settings are governance too: accepting a repeated scalar would use the later value,
+# while accepting a repeated section would merge or overwrite state from two declarations.
+cat > "$TMP/duplicate-branch-prefix.yaml" <<'YAML'
+branch_prefix: nightshift/
+branch_prefix: other/
+repos:
+  - path: /srv/example
+    mode: findings-only
+YAML
+if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/duplicate-branch-prefix.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
+  echo "parser accepted a duplicate top-level branch_prefix" >&2
+  exit 1
+fi
+grep -q "duplicate top-level key 'branch_prefix'" "$TMP/stderr"
+
+cat > "$TMP/duplicate-limits.yaml" <<'YAML'
+limits:
+  max_open_branches: 2
+limits:
+  max_fix_iterations: 2
+repos:
+  - path: /srv/example
+    mode: findings-only
+YAML
+if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/duplicate-limits.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
+  echo "parser accepted a duplicate top-level limits section" >&2
+  exit 1
+fi
+grep -q "duplicate top-level key 'limits'" "$TMP/stderr"
+
+# A repo entry's keys are closed too, and this is the misconfig with the widest blast radius:
+# `test-cmd:` parsed clean and left `test_cmd` empty, so the repo shipped UNGATED past its
+# ADR 0022 ship gate — the human had written a gate and never got one. (ADR 0026 now refuses an
+# empty `test_cmd` on a branch-fix repo outright; the closed key set is still what names the typo.)
+cat > "$TMP/repo-key.yaml" <<'EOF'
+repos:
+  - path: /srv/example
+    mode: branch-fix
+    test-cmd: bash tests/run.sh
+EOF
+if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/repo-key.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
+  echo "parser accepted an unknown repo key" >&2
+  exit 1
+fi
+grep -q "repos: unknown key 'test-cmd'" "$TMP/stderr"
+# Tabs measure as indent 0, so a tab-indented key reads as a new top-level line and its whole
+# section is silently lost — for `repos:` that would drop the fleet, not just a model.
+printf 'agent:\n\tclaude_model: m\nrepos:\n  - path: /srv/x\n    mode: findings-only\n' > "$TMP/tabs.yaml"
+if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/tabs.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
+  echo "parser accepted tab indentation" >&2
+  exit 1
+fi
+grep -q "indent with spaces, not tabs" "$TMP/stderr"
+
+# Accepted shapes: a commented section header (it used to demote the section to "none" and drop
+# every entry under it), and quoted scalars — including a `#` inside quotes, which the unquoted
+# inline-comment rule would truncate.
+cat > "$TMP/agent-ok.yaml" <<'EOF'
+agent:   # the model this host runs its nights on
+  claude_model: "claude-opus-5"
+  codex_model: 'gpt-5 #2'
+  codex_effort: xhigh
+  primary: pi
+  review_agent: pi
+  pi_model: z-ai/glm-5.3-flash
+  pi_provider: openrouter
+  pi_allow_fix: true
+repos:
+  - path: /srv/example
+    mode: findings-only
+EOF
+python3 "$ROOT/lib/parse_rulebook.py" "$TMP/agent-ok.yaml" > "$TMP/stdout"
+grep -qx "$(printf 'claude_model\tclaude-opus-5')" "$TMP/stdout" || {
+  echo "quoted claude_model not unquoted: $(grep claude_model "$TMP/stdout")" >&2
+  exit 1
+}
+grep -qx "$(printf 'codex_model\tgpt-5 #2')" "$TMP/stdout" || {
+  echo "quoted codex_model with '#' mangled: $(grep codex_model "$TMP/stdout")" >&2
+  exit 1
+}
+grep -qx "$(printf 'codex_effort\txhigh')" "$TMP/stdout" || {
+  echo "codex_effort not emitted: $(grep codex_effort "$TMP/stdout")" >&2
+  exit 1
+}
+grep -qx "$(printf 'primary_agent\tpi')" "$TMP/stdout" || {
+  echo "primary_agent not emitted: $(grep primary_agent "$TMP/stdout")" >&2
+  exit 1
+}
+grep -qx "$(printf 'pi_allow_fix\ttrue')" "$TMP/stdout" || {
+  echo "pi_allow_fix not emitted: $(grep pi_allow_fix "$TMP/stdout")" >&2
+  exit 1
+}
+# Omitted, the fix opt-in must read as OFF — a missing key can never mean "grant write access".
+# Its own output file: the checks below still read $TMP/stdout for the agent block above.
+printf 'repos:\n  - path: /srv/example\n    mode: findings-only\n' > "$TMP/no-agent.yaml"
+python3 "$ROOT/lib/parse_rulebook.py" "$TMP/no-agent.yaml" > "$TMP/stdout-no-agent"
+grep -qx "$(printf 'pi_allow_fix\tfalse')" "$TMP/stdout-no-agent" || {
+  echo "an omitted pi_allow_fix did not default to false" >&2
+  exit 1
+}
+# Omitted, the effort is emitted EMPTY, which the Runner reads as "let the CLI default apply".
+grep -qx "$(printf 'codex_effort\t')" "$TMP/stdout-no-agent" || {
+  echo "an omitted codex_effort was not emitted empty: $(grep codex_effort "$TMP/stdout-no-agent")" >&2
+  exit 1
+}
+
+grep -qx "$(printf 'review_agent\tpi')" "$TMP/stdout" || {
+  echo "review_agent not emitted: $(grep review_agent "$TMP/stdout")" >&2
+  exit 1
+}
+grep -qx "$(printf 'pi_model\tz-ai/glm-5.3-flash')" "$TMP/stdout" || {
+  echo "pi_model not emitted: $(grep pi_model "$TMP/stdout")" >&2
+  exit 1
+}
+
+# Standard YAML permits sequence items at the same indentation as their section key. This used to
+# parse successfully while emitting no repo at all, turning a configured fleet into a clean no-op.
+cat > "$TMP/same-indent.yaml" <<'EOF'
+dimensions:
+- "correctness"
+repos:
+- path: "/srv/quoted repo"
+  mode: "branch-fix"
+  test_cmd: "printf ok"
+EOF
+python3 "$ROOT/lib/parse_rulebook.py" "$TMP/same-indent.yaml" > "$TMP/stdout"
+grep -qx "$(printf 'dimension\tcorrectness')" "$TMP/stdout"
+grep -q "path=/srv/quoted repo.*mode=branch-fix.*test_cmd=printf ok" "$TMP/stdout" || {
+  echo "same-indent or quoted repo scalars were lost: $(grep '^repo' "$TMP/stdout")" >&2
+  exit 1
+}
+
+# Text after a closing quote used to be dropped as if it were a comment, so a ship-gate command whose
+# first word is quoted became that word alone: `"cd" services/api && make test` ran a bare `cd`,
+# which always passes. Only a `# comment` may follow the quote; anything else is refused.
+printf 'repos:\n  - path: /x\n    mode: branch-fix\n    test_cmd: "cd" services/api && make test\n' > "$TMP/trailing.yaml"
+if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/trailing.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
+  echo "parser accepted text after a closing quote: $(grep '^repo' "$TMP/stdout")" >&2
+  exit 1
+fi
+grep -q 'unexpected text after closing quote' "$TMP/stderr"
+# A `#` right behind the quote is text, not a comment: a comment needs whitespace before it.
+printf 'repos:\n  - path: /x\n    mode: branch-fix\n    test_cmd: "true"#suffix && false\n' > "$TMP/adjacent-hash.yaml"
+if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/adjacent-hash.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
+  echo "parser took an adjacent # for a comment: $(grep '^repo' "$TMP/stdout")" >&2
+  exit 1
+fi
+grep -q 'unexpected text after closing quote' "$TMP/stderr"
+# An escaped quote is not the closing one, and the subset decodes no escapes: refuse, never cut the
+# command at the escape (`"true \" # x\" && false"` used to become `true \`, which passes).
+printf 'repos:\n  - path: /x\n    mode: branch-fix\n    test_cmd: "true \\" # literal quote\\" && false"\n' > "$TMP/escaped.yaml"
+if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/escaped.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
+  echo "parser cut a quoted value at an escaped quote: $(grep '^repo' "$TMP/stdout")" >&2
+  exit 1
+fi
+grep -q 'escape sequences in double-quoted values are not supported' "$TMP/stderr"
+printf 'repos:\n  - path: /x\n    mode: branch-fix\n    test_cmd: "make test #2" # the gate\n' > "$TMP/trailing-comment.yaml"
+python3 "$ROOT/lib/parse_rulebook.py" "$TMP/trailing-comment.yaml" > "$TMP/stdout"
+grep -q 'test_cmd=make test #2$' "$TMP/stdout" || {
+  echo "a comment after a quoted value was not dropped: $(grep '^repo' "$TMP/stdout")" >&2
+  exit 1
+}
+
+printf 'repos:\n' > "$TMP/empty-repos.yaml"
+if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/empty-repos.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
+  echo "parser accepted an empty fleet" >&2
+  exit 1
+fi
+grep -q 'repos must contain at least one repository' "$TMP/stderr"
+
+for bad_path in '  - mode: findings-only' '  - path: relative/repo
+    mode: findings-only'; do
+  printf 'repos:\n%s\n' "$bad_path" > "$TMP/bad-path.yaml"
+  if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/bad-path.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
+    echo "parser accepted a missing or relative repo path" >&2
+    exit 1
+  fi
+  grep -q 'repo path must be absolute and non-empty' "$TMP/stderr"
+done
+
+# The shipped example is the reference rulebook and the fallback every entry point parses when a host
+# has no rulebook.yaml, so it must stay inside those closed key sets: a knob documented there but
+# absent from the parser's sets would now abort every night rather than being quietly ignored.
+python3 "$ROOT/lib/parse_rulebook.py" "$ROOT/rulebook.example.yaml" >/dev/null || {
+  echo "rulebook.example.yaml no longer parses — a documented key is outside the parser's key sets" >&2
+  exit 1
+}
+
+echo "test-rulebook-validation: ok"
+
+# A typo'd mode used to drop the repo from the night silently: select_order() skipped any mode it
+# did not recognise without logging, so the operator's only symptom was a repo that stopped
+# appearing in digests. Closed key sets never covered the mode VALUE — now they do.
+cat > "$TMP/rulebook-mode.yaml" <<'YAML'
+repos:
+  - path: /srv/example
+    mode: brnach-fix
+YAML
+
+if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/rulebook-mode.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
+  echo "parser accepted an unknown repo mode" >&2
+  exit 1
+fi
+grep -q "unknown mode 'brnach-fix'" "$TMP/stderr"
+
+# ADR 0026 closes the ungated ship path ADR 0022 §4 left open: `branch-fix` means nightshift pushes
+# machine-written code for a human to merge, and Review only ever proves the FINDING is fixed. A
+# repo with no suite to declare belongs in `findings-only`, which never pushes — so the silence is
+# refused rather than logged as `shipping UNGATED` at 04:00 where nobody reads it.
+cat > "$TMP/ungated.yaml" <<'YAML'
+repos:
+  - path: /srv/ungated
+    mode: branch-fix
+YAML
+if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/ungated.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
+  echo "parser accepted a branch-fix repo with no test_cmd — the ungated ship path is back" >&2
+  exit 1
+fi
+grep -q "mode branch-fix requires a test_cmd" "$TMP/stderr"
+# …and only for branch-fix: a findings-only repo never ships, so it needs no gate.
+printf 'repos:\n  - path: /srv/report\n    mode: findings-only\n' > "$TMP/report.yaml"
+python3 "$ROOT/lib/parse_rulebook.py" "$TMP/report.yaml" >/dev/null 2>&1 \
+  || { echo "a findings-only repo must not need a test_cmd" >&2; exit 1; }
+
+# test_net decides whether the gate's sandbox gets network egress (ADR 0026). A typo there is a
+# silently *weaker* or *broken* gate, so the value set is closed like every mode and key above.
+cat > "$TMP/testnet.yaml" <<'YAML'
+repos:
+  - path: /srv/example
+    mode: branch-fix
+    test_net: yes
+    test_cmd: true
+YAML
+if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/testnet.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
+  echo "parser accepted a non-boolean test_net" >&2
+  exit 1
+fi
+grep -q "test_net must be true or false" "$TMP/stderr"
+
+# Both implemented modes must still parse.
+cat > "$TMP/rulebook-mode-ok.yaml" <<'YAML'
+repos:
+  - path: /srv/a
+    mode: branch-fix
+    test_cmd: true
+  - path: /srv/b
+    mode: findings-only
+  - path: /srv/c
+YAML
+python3 "$ROOT/lib/parse_rulebook.py" "$TMP/rulebook-mode-ok.yaml" >"$TMP/stdout" 2>"$TMP/stderr"
+[ "$(grep -c '^repo' "$TMP/stdout")" = 3 ] || { echo "valid modes rejected" >&2; exit 1; }
+# The default for an omitted mode is findings-only and must stay valid.
+grep -q "path=/srv/c	mode=findings-only" "$TMP/stdout"

@@ -1,0 +1,28 @@
+{
+  "date": "2026-08-19",
+  "system_commit": "728208b8285aa31aec607bfa3b403333a3154632",
+  "model": "claude-opus-5",
+  "method": "Actual Recon plus dimension-aimed Explore on historical pre-fix snapshots",
+  "top1": {
+    "hits": 1,
+    "total": 4,
+    "cost_usd": 13.128441,
+    "model_seconds": 1361
+  },
+  "top3_retry_of_misses": {
+    "hits_after_retry": 1,
+    "total": 4,
+    "additional_cost_usd": 12.743165,
+    "additional_model_seconds": 1402
+  },
+  "cases": {
+    "unknown_mode": {"top1": false, "top3": false},
+    "malformed_json": {"top1": null, "top3": null},
+    "suite_mutation": {"top1": false, "top3": false},
+    "dry_run": {"top1": true, "top3": true}
+  },
+  "excluded_case": {
+    "name": "open_branch_cap",
+    "reason": "The snapshot itself defined the cap population as unmerged refs; pending verdicts was a later product decision and therefore not statically reviewable ground truth."
+  }
+}

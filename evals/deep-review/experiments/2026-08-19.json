@@ -1,0 +1,28 @@
+{
+  "goal": "Make a serviced Nightshift lens mean a broad, evidence-backed deep review and improve held-out deep-defect recall.",
+  "model": "claude-opus-5",
+  "findings_budget": 3,
+  "baseline": {
+    "hit_at_3": 1,
+    "total": 4,
+    "note": "Initial historical replay; the later-invalid open_branch_cap case was excluded because its snapshot documented the behavior as intended."
+  },
+  "experiment_1": {
+    "lever": "Mandatory file/flow/check coverage receipt",
+    "hit_at_3": 1,
+    "total": 4,
+    "cost_usd": 19.727147,
+    "decision": "keep only as an honesty gate; it did not improve recall"
+  },
+  "experiment_2": {
+    "lever": "Mandatory invariant matrix over config domains, semantic sets, artifact identity, failure translation, and lifecycle",
+    "corpus": ["unknown_mode", "malformed_json", "suite_mutation", "dry_run"],
+    "hit_at_1": 1,
+    "hit_at_3": 3,
+    "total": 4,
+    "cost_usd": 17.6028595,
+    "ranks": {"unknown_mode": 3, "malformed_json": 2, "suite_mutation": null, "dry_run": 1},
+    "decision": "keep; passes the frozen 3-of-4 hit_at_3 gate",
+    "remaining_miss": "The reviewer restored review/commit tree identity but failed to notice that a green test on a suite-mutated tree did not certify the restored tree."
+  }
+}
