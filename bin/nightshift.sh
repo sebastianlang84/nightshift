@@ -100,7 +100,7 @@ warn_worktrees_in_home() {
 }
 
 # ---------------------------------------------------------------- rulebook ----
-declare -a REPO_PATHS=() REPO_MODES=() REPO_BASES=() REPO_FINDINGS=() REPO_DIMS=() REPO_TEST_NETS=() REPO_TEST_ROBINDS=() REPO_SETUP_CMDS=() REPO_TEST_CMDS=() DIMENSIONS=()
+declare -a REPO_PATHS=() REPO_MODES=() REPO_BASES=() REPO_FINDINGS=() REPO_DIMS=() REPO_TEST_NETS=() REPO_TEST_ROBINDS=() REPO_TEST_CMDS=() DIMENSIONS=()
 BASE_RESOLUTION_WARN_MISSING=1
 # shellcheck source=../lib/base_resolution.sh
 source "$NIGHTSHIFT_HOME/lib/base_resolution.sh"
@@ -143,7 +143,7 @@ load_rulebook() {
   # run proceeded on a partial fleet. Fail closed instead: abort the whole run.
   parsed="$(python3 "$NIGHTSHIFT_HOME/lib/parse_rulebook.py" "$RULEBOOK")" \
     || { log "rulebook parse failed ($RULEBOOK) — aborting run"; exit 1; }
-  while IFS=$'\t' read -r tag a b c d e f g _protected h i; do
+  while IFS=$'\t' read -r tag a b c d e f g _protected i; do
     case "$tag" in
       prefix)                BRANCH_PREFIX="$a" ;;
       max_open)              MAX_OPEN="$a" ;;
@@ -187,7 +187,7 @@ load_rulebook() {
         REPO_PATHS+=("$path"); REPO_MODES+=("${b#mode=}"); REPO_BASES+=("${c#base=}")
         REPO_FINDINGS+=("${d#findings=}"); REPO_DIMS+=("${e#dimensions=}")
         REPO_TEST_NETS+=("${f#test_net=}"); REPO_TEST_ROBINDS+=("${g#test_robind=}")
-        REPO_SETUP_CMDS+=("${h#setup_cmd=}"); REPO_TEST_CMDS+=("${i#test_cmd=}") ;;
+        REPO_TEST_CMDS+=("${i#test_cmd=}") ;;
     esac
   done <<< "$parsed"
   MAX_FINDINGS="${MAX_FINDINGS:-1}"
@@ -988,16 +988,6 @@ repo_test_cmd() { # repo -> the repo's ship-gate command, or "" for a findings-o
   echo ""
 }
 
-repo_setup_cmd() { # repo -> the repo's dependency setup run before Fix, or "" for none (ADR 0037)
-  local repo="$1" i
-  for i in "${!REPO_PATHS[@]}"; do
-    if [ "${REPO_PATHS[$i]}" = "$repo" ]; then
-      echo "${REPO_SETUP_CMDS[$i]:-}"; return
-    fi
-  done
-  echo ""
-}
-
 repo_test_net() { # repo -> 1 if this repo's gate sandbox gets network egress, else 0 (ADR 0026)
   # Off unless the rulebook says otherwise, and it is per repo on purpose: `npm ci` needs a registry
   # and `uv run --with-requirements` needs an index, while most suites need nothing at all. Granting
@@ -1487,39 +1477,6 @@ branch_control_files_changed() { # repo base tip -> prints the paths; 1 if none
   out="$(printf '%s\n' "$out" | control_path_filter | sort -u | tr '\n' ' ')"
   [ -n "$out" ] || return 1
   printf '%s\n' "${out% }"
-}
-
-# The dependency setup before a Fix stage (ADR 0037): the repo's `setup_cmd`, run in the ship gate's
-# sandbox over the worktree, so a Fix stage that can execute commands finds the dependencies its
-# checks need. The Claude Fix stage has no shell (ADR 0044), so on it the setup only costs time. An aid, not a gate: a failed setup is logged and the Fix stage runs anyway.
-# The ship gate decides, and it purges everything this installed before it runs.
-provision_worktree() { # repo worktree item_dir -> 0 ran or skipped, 2 not hermetic, 3 .git pointer tampered
-  local repo="$1" wt="$2" id="$3" scmd rc=0 before after
-  scmd="$(repo_setup_cmd "$repo")"
-  [ -n "$scmd" ] || return 0
-  before="$(worktree_content_id "$wt")" || before=""
-  gate_exec "$repo" "$wt" "$id" "$scmd" "$id/setup.log" "dependency setup" \
-    "the Fix stage starts without it" || rc=$?
-  # From the second Fix iteration on, the worktree carries the Fix stage's own edits, so this setup
-  # runs candidate content exactly like the gate does — and the same pointer attack applies (R15).
-  if ! git_pointer_ok "$repo" "$wt"; then
-    log "  $(basename "$repo"): .git POINTER TAMPERED during the dependency setup — refusing the item"
-    return 3
-  fi
-  # Whatever the setup writes outside .gitignore would be staged as part of the Fix stage's change
-  # and committed under its name, so a setup that does that is refused, as a suite that does it is
-  # refused by the gate (ADR 0027). Only ignored files may come out of it. Compared by CONTENT, not
-  # by status: from the second iteration on a file the Fix stage edited is already ` M`, and a setup
-  # rewriting it again would leave the status line unchanged. No digest on either side refuses too.
-  after="$(worktree_content_id "$wt")" || after=""
-  if [ -z "$before" ] || [ "$before" != "$after" ]; then
-    log "  $(basename "$repo"): dependency setup changed tracked or un-ignored files — NOT shipping; make it hermetic or .gitignore what it writes (see $id/setup.log)"
-    return 2
-  fi
-  if [ "$GATE_UNAVAILABLE" = 0 ] && [ "$rc" -ne 0 ]; then
-    log "  $(basename "$repo"): dependency setup failed (rc=$rc) — the Fix stage starts without it (see $id/setup.log)"
-  fi
-  return 0
 }
 
 # Runs the gate command on one commit in a throwaway worktree.
@@ -2558,9 +2515,6 @@ main() {
         # a different outcome on purpose (ADR 0022 §3), and unlike `abandoned` it does not latch the
         # finding, so the reviewer's refusal would come back for a fresh attempt every night.
         gate=""
-        prc=0; provision_worktree "$repo" "$wt" "$fd" || prc=$?
-        if [ "$prc" -eq 3 ]; then gate=tampered; verdict=revise; break; fi
-        if [ "$prc" -eq 2 ]; then gate=blocked; verdict=revise; break; fi
         fix_rc=0
         run_agent fix "$wt" "$fd" || fix_rc=$?
         if [ -n "$AGENT_FATAL" ]; then gate=agent-fatal; verdict=""; break; fi

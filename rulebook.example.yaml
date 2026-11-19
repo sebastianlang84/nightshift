@@ -115,11 +115,6 @@ repos:
   #   protected_paths: hooks/, lib/sandbox.sh  # OPTIONAL (ADR 0042): paths relative to the repo root
   #                              # (a trailing `/` covers a directory) that an automatic merge job
   #                              # must leave to a human. The Runner itself ignores it.
-  #   setup_cmd: npm ci         # OPTIONAL (ADR 0037): dependency install the Runner runs in the gate's
-  #                              # sandbox (same egress as test_net) before EVERY Fix stage, for a Fix
-  #                              # stage that executes commands. The Claude Fix stage has no shell, so
-  #                              # leave it unset (ADR 0044). It may write only ignored files; the gate
-  #                              # purges them all before it runs.
   #   test_cmd: uv run pytest -q # REQUIRED for branch-fix (ADR 0022/0026): the repo's own suite, run
   #                              # in a disposable bwrap sandbox over the WORKTREE right before the
   #                              # commit, INSIDE the fix<->review loop. A red suite is a revision

@@ -2,25 +2,21 @@
 set -euo pipefail
 unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
-# ADR 0037: a Fix stage starts from a worktree whose dependencies are installed by the repo's
-# `setup_cmd` — and the ship gate never runs on what that, or the Fix stage, left behind.
+# ADR 0027/0037: the ship gate never runs on what a Fix stage left behind in the worktree.
 #
 # Asserted through the real claude adapter, with only the CLI binary faked (the fake writes into the
 # worktree the way a Fix stage's Write tool would):
-#   1. the repo's `setup_cmd` has run in the worktree before the Fix stage starts;
-#   2. an ignored file the Fix stage leaves behind is purged before the gate, so the gate does not
+#   1. an ignored file the Fix stage leaves behind is purged before the gate, so the gate does not
 #      run on dependencies a stage could have written;
-#   3. a failed setup does not stop the Fix stage — the gate decides, not the setup;
-#   4. ignored files the purge cannot remove refuse the item instead of reaching the gate;
-#   5. a setup that writes outside .gitignore refuses the item;
-#   6. a file a stage wrote into a submodule path, which no git listing shows, refuses the item;
-#   7. that hermeticity check compares bytes, so a rewrite under an unchanged status, or one git's
-#      eol normalisation hides, is caught.
+#   2. ignored files the purge cannot remove refuse the item instead of reaching the gate;
+#   3. a file a stage wrote into a submodule path, which no git listing shows, refuses the item;
+#   4. the worktree content id the gate compares is a byte comparison, so a rewrite under an
+#      unchanged status, or one git's eol normalisation hides, is caught.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'chmod -R u+rwx "$TMP" 2>/dev/null || true; rm -rf "$TMP"' EXIT
-fail() { echo "test-fix-stage-provisioning: $*" >&2; exit 1; }
+fail() { echo "test-pre-gate-purge: $*" >&2; exit 1; }
 
 # The ship gate's sandbox needs bwrap and user namespaces; without them the suite opts out the
 # documented way, and every assertion below still holds.
@@ -40,9 +36,6 @@ case "$prompt" in
     checks="$(git -c core.quotePath=false ls-files | sed 's/^/checked /' | jq -R . | jq -sc .)"
     emit "$(jq -nc --argjson f "$files" --argjson c "$checks" '{found:true,coverage:{files:$f,entrypoints:["README -> rendered documentation"],checks:$c,invariants:{config_domain:"not-applicable: no config",semantic_sets:"not-applicable: no sets",artifact_identity:"checked: one README artifact",failure_translation:"checked: explicit result JSON",lifecycle:"not-applicable: no lifecycle"},unresolved:[]},findings:[{file:"README.md",type:"typo",line_window:"L1-L3",claim:"README contains teh",verify:"search README for teh",verifiability:"static",disposition:"fix",summary:"fix typo",fingerprint:"README.md:typo:L1-L3",rank:1,confidence:1.0}]}')" ;;
   *"FIX stage"*)
-    if [ "${EXPECT_SETUP:-1}" = 1 ]; then
-      [ -f deps/installed ] || echo "setup had not run before the Fix stage" >> "$PROBE"
-    fi
     case "${POISON:-}" in
       file)   mkdir -p deps && echo poisoned > deps/poisoned ;;
       locked) mkdir -p deps/locked && echo x > deps/locked/f && chmod 555 deps/locked ;;
@@ -59,7 +52,7 @@ esac
 EOF
 chmod +x "$TMP/bin/claude"
 
-# $1 case, $2 setup_cmd line ("" = omit), $3 poison mode for the Fix stage, $4 EXPECT_SETUP
+# $1 case, $2 poison mode for the Fix stage
 run_night() {
   local d="$TMP/$1"
   mkdir -p "$d/state" "$d/runs" "$d/digests" "$d/worktrees"
@@ -72,9 +65,9 @@ run_night() {
   git -C "$d/repo" -c user.name=test -c user.email=test@localhost add -A
   # A submodule path (gitlink) with no submodule behind it: every worktree gets it as an empty
   # directory, and neither `git clean` nor `ls-files` ever looks inside it.
-  [ "$3" = parent-locked ] && git -C "$d/repo" update-index --add --cacheinfo \
+  [ "$2" = parent-locked ] && git -C "$d/repo" update-index --add --cacheinfo \
     "160000,0123456789012345678901234567890123456789,lib/vendored"
-  case "$3" in submodule*) git -C "$d/repo" update-index --add --cacheinfo \
+  case "$2" in submodule*) git -C "$d/repo" update-index --add --cacheinfo \
     "160000,$(git -C "$d/repo" hash-object -t commit --stdin </dev/null 2>/dev/null || echo 0123456789012345678901234567890123456789),vendör" ;; esac
   git -C "$d/repo" -c user.name=test -c user.email=test@localhost commit -q -m initial
   git -C "$d/repo" push -q -u origin main
@@ -91,7 +84,6 @@ run_night() {
     echo "  - path: $d/repo"
     echo "    mode: branch-fix"
     echo "    base: main"
-    [ -n "$2" ] && echo "    setup_cmd: $2"
     # Green only on a purged tree: anything under deps/ means the gate inherited a stage's files.
     # The base pre-check (ADR 0041) runs in a base-gate-* worktree before the mock Fix repairs `teh`.
     echo '    test_cmd: case "$PWD" in */base-gate-*) exit 0 ;; esac; test ! -e deps && grep -q "This is the demo" README.md'
@@ -101,61 +93,47 @@ run_night() {
   NIGHTSHIFT_AGENT=claude NIGHTSHIFT_OPEN_PR=0 \
   NIGHTSHIFT_STATE_DIR="$d/state" NIGHTSHIFT_RUNS_DIR="$d/runs" \
   NIGHTSHIFT_DIGEST_DIR="$d/digests" NIGHTSHIFT_WORKTREES="$d/worktrees" \
-  PROBE="$d/probe" POISON="$3" EXPECT_SETUP="$4" \
+  PROBE="$d/probe" POISON="$2" \
     "$ROOT/bin/nightshift.sh" >"$d/out" 2>"$d/err" || true
 }
 shipped() { git --git-dir="$TMP/$1/remote.git" for-each-ref --format='%(refname)' 'refs/heads/nightshift/*' | grep -q .; }
 
-# --- 1-2. setup before Fix, poisoned deps purged before the gate ---
-run_night provisioned 'mkdir -p deps && echo ok > deps/installed' file 1
-d="$TMP/provisioned"
+# --- 1. a poisoned deps/ the Fix stage left is purged before the gate ---
+run_night purged file
+d="$TMP/purged"
 [ ! -s "$d/probe" ] || fail "the Fix stage saw: $(cat "$d/probe")"
-shipped provisioned || { cat "$d/err" >&2; fail "the gate did not pass on the purged tree"; }
+shipped purged || { cat "$d/err" >&2; fail "the gate did not pass on the purged tree"; }
 git --git-dir="$d/remote.git" show "$(git --git-dir="$d/remote.git" for-each-ref --format='%(refname)' 'refs/heads/nightshift/*'):README.md" \
   | grep -q 'This is the demo.' || fail "the shipped branch does not carry the fix"
 
-# --- 3. a failed setup is logged and the Fix stage still runs ---
-run_night setupfails 'exit 7' "" 0
-d="$TMP/setupfails"
-grep -q 'dependency setup failed (rc=7)' "$d/err" || { cat "$d/err" >&2; fail "a failed setup was not reported"; }
-shipped setupfails || { cat "$d/err" >&2; fail "a failed setup must not stop the item; the gate decides"; }
-
-# --- 4. ignored files the purge cannot remove refuse the item ---
-run_night locked "" locked 0
+# --- 2. ignored files the purge cannot remove refuse the item ---
+run_night locked locked
 d="$TMP/locked"
 grep -q 'ignored files survived the pre-gate cleanup' "$d/err" || { cat "$d/err" >&2; fail "an unremovable ignored file was not refused"; }
 shipped locked && fail "an item whose ignored files could not be purged must not ship"
 jq -e 'select(.outcome=="gate-blocked")' "$d/state/ledger.jsonl" >/dev/null \
   || fail "the refusal is not recorded as gate-blocked"
 
-# --- 5. a setup that writes outside .gitignore is refused: it would ship under the Fix stage's name ---
-run_night strays 'echo x > stray.txt' "" 0
-d="$TMP/strays"
-grep -q 'dependency setup changed tracked or un-ignored files' "$d/err" || { cat "$d/err" >&2; fail "a non-hermetic setup was not refused"; }
-shipped strays && fail "an item whose setup wrote outside .gitignore must not ship"
-jq -e 'select(.outcome=="gate-blocked")' "$d/state/ledger.jsonl" >/dev/null \
-  || fail "the non-hermetic setup is not recorded as gate-blocked"
-
-# --- 6. a file written into a submodule path is refused: the purge cannot see it, the suite can ---
-run_night submodule "" submodule 0
+# --- 3. a file written into a submodule path is refused: the purge cannot see it, the suite can ---
+run_night submodule submodule
 d="$TMP/submodule"
 grep -q 'ignored files survived the pre-gate cleanup' "$d/err" || { cat "$d/err" >&2; fail "a file inside a submodule path was not refused"; }
 shipped submodule && fail "an item with a stage-written file in a submodule path must not ship"
 # … also when the path is non-ASCII (git prints it quoted) and the stage made it unreadable.
-run_night submodule-locked "" submodule-locked 0
+run_night submodule-locked submodule-locked
 d="$TMP/submodule-locked"
 grep -q 'ignored files survived the pre-gate cleanup' "$d/err" || { cat "$d/err" >&2; fail "an unreadable submodule path was not refused"; }
 shipped submodule-locked && fail "an item with an unreadable submodule path must not ship"
 # … and when it is a nested submodule path whose PARENT the stage made unsearchable, which makes the
 # path itself look absent.
-run_night parent-locked "" parent-locked 0
+run_night parent-locked parent-locked
 d="$TMP/parent-locked"
 grep -q 'ignored files survived the pre-gate cleanup' "$d/err" || { cat "$d/err" >&2; fail "an unsearchable parent of a submodule path was not refused"; }
 shipped parent-locked && fail "an item with an unsearchable directory must not ship"
 
-# --- 7. the setup's hermeticity check compares content, not status lines ---
-# From the second Fix iteration on a file the Fix stage edited is already ` M`; a setup rewriting it
-# again leaves `git status` unchanged, so only a content comparison can notice.
+# --- 4. the worktree content id compares content, not status lines ---
+# A file the Fix stage edited is already ` M`; rewriting it again leaves `git status` unchanged, so
+# only a content comparison can notice.
 u="$TMP/unit"; git init -q -b main "$u"
 printf 'a\n' > "$u/f"; git -C "$u" -c user.name=t -c user.email=t@l add f
 git -C "$u" -c user.name=t -c user.email=t@l commit -q -m i
@@ -175,4 +153,4 @@ printf 'a\r\nb\r\n' > "$u/f"
 id4="$( (set +u; NIGHTSHIFT_WORKTREES="$TMP" NIGHTSHIFT_SOURCED=1 . "$ROOT/bin/nightshift.sh" >/dev/null 2>&1; worktree_content_id "$u") )"
 [ -n "$id3" ] && [ "$id3" != "$id4" ] || fail "an LF->CRLF rewrite under eol=lf was not detected"
 
-echo "test-fix-stage-provisioning: ok"
+echo "test-pre-gate-purge: ok"

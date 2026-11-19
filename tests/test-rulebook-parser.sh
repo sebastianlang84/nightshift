@@ -24,19 +24,18 @@ repos:
     test_net: true
     test_robind: /opt/dep/.git:/srv/shared
     protected_paths: .//hooks/, lib//sandbox.sh
-    setup_cmd: bash scripts/setup.sh --quiet
     test_cmd: make test && ./extra check
 EOF
 
 actual=$(python3 "$ROOT/lib/parse_rulebook.py" "$TMP/rulebook.yaml" | grep '^repo')
 # test_cmd rides last on purpose (ADR 0022): a command contains spaces, and the Runner's
 # `read` soaks the remainder into the final variable — so it must have no field after it.
-# Every later field, test_net and test_robind (ADR 0026) and setup_cmd (ADR 0037) included, goes
+# Every later field, test_net and test_robind (ADR 0026) included, goes
 # BEFORE it.
 expected=$(printf '%s\n' \
-  $'repo\tpath=/srv/no-base\tmode=branch-fix\tbase=\tfindings=5\tdimensions=\ttest_net=false\ttest_robind=\tprotected_paths=\tsetup_cmd=\ttest_cmd=make check' \
-  $'repo\tpath=/srv/no-findings\tmode=findings-only\tbase=develop\tfindings=\tdimensions=security,infra\ttest_net=false\ttest_robind=\tprotected_paths=\tsetup_cmd=\ttest_cmd=' \
-  $'repo\tpath=/srv/all-fields\tmode=branch-fix\tbase=release\tfindings=3\tdimensions=docs,tests\ttest_net=true\ttest_robind=/opt/dep/.git:/srv/shared\tprotected_paths=hooks/,lib/sandbox.sh\tsetup_cmd=bash scripts/setup.sh --quiet\ttest_cmd=make test && ./extra check')
+  $'repo\tpath=/srv/no-base\tmode=branch-fix\tbase=\tfindings=5\tdimensions=\ttest_net=false\ttest_robind=\tprotected_paths=\ttest_cmd=make check' \
+  $'repo\tpath=/srv/no-findings\tmode=findings-only\tbase=develop\tfindings=\tdimensions=security,infra\ttest_net=false\ttest_robind=\tprotected_paths=\ttest_cmd=' \
+  $'repo\tpath=/srv/all-fields\tmode=branch-fix\tbase=release\tfindings=3\tdimensions=docs,tests\ttest_net=true\ttest_robind=/opt/dep/.git:/srv/shared\tprotected_paths=hooks/,lib/sandbox.sh\ttest_cmd=make test && ./extra check')
 
 [ "$actual" = "$expected" ]
 
@@ -63,15 +62,15 @@ EOF
 if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/tabbed.yaml" >/dev/null 2>&1; then
   echo "test-rulebook-parser: a tab in test_cmd must be rejected" >&2; exit 1
 fi
-cat > "$TMP/tabbed-setup.yaml" <<EOF
+cat > "$TMP/removed-setup.yaml" <<EOF
 repos:
   - path: /srv/tabbed
     mode: branch-fix
-    setup_cmd: make$(printf '\t')deps
+    setup_cmd: make deps
     test_cmd: make test
 EOF
-if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/tabbed-setup.yaml" >/dev/null 2>&1; then
-  echo "test-rulebook-parser: a tab in setup_cmd must be rejected" >&2; exit 1
+if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/removed-setup.yaml" >/dev/null 2>&1; then
+  echo "test-rulebook-parser: the removed setup_cmd key (ADR 0037, ADR 0044) must be rejected" >&2; exit 1
 fi
 
 # protected_paths stay inside the repo (ADR 0042).

@@ -2,7 +2,7 @@
 
 - Status: accepted
 - Date: 2026-11-19
-- Supersedes: [ADR 0031](0031-the-reviewer-may-be-another-vendor.md) (the reviewer on another adapter) · [ADR 0038](0038-every-open-branch-gets-two-vendors-advice.md) in its vendor mix · [ADR 0037](0037-the-fix-stage-starts-from-a-provisioned-worktree.md) in its Codex toolchain and pnpm-store parts · [ADR 0023](0023-an-unusable-agent-aborts-the-night.md) in its quota fallback
+- Supersedes: [ADR 0031](0031-the-reviewer-may-be-another-vendor.md) (the reviewer on another adapter) · [ADR 0038](0038-every-open-branch-gets-two-vendors-advice.md) in its vendor mix · [ADR 0037](0037-the-fix-stage-starts-from-a-provisioned-worktree.md) in its Codex toolchain, pnpm-store and `setup_cmd` parts · [ADR 0023](0023-an-unusable-agent-aborts-the-night.md) in its quota fallback
 - Touches: [ADR 0019](0019-stage-context-excludes-operator-config.md) (only the Claude half of stage isolation remains) · [ADR 0020](0020-the-rulebook-declares-the-stage-model.md) (a second rulebook model key)
 
 ## Context
@@ -53,8 +53,9 @@ branch advice run on `agent.review_model`; every other stage runs on `agent.clau
   another vendor.
 - Review independence now rests on a different model of the same family plus the adversarial brief,
   not on a different vendor.
-- `setup_cmd` (ADR 0037) still runs before every Fix stage, but a Claude Fix stage has no shell, so
-  nothing in the Fix stage uses what it installs. The gate's purge of ignored files stays either way.
+- `setup_cmd` (ADR 0037) ran before every Fix stage, but a Claude Fix stage has no shell, so nothing
+  used what it installed; it was removed on 2026-11-20 and the key is now refused. The gate's purge of
+  ignored files stays.
 - History stays in the superseded ADRs; their regression-coverage lines name the removed tests as
   removed.
 
