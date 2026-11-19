@@ -90,8 +90,10 @@ ledgers diverge silently: duplicate branches, broken caps and rotation). See
    ```
    It builds a disposable sandbox (`bin/setup-sandbox.sh` — a target repo whose `origin` is a local
    bare remote) under `$TMPDIR` and runs the night against *that*: its own rulebook, state, runs,
-   digests, worktrees, launcher log and flock. So it exercises the whole path, push included, while
-   writing nothing under `NIGHTSHIFT_HOME` — no ledger rows, no `empty` rows that the cadence and the
+   digests, worktrees, launcher log and flock. It uses mock for the main run and Review and disables
+   branch advisors and quota fallback, even if the invoking shell configured them. It exercises
+   the whole path, push included, while writing nothing under `NIGHTSHIFT_HOME` — no ledger rows,
+   no `empty` rows that the cadence and the
    [ADR 0015](adr/0015-recon-reprioritizes-never-excludes.md) exclusion window would later read as a
    lens having been reviewed, no overwritten digest, and no mock-authored branch on a real `origin`.
    Your own `rulebook.yaml` is not read by the run; it is parsed read-only first, so a malformed one

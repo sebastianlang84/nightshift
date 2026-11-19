@@ -18,19 +18,64 @@ unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this
 # stub as a standing guard (see test-scheduler-overrides.sh).
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d "$ROOT/.test-schedule.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 
-mkdir -p "$TMP/bin"
+mkdir -p "$TMP/bin" "$TMP/home"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/bin/systemctl"
 chmod +x "$TMP/bin/systemctl"
-export PATH="$TMP/bin:$PATH"
+system_path=/usr/local/bin:/usr/bin:/bin
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+# The launcher searches /usr/local/bin first. Give that exact path private command
+# names so updates to the host's provider files or bin symlink cannot redirect them.
+for provider in claude codex; do
+  stub="$TMP/bin/$provider"
+  cat > "$stub" <<'EOF'
+#!/bin/sh
+printf '%s\n' "${0##*/}" >> "$PROVIDER_ATTEMPTS"
+exit 1
+EOF
+  chmod +x "$stub"
+done
+isolated=(bwrap --unshare-user --ro-bind / / --proc /proc --dev /dev --bind "$TMP" "$TMP" --tmpfs /usr)
+for entry in /usr/*; do
+  [ "$entry" = /usr/local ] || isolated+=(--ro-bind "$entry" "$entry")
+done
+isolated+=(--tmpfs /usr/local)
+for entry in /usr/local/*; do
+  if [ "$entry" != /usr/local/bin ] && [ -e "$entry" ]; then
+    isolated+=(--ro-bind "$entry" "$entry")
+  fi
+done
+
+shadow="$TMP/commands"
+mkdir -p "$shadow"
+if [ -d /usr/local/bin ]; then
+  original="$(realpath -e -- /usr/local/bin)"
+  alias=/usr/local/.nightshift-test-bin
+  python3 - "$original" "$alias" "$shadow" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+original, alias, shadow = map(Path, sys.argv[1:])
+for entry in original.iterdir():
+    if entry.name not in {"claude", "codex", "systemctl"}:
+        # Resolve relative symlinks in the original directory before relocating commands.
+        target = Path(os.path.realpath(entry))
+        if target.is_relative_to(original):
+            target = alias / target.relative_to(original)
+        (shadow / entry.name).symlink_to(target)
+PY
+  isolated+=(--ro-bind "$original" "$alias")
+fi
+cp -- "$TMP/bin/"{claude,codex,systemctl} "$shadow/"
+isolated+=(--ro-bind "$shadow" /usr/local/bin --)
 
 # The dry-run mktemps its sandbox under TMPDIR; pointing that at the test dir keeps the whole thing
 # inside the trap, and puts the DEFAULT lock path ($TMPDIR/nightshift.lock) somewhere we can hold.
 export TMPDIR="$TMP"
-
-fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # A signature of the live state dirs: path + size, so an appended ledger row or a rewritten digest
 # shows up. Absent dirs are recorded as absent — creating one is a change too.
@@ -47,22 +92,49 @@ before="$(sig)"
 exec 8>"$TMP/nightshift.lock"
 flock -n 8 || fail "could not take the default lock for the test"
 
-out="$TMP/dry-run.out"
-bash "$ROOT/bin/schedule.sh" dry-run >"$out" 2>&1 || { echo "dry-run failed:" >&2; cat "$out" >&2; exit 1; }
+run_dry_run() {
+  local mode="$1" out="$TMP/$1.out" attempts="$TMP/$1.provider-attempts" rc=0
+  shift
+  # Start without inherited PATH, functions, credentials or routes. Configure each route explicitly.
+  "${isolated[@]}" env -i HOME="$TMP/home" PATH="$TMP/bin:$system_path" TMPDIR="$TMP" \
+    PROVIDER_ATTEMPTS="$attempts" NIGHTSHIFT_AGENT=claude NIGHTSHIFT_QUOTA_FALLBACK_AGENT=codex \
+    "$@" bash "$ROOT/bin/schedule.sh" dry-run >"$out" 2>&1 || rc=$?
 
-grep -q "another run holds" "$out" && { cat "$out" >&2; fail "dry-run shares the nightly flock — it would be skipped by (and would skip) a real run"; }
+  [ ! -e "$attempts" ] || { cat "$attempts" >&2; fail "$mode: dry-run attempted a production provider route"; }
+  # Check route selection even if a CLI lookup fails or there are no branches to advise on.
+  if grep -E '^\[nightshift\] (agent=(claude|codex) |review stage: |branch advisors: |quota fallback: |invalid quota fallback route: )' "$out" >&2; then
+    fail "$mode: dry-run selected a production provider route"
+  fi
+  [ "$rc" -eq 0 ] || { tail -40 "$out" >&2; fail "$mode: dry-run exited $rc"; }
+  if grep -q "another run holds" "$out"; then
+    fail "$mode: dry-run shares the nightly flock"
+  fi
 
-SB="$(sed -n 's/^dry-run sandbox: \([^ ]*\).*/\1/p' "$out" | head -1)"
-[ -n "$SB" ] && [ -d "$SB" ] || { cat "$out" >&2; fail "dry-run did not report a sandbox directory"; }
+  local sb
+  sb="$(sed -n 's/^dry-run sandbox: \(.*\) (throwaway .*$/\1/p' "$out" | head -1)"
+  [ -n "$sb" ] && [ -d "$sb" ] || { tail -40 "$out" >&2; fail "$mode: no sandbox directory reported"; }
 
-# The night really ran: a ledger, a digest and a launcher log, all inside the sandbox.
-[ -s "$SB/state/ledger.jsonl" ] || { cat "$out" >&2; fail "no sandbox ledger — the night did not run"; }
-[ -n "$(find "$SB/digests" -name '*.md' 2>/dev/null)" ] || fail "no digest written in the sandbox"
-[ -n "$(find "$SB/logs" -name '*.log' 2>/dev/null)" ] || fail "no launcher log written in the sandbox"
+  [ -s "$sb/state/ledger.jsonl" ] || fail "$mode: no sandbox ledger"
+  [ -n "$(find "$sb/digests" -name '*.md' 2>/dev/null)" ] || fail "$mode: no sandbox digest"
+  [ -n "$(find "$sb/logs" -name '*.log' 2>/dev/null)" ] || fail "$mode: no sandbox launcher log"
 
-# ... and it reached the push path, into the sandbox's LOCAL bare remote rather than a real origin.
-git -C "$SB/remote.git" for-each-ref --format='%(refname:short)' refs/heads | grep -q '^nightshift/' \
-  || fail "no nightshift/* branch in the sandbox remote — the push path was not exercised"
+  jq -es 'any(.[]; .stage == "review" and .exit == 0) and
+          all(.[]; .model == "mock" and .stage != "advise")' "$sb/state/runs.jsonl" >/dev/null \
+    || fail "$mode: expected a successful mock review and no production adapters or branch advice"
+
+  # The mock ran the push path against the sandbox's local bare remote.
+  git -C "$sb/remote.git" for-each-ref --format='%(refname:short)' refs/heads | grep -q '^nightshift/' \
+    || fail "$mode: no nightshift/* branch in the sandbox remote"
+}
+
+run_dry_run modern NIGHTSHIFT_REVIEW_AGENT=auto NIGHTSHIFT_ADVISORS=codex \
+  NIGHTSHIFT_REVIEW_VENDOR_CMD='printf "review vendor selection\n" >> "$PROVIDER_ATTEMPTS"; printf "claude\n"'
+
+cat > "$TMP/nightly-env" <<'EOF'
+export NIGHTSHIFT_AGENT=claude NIGHTSHIFT_REVIEW_AGENT=claude
+EOF
+run_dry_run legacy BASH_ENV="$TMP/nightly-env" NIGHTSHIFT_REVIEW_AGENT=claude \
+  NIGHTSHIFT_BRANCH_REVIEW=1 NIGHTSHIFT_ADVISOR_AGENT=codex
 
 # The whole point: nothing under NIGHTSHIFT_HOME moved.
 [ "$(sig)" = "$before" ] || {
