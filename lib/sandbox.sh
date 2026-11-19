@@ -13,7 +13,7 @@
 # The gate EXECUTES candidate-controlled repository content — `npm ci` alone runs preinstall /
 # prepare / pretest straight out of a package.json the Fix stage may just have written. Unsandboxed,
 # that is the most direct route there is from a prompt-injected fix to full host execution as this
-# account: SSH keys, the gh token, ~/.claude and ~/.codex credentials, /etc secrets, the docker
+# account: SSH keys, the gh token, ~/.claude credentials, /etc secrets, the docker
 # socket (host-root equivalent), sudo. So it does not run as this account. See ADR 0026.
 #
 # bubblewrap: no daemon, no setuid, no privileged helper, one process per gate, and the filesystem

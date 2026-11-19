@@ -29,7 +29,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # The launcher searches /usr/local/bin first. Give that exact path private command
 # names so updates to the host's provider files or bin symlink cannot redirect them.
-for provider in claude codex; do
+for provider in claude; do
   stub="$TMP/bin/$provider"
   cat > "$stub" <<'EOF'
 #!/bin/sh
@@ -61,7 +61,7 @@ from pathlib import Path
 
 original, alias, shadow = map(Path, sys.argv[1:])
 for entry in original.iterdir():
-    if entry.name not in {"claude", "codex", "systemctl"}:
+    if entry.name not in {"claude", "systemctl"}:
         # Resolve relative symlinks in the original directory before relocating commands.
         target = Path(os.path.realpath(entry))
         if target.is_relative_to(original):
@@ -70,7 +70,7 @@ for entry in original.iterdir():
 PY
   isolated+=(--ro-bind "$original" "$alias")
 fi
-cp -- "$TMP/bin/"{claude,codex,systemctl} "$shadow/"
+cp -- "$TMP/bin/"{claude,systemctl} "$shadow/"
 isolated+=(--ro-bind "$shadow" /usr/local/bin --)
 
 # The dry-run mktemps its sandbox under TMPDIR; pointing that at the test dir keeps the whole thing
@@ -97,12 +97,12 @@ run_dry_run() {
   shift
   # Start without inherited PATH, functions, credentials or routes. Configure each route explicitly.
   "${isolated[@]}" env -i HOME="$TMP/home" PATH="$TMP/bin:$system_path" TMPDIR="$TMP" \
-    PROVIDER_ATTEMPTS="$attempts" NIGHTSHIFT_AGENT=claude NIGHTSHIFT_QUOTA_FALLBACK_AGENT=codex \
+    PROVIDER_ATTEMPTS="$attempts" NIGHTSHIFT_AGENT=claude \
     "$@" bash "$ROOT/bin/schedule.sh" dry-run >"$out" 2>&1 || rc=$?
 
   [ ! -e "$attempts" ] || { cat "$attempts" >&2; fail "$mode: dry-run attempted a production provider route"; }
   # Check route selection even if a CLI lookup fails or there are no branches to advise on.
-  if grep -E '^\[nightshift\] (agent=(claude|codex) |review stage: |branch advisors: |quota fallback: |invalid quota fallback route: )' "$out" >&2; then
+  if grep -E '^\[nightshift\] (agent=claude |claude (review )?model: |branch advisors: )' "$out" >&2; then
     fail "$mode: dry-run selected a production provider route"
   fi
   [ "$rc" -eq 0 ] || { tail -40 "$out" >&2; fail "$mode: dry-run exited $rc"; }
@@ -127,14 +127,17 @@ run_dry_run() {
     || fail "$mode: no nightshift/* branch in the sandbox remote"
 }
 
-run_dry_run modern NIGHTSHIFT_REVIEW_AGENT=auto NIGHTSHIFT_ADVISORS=codex \
-  NIGHTSHIFT_REVIEW_VENDOR_CMD='printf "review vendor selection\n" >> "$PROVIDER_ATTEMPTS"; printf "claude\n"'
+# The production quota check and notify command must not run either: a smoke test never pauses a
+# night or messages the operator.
+run_dry_run modern NIGHTSHIFT_ADVISORS=claude NIGHTSHIFT_REVIEW_MODEL=review-model \
+  NIGHTSHIFT_QUOTA_CMD='printf "quota check\n" >> "$PROVIDER_ATTEMPTS"; exit 1' \
+  NIGHTSHIFT_NOTIFY_CMD='printf "notify\n" >> "$PROVIDER_ATTEMPTS"'
 
 cat > "$TMP/nightly-env" <<'EOF'
-export NIGHTSHIFT_AGENT=claude NIGHTSHIFT_REVIEW_AGENT=claude
+export NIGHTSHIFT_AGENT=claude NIGHTSHIFT_ADVISORS=claude
 EOF
-run_dry_run legacy BASH_ENV="$TMP/nightly-env" NIGHTSHIFT_REVIEW_AGENT=claude \
-  NIGHTSHIFT_BRANCH_REVIEW=1 NIGHTSHIFT_ADVISOR_AGENT=codex
+run_dry_run legacy BASH_ENV="$TMP/nightly-env" \
+  NIGHTSHIFT_BRANCH_REVIEW=1
 
 # The whole point: nothing under NIGHTSHIFT_HOME moved.
 [ "$(sig)" = "$before" ] || {

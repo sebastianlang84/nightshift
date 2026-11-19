@@ -5,8 +5,7 @@ unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this
 # The credential check must read what the CLI says about ITSELF, never what the model wrote.
 #
 # Regression for the night of 2026-08-24. An explore lens reviewed nightshift's own infra and read
-# bin/nightshift.sh — including the line that self-heals a stale symlink after `codex login` — so
-# AGENT_AUTH_RE matched the repo's source and the night aborted with "no usable credentials" after
+# bin/nightshift.sh — including a comment about re-running a CLI's login — so AGENT_AUTH_RE matched the repo's source and the night aborted with "no usable credentials" after
 # a single stage, while .usage_explore recorded 29,600 output tokens and $3.32 spent. The lens had
 # in fact worked for seven minutes and produced a finding; what killed it first was a trailing
 # comma in its JSON, which failed the parse and armed the latent false positive. The signature sits
@@ -69,9 +68,9 @@ reset_state() { rm -rf "$TMP/state" "$TMP/runs" "$TMP/digests"; mkdir -p "$TMP/s
 cat > "$TMP/bin/claude" <<'STUB'
 #!/usr/bin/env bash
 cat <<'JSON'
-[{"type":"assistant","message":{"content":[{"type":"text","text":"bin/nightshift.sh self-heals the symlink after `codex login`; an unauthorized push is refused."}]}},
+[{"type":"assistant","message":{"content":[{"type":"text","text":"bin/nightshift.sh asks for `claude /login` again; an unauthorized push is refused."}]}},
  {"type":"result","subtype":"success","is_error":false,"usage":{"output_tokens":2400,"input_tokens":40},
-  "result":"{\"found\": false,\n \"scope\": \"in_scope_no_findings\",\n \"findings\": [],\n \"coverage\": {\"files\": [\"README.md\"], \"entrypoints\": [\"none\"], \"checks\": [\"a\",\"b\",\"c\"], \"invariants\": {\"config_domain\": \"not-applicable: none\", \"semantic_sets\": \"not-applicable: none\", \"artifact_identity\": \"not-applicable: none\", \"failure_translation\": \"not-applicable: none\", \"lifecycle\": \"not-applicable: none\"}, \"unresolved\": [],\n },\n}\n\nI stopped short of a fix: `codex login` is mentioned only in a comment."}]
+  "result":"{\"found\": false,\n \"scope\": \"in_scope_no_findings\",\n \"findings\": [],\n \"coverage\": {\"files\": [\"README.md\"], \"entrypoints\": [\"none\"], \"checks\": [\"a\",\"b\",\"c\"], \"invariants\": {\"config_domain\": \"not-applicable: none\", \"semantic_sets\": \"not-applicable: none\", \"artifact_identity\": \"not-applicable: none\", \"failure_translation\": \"not-applicable: none\", \"lifecycle\": \"not-applicable: none\"}, \"unresolved\": [],\n },\n}\n\nI stopped short of a fix: `/login` is mentioned only in a comment."}]
 JSON
 exit 0
 STUB
@@ -124,18 +123,18 @@ grep -q 'FATAL:.*no usable credentials' "$TMP/c.err" \
   || { echo "the structured credential failure was not named" >&2; cat "$TMP/c.err" >&2; exit 1; }
 
 # ---- 4. The token receipt refutes a credential failure on its own -------------------------------
-# Adapter-independent, and the only cover codex has: its raw stream is passed through unfiltered
-# because no codex night has ever run here to show its shape. A stage that spent tokens reached the
-# API, so whatever else went wrong, authentication did not.
+# Adapter-independent: a stage that spent tokens reached the API, so whatever else went wrong,
+# authentication did not. A raw stream that is not an event array (the one-line shape of the
+# 2026-08-05 outage) still reaches the signatures whole.
 # shellcheck disable=SC1090
-( NIGHTSHIFT_AGENT=codex NIGHTSHIFT_SOURCED=1 source "$ROOT/bin/nightshift.sh"
+( NIGHTSHIFT_AGENT=claude NIGHTSHIFT_SOURCED=1 source "$ROOT/bin/nightshift.sh"
   printf 'error: not logged in\n' > "$TMP/u.raw"
   printf '{"output_tokens":null,"input_tokens":null,"cache_read_tokens":null}\n' > "$TMP/u.none"
   printf '{"output_tokens":2400,"input_tokens":40,"cache_read_tokens":91000}\n' > "$TMP/u.spent"
   agent_reached_the_api "$TMP/u.none"  && { echo "a usage record of all-null counters was read as a completed request" >&2; exit 1; }
   agent_reached_the_api "$TMP/u.spent" || { echo "a usage record with real counters was not read as a completed request" >&2; exit 1; }
   agent_credentials_failed /dev/null "$TMP/u.raw" \
-    || { echo "codex's unfiltered stderr-shaped raw no longer reaches the signatures" >&2; exit 1; }
+    || { echo "a plain-text raw stream no longer reaches the signatures" >&2; exit 1; }
 ) || exit 1
 
 echo "test-agent-auth-false-positive: ok"

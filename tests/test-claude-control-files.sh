@@ -4,9 +4,9 @@ unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this
 
 # .claude/settings.json, .claude/settings.local.json and .mcp.json are Runner control data
 # (docs/design/hook-spec.md): Claude loads them from a stage's cwd and runs the hooks and MCP servers
-# they name on the host. The PreToolUse guard stops only a CLAUDE Fix from writing them; a Codex
-# Fix can, and a Claude Review stage or branch advisor would then execute the result. This pins the
-# Runner-side check that holds for every adapter: the worktree check right after Fix, and the branch
+# they name on the host. The PreToolUse guard stops a Claude Fix from writing them, but it is one
+# layer, and a Claude Review stage or branch advisor would execute whatever a worktree or a pushed
+# branch holds. This pins the Runner-side check that holds for every adapter: the worktree check right after Fix, and the branch
 # check advise_branches asks before it checks a branch out.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -76,7 +76,7 @@ clean_ok || fail "the worktree did not come back clean after the symlink case"
 
 # --- 5. the choke point calls it after Fix, before Review stages the tree -----------------------
 awk '/run_agent fix "\$wt" "\$fd"/{f=1} f && /worktree_control_files_clean "\$repo" "\$wt"/{c=1}
-     f && /run_review_stage "\$wt" "\$fd"/{r=c; exit} END{exit !r}' "$ROOT/bin/nightshift.sh" \
+     f && /run_agent review "\$wt" "\$fd"/{r=c; exit} END{exit !r}' "$ROOT/bin/nightshift.sh" \
   || fail "worktree_control_files_clean is not called between the Fix and the Review stage"
 
 # --- 6. a pushed branch that changes a control file is reported; an ordinary one is not ----------

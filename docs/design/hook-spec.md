@@ -67,8 +67,8 @@ The exceptions inside the root are `.claude/settings.json`, `.claude/settings.lo
 Fix may not create or edit them. A repository that intentionally changes those files needs human
 handling.
 
-A Codex Fix (`workspace-write`) can still write those files. The Review stage or a branch advisor
-may be Claude. So the Runner enforces the same rule for every adapter (`worktree_control_files_clean` in
+The guard is one layer, and the Review stage and the branch advisors run Claude on whatever a
+worktree or a pushed branch holds. So the Runner enforces the same rule itself, for every adapter (`worktree_control_files_clean` in
 `bin/nightshift.sh`): right after Fix, at the `.git`-pointer choke point, a worktree in which any of the
 three files — or `.claude` itself, which a symlink could replace — is changed, untracked or ignored is
 refused as `worktree-tampered` before Review runs. `advise_branches` asks the same of a pushed branch
@@ -162,16 +162,6 @@ tripwire still fired). Worktrees default to `${TMPDIR:-/tmp}/nightshift-worktree
 where isolation holds; every stage — recon included — runs in such a worktree, never in the live
 checkout. Pointing `NIGHTSHIFT_WORKTREES` into `$HOME` silently reopens the leak, so the Runner logs
 a warning at startup instead of failing the run.
-
-**codex — mechanism (verified against codex-cli 0.145.0, 2026-08-02).** The flags that look like
-isolation are not: `--ignore-user-config` covers `$CODEX_HOME/config.toml` and `--ignore-rules` the
-execpolicy files, while `$CODEX_HOME/AGENTS.md` reaches the stage verbatim. Codex offers no scope
-selector, and `project_doc_max_bytes=0` is inverted (it drops the *repo's* `AGENTS.md` and keeps the
-global one). So `codex_stage_home()` builds a Runner-owned `CODEX_HOME` at `state/codex-home` that
-contains **only** a symlink to the operator's `auth.json` — credentials in, personal config out, repo
-`AGENTS.md` unaffected. `NIGHTSHIFT_CODEX_STAGE_HOME` overrides it; empty reverts to the operator's
-home. With no `auth.json` to link, the stage still runs isolated: an auth failure is loud, a reopened
-leak is not.
 
 **Rejected alternatives.** `--bare` and `--safe-mode` both remove the personal config, but they also
 disable hooks — that is Layer 2, i.e. the confinement itself — and `--bare` additionally forces

@@ -4,8 +4,10 @@
 # things an unattended run needs that an interactive one gets for free:
 #   1. a single-instance flock — a long run must NEVER overlap the next night's;
 #   2. an explicit PATH — systemd user services start with a minimal env, but
-#      nightshift shells out to claude/codex/gh which may live under ~/.local/bin;
-#   3. a timestamped log file (everything also still goes to journald).
+#      nightshift shells out to claude/gh which may live under ~/.local/bin;
+#   3. a timestamped log file (everything also still goes to journald);
+#   4. optionally, a quota check before the night starts (NIGHTSHIFT_QUOTA_CMD) and one line to the
+#      operator when it pauses the night (NIGHTSHIFT_NOTIFY_CMD) — ADR 0044.
 set -euo pipefail
 
 NIGHTSHIFT_HOME="${NIGHTSHIFT_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -31,7 +33,7 @@ fi
 # System dirs come FIRST so a binary planted under ~/.local/bin (which a write
 # primitive could reach) cannot shadow the Runner's unqualified jq/git/gh/
 # python3 calls — see docs/design/risk-analysis.md R10/N4. Agent tools
-# that live only under ~/.local/bin (claude/codex/gh) are still resolved there.
+# that live only under ~/.local/bin (claude/gh) are still resolved there.
 export PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:${PATH:-}"
 
 # The repos' ship gates (ADR 0022) run the repo's OWN suite, so they need the developer toolchain —
@@ -78,10 +80,6 @@ gate_toolchain_path() { # -> `:`-separated dirs the gates need bound and on PATH
 }
 export NIGHTSHIFT_TEST_PATH="${NIGHTSHIFT_TEST_PATH-$(gate_toolchain_path)}"
 
-# Codex Fix also runs the repo's checks, which can need a newer Node than /usr/bin/node
-# (ADR 0037). Prepend the nvm bin directory for Codex alone. Set it empty to opt out.
-export NIGHTSHIFT_CODEX_PATH="${NIGHTSHIFT_CODEX_PATH-$(nvm_toolchain_bin)}"
-
 # The sandbox has no $HOME, so a python package installed with `pip install --user` is invisible
 # inside a gate — the suite then fails on an import, which reads downstream as "the fix broke the
 # tests". Naming the user site-packages directory here binds it READ-ONLY; it is a directory under
@@ -111,6 +109,47 @@ if ! flock -n 9; then
   exit 0
 fi
 
+night="$(date +%Y-%m-%d)"
+digest="${NIGHTSHIFT_DIGEST_DIR:-$NIGHTSHIFT_HOME/digests}/$night.md"
+
+# One line to the operator through the host's command, `$1` = the line. Optional, bounded and never
+# fatal: a missing or failing command is logged and the launcher goes on as it would have anyway.
+# The Runner calls the same contract when a running night stops for `agent_unavailable`.
+notify_operator() { # line
+  [ -n "${NIGHTSHIFT_NOTIFY_CMD:-}" ] || return 0
+  timeout "${NIGHTSHIFT_NOTIFY_TIMEOUT:-60}" sh -c "$NIGHTSHIFT_NOTIFY_CMD" sh "$1" \
+    </dev/null >/dev/null 2>&1 \
+    || echo "[nightshift-cron] notify command failed (rc=$?) — the operator was not told" | tee -a "$LOG"
+}
+
+# The operator's rule for unattended runs: a (nearly) spent Claude week pauses the night and says so
+# in one line; it never switches models (ADR 0044). NIGHTSHIFT_QUOTA_CMD is the host's check, run
+# once before the night: exit 75 (EX_TEMPFAIL) = pause, with the first line of its stdout as the
+# reason; any other exit = go. Pause is a positive signal so a check that crashes, cannot run or times
+# out lets the night run (logged): a broken check must never silently stop every night. A pause is not
+# a failure — exit 0, and its digest entry is `PAUSED`, never `ABORTED`.
+if [ -n "${NIGHTSHIFT_QUOTA_CMD:-}" ]; then
+  quota_rc=0
+  quota_out="$(timeout -k 5 "${NIGHTSHIFT_QUOTA_TIMEOUT:-60}" sh -c "$NIGHTSHIFT_QUOTA_CMD" </dev/null 2>>"$LOG")" \
+    || quota_rc=$?
+  quota_why="$(printf '%s\n' "$quota_out" | head -n 1 | tr -d '\r' | cut -c1-300)"
+  case "$quota_rc" in
+    0) echo "[nightshift-cron] quota check: go${quota_why:+ ($quota_why)}" | tee -a "$LOG" ;;
+    75)
+      quota_why="${quota_why:-the quota check gave no reason}"
+      echo "=== nightshift paused $(date -Iseconds): quota check exited $quota_rc — $quota_why ===" | tee -a "$LOG"
+      mkdir -p "$(dirname "$digest")"
+      {
+        [ -f "$digest" ] && echo || printf '# nightshift digest — %s\n\n' "$night"
+        echo "- **PAUSED: the quota check stopped tonight's run before it started** — $quota_why. Nothing ran and nothing was recorded; the next scheduled night checks again."
+      } >> "$digest"
+      notify_operator "nightshift $night paused: $quota_why"
+      exit 0 ;;
+    *)
+      echo "[nightshift-cron] quota check failed (rc=$quota_rc) — starting the night anyway" | tee -a "$LOG" ;;
+  esac
+fi
+
 # `${…:-}` and not a bare expansion: since the launcher stopped pinning an adapter when the rulebook
 # names one, this variable is legitimately unset — and under `set -u` a bare read aborts the run
 # before it starts. The Runner announces the adapter it resolved on its own line either way.
@@ -135,7 +174,6 @@ forward_stop() { # signal
   [ -z "${runner_pid:-}" ] || kill -s "$1" "$runner_pid" 2>/dev/null || true
 }
 
-night="$(date +%Y-%m-%d)"
 run_start=$(date +%s)
 trap 'forward_stop TERM' TERM
 trap 'forward_stop INT' INT
@@ -160,7 +198,6 @@ echo "=== nightshift done rc=$rc $(date -Iseconds) ===" | tee -a "$LOG"
 # guard, an invalid ledger, an errexit death). Record such a night here, with the marker
 # aborted_streak counts, so the morning sees that nights are being lost instead of the last good
 # digest. A digest this run already wrote (newer than its start) is left alone.
-digest="${NIGHTSHIFT_DIGEST_DIR:-$NIGHTSHIFT_HOME/digests}/$night.md"
 if [ "$rc" -ne 0 ] && { [ ! -f "$digest" ] || [ "$(stat -c %Y "$digest")" -lt "$run_start" ]; }; then
   mkdir -p "$(dirname "$digest")"
   {

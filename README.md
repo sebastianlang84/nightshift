@@ -24,8 +24,8 @@ An append-only ledger tracks finding identity, branch outcomes, and coverage acr
 The runner never merges. You control merges; an optional external merge job requires separate
 operator authorization and is not included in this repository.
 
-Adapters support Claude Code, Codex, and a deterministic mock. You can select a separate
-review adapter and request advisory reviews from multiple vendors.
+The agent is Claude Code; a deterministic mock adapter serves tests and dry runs. Review and the
+optional advisory branch reviews can run on a separate review model.
 
 ## Install
 
@@ -93,8 +93,8 @@ Common settings include:
 
 | Setting | Purpose |
 | --- | --- |
-| `NIGHTSHIFT_AGENT` | `claude`, `codex`, or `mock`. Manual runs require this setting or `agent.primary` in the rulebook. The scheduler falls back to `claude`. |
-| `agent.review_agent` | Separate adapter for Review |
+| `NIGHTSHIFT_AGENT` | `claude` or `mock`. Manual runs require this setting or `agent.primary` in the rulebook. The scheduler falls back to `claude`. |
+| `agent.review_model` | Separate model for Review and branch advice (default: `agent.claude_model`) |
 | `limits.max_open_branches` | Maximum branches awaiting a verdict across repositories |
 | `limits.max_run_minutes` | Optional run budget; an in-flight stage may finish |
 | `NIGHTSHIFT_STATE_DIR` | Ledger and derived state location |

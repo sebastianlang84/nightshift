@@ -1,8 +1,8 @@
 # Prototype — how to run it
 
 - Status: **runnable prototype, 2026-07-11.** Proves the v2 mechanics end-to-end with zero risk to
-  real repos. Adapter paths are `mock` (deterministic), `claude`, and `codex`; the real adapters
-  invoke their first-party CLIs headlessly.
+  real repos. Adapter paths are `mock` (deterministic) and `claude`, which invokes its
+  first-party CLI headlessly.
 
 ## Run it
 
@@ -19,9 +19,8 @@ export NIGHTSHIFT_DIGEST_DIR=$SB/digests NIGHTSHIFT_WORKTREES=$SB/wt
 
 NIGHTSHIFT_AGENT=mock bash bin/nightshift.sh     # one night, mock agent (the default agent)
 NIGHTSHIFT_AGENT=claude bash bin/nightshift.sh   # one night, real claude -p stages
-NIGHTSHIFT_AGENT=codex NIGHTSHIFT_CODEX_MODEL=<model> NIGHTSHIFT_CODEX_REASONING_EFFORT=high bash bin/nightshift.sh
-# Run on Claude with Codex as the reviewer (ADR 0031).
-NIGHTSHIFT_AGENT=claude NIGHTSHIFT_REVIEW_AGENT=codex bash bin/nightshift.sh
+# Review on a separate model (ADR 0044).
+NIGHTSHIFT_AGENT=claude NIGHTSHIFT_REVIEW_MODEL=<review-model> bash bin/nightshift.sh
 ```
 
 `bin/schedule.sh dry-run` does all of the above in one command — sandbox, isolated dirs, launcher
@@ -79,15 +78,9 @@ Stages are invoked through `run_agent(stage, workdir, item_dir)`, which dispatch
   no model is committed as the default. The PreToolUse guard is wired through the generated settings
   and confines Fix-stage `Write`/`Edit` paths to the worktree. Still to harden: sub-agents for
   Explore (context control, §3b) and non-sandbox permission mode.
-- `NIGHTSHIFT_AGENT=codex` — calls `codex exec` ephemerally. Recon/Explore/Review use Codex's
-  `read-only` sandbox; Fix uses `workspace-write` in the disposable worktree with network disabled.
-  `NIGHTSHIFT_CODEX_MODEL` and `NIGHTSHIFT_CODEX_REASONING_EFFORT` are optional host configuration;
-  no model is committed as the default. Codex can execute sandboxed commands during Fix, unlike the
-  Claude adapter's no-Bash profile. The Runner still owns branch, commit, and push.
-
-The Review stage can run on a different adapter than the rest of the night — `agent.review_agent` in
-the rulebook, `NIGHTSHIFT_REVIEW_AGENT` as the env override (ADR 0031). Omitted, it runs on the
-night's own adapter, as before. `auto` asks `NIGHTSHIFT_REVIEW_VENDOR_CMD` before each Review stage.
+The Review stage and the branch advice can run on a separate model — `agent.review_model` in the
+rulebook, `NIGHTSHIFT_REVIEW_MODEL` as the env override (ADR 0044). Omitted, they run on the night's
+`claude_model`.
 
 **Verification debt — real-model prompt behavior (partly closed).** The Runner logic (recon
 caching, yield-weighted dimension selection, the empty-scope ledger row and its digest suggestions

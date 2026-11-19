@@ -7,11 +7,13 @@ unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this
 # every adapter — a stage that failed quickly with no tokens counted, twice in a row — because each
 # CLI reports a spent quota in its own shape and changes it between versions. Both Claude shapes seen
 # so far are replayed here verbatim: the `rate_limit_event` of 2026-08-21 (exit 0, no result) and the
-# 429 `is_error` result of 2026-10-31. The Codex shape of 2026-10-28 is in test-agent-wall-reviewer.sh.
+# 429 `is_error` result of 2026-10-31. The per-model count for the review model is in
+# test-agent-wall-reviewer.sh.
 #
 # Asserted: the night stops after the second wall instead of spending the fleet, the reason reaches
-# the log and the digest with a remedy that covers a spent quota, and nothing derived is recorded —
-# not even from the first wall, before the rule has made the agent fatal.
+# the log and the digest with a remedy that covers a spent quota, the operator's notify command gets
+# one line, nothing derived is recorded — not even from the first wall, before the rule has made the
+# agent fatal — and no other adapter takes over (ADR 0044).
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
@@ -70,12 +72,13 @@ cat > "$TMP/2026-10-31.json" <<'JSON'
 JSON
 
 night() { # reply_file rc -> exit status of one night against the stub; log in $TMP/err
-  rm -rf "$TMP/state" "$TMP/runs" "$TMP/digests"
+  rm -rf "$TMP/state" "$TMP/runs" "$TMP/digests" "$TMP/notified"
   mkdir -p "$TMP/state" "$TMP/runs" "$TMP/digests"
   local rc=0
   PATH="$TMP/bin:/usr/bin:/bin" CLAUDE_REPLY="$1" CLAUDE_RC="$2" \
   RULEBOOK="$TMP/rulebook.yaml" \
   NIGHTSHIFT_AGENT=claude \
+  NIGHTSHIFT_NOTIFY_CMD='printf "%s\n" "$1" >> "$NOTIFIED"' NOTIFIED="$TMP/notified" \
   NIGHTSHIFT_OPEN_PR=0 \
   NIGHTSHIFT_STATE_DIR="$TMP/state" NIGHTSHIFT_RUNS_DIR="$TMP/runs" \
   NIGHTSHIFT_DIGEST_DIR="$TMP/digests" NIGHTSHIFT_WORKTREES="$TMP/worktrees" \
@@ -117,9 +120,15 @@ for shape in "2026-08-21 0" "2026-10-31 1"; do
   grep -q 'ABORTED' "$digest" || { echo "$1: digest does not announce the abort" >&2; cat "$digest" >&2; exit 1; }
   grep -q 'is logged in and has quota left' "$digest" \
     || { echo "$1: digest remedy does not cover a spent quota" >&2; cat "$digest" >&2; exit 1; }
+
+  # 6. The operator gets exactly one line naming the stop.
+  [ "$(grep -c . "$TMP/notified" 2>/dev/null)" = 1 ] \
+    || { echo "$1: expected one notify line, got: $(cat "$TMP/notified" 2>/dev/null)" >&2; exit 1; }
+  grep -q 'stopped: claude could not reach its model 2 stages in a row' "$TMP/notified" \
+    || { echo "$1: the notify line does not name the stop: $(cat "$TMP/notified")" >&2; exit 1; }
 done
 
-# 6. A night whose stages complete is not touched by the rule, whatever events the CLI adds: 167 of
+# 7. A night whose stages complete is not touched by the rule, whatever events the CLI adds: 167 of
 #    the stage outputs on this machine carry an ALLOWED rate_limit_event.
 cat > "$TMP/healthy.json" <<'JSON'
 [{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1787293200,"rateLimitType":"five_hour"}},
@@ -130,5 +139,6 @@ rc=0; night "$TMP/healthy.json" 0 || rc=$?
 if grep -q 'could not reach its model' "$TMP/err"; then
   echo "a healthy night was reported as a wall" >&2; exit 1
 fi
+[ ! -e "$TMP/notified" ] || { echo "a healthy night notified the operator: $(cat "$TMP/notified")" >&2; exit 1; }
 
 echo "test-agent-wall-abort: ok"

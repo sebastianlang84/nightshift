@@ -90,7 +90,7 @@ grep -q 'marker=1' <<<"$out" || { echo "$out" >&2; fail "the gate did not run in
 # so the assertion does not depend on this host happening to have any of them.
 SECRET_DIR="$TMP/secrets"; mkdir -p "$SECRET_DIR"
 printf 'nightshift-canary-8f3a1c\n' > "$SECRET_DIR/api-key"
-out="$(gate "cat '$SECRET_DIR/api-key' 2>&1; cat ~/.ssh/id_ed25519 ~/.ssh/id_rsa 2>&1; ls ~/.config/gh ~/.claude ~/.codex /etc/service-secrets 2>&1")"
+out="$(gate "cat '$SECRET_DIR/api-key' 2>&1; cat ~/.ssh/id_ed25519 ~/.ssh/id_rsa 2>&1; ls ~/.config/gh ~/.claude /etc/service-secrets 2>&1")"
 if grep -q 'nightshift-canary-8f3a1c' <<<"$out"; then
   echo "$out" >&2; fail "the gate READ A PLANTED SECRET — the sandbox does not contain it (ADR 0026 R15)"
 fi

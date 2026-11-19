@@ -4,8 +4,8 @@
 # Outer loop: select a repo -> Explore -> Fix<->Review (capped) -> Finalize
 # (push a nightshift/* branch) -> record. Enforces the nightly branch cap and the
 # global open-branch backpressure. The agent invocation sits behind run_agent()
-# (ADR 0001 adapter seam): NIGHTSHIFT_AGENT=mock | claude | codex. The Review stage may run
-# on a DIFFERENT adapter than the rest of the night (ADR 0031) — see review_stage_agent().
+# (ADR 0001 adapter seam): NIGHTSHIFT_AGENT=mock | claude. The Review stage and the branch advice
+# may run on a separate review model (ADR 0044) — see stage_model() in lib/adapters.sh.
 set -euo pipefail
 
 # Only absolute PATH entries. The Runner runs commands after `cd` into worktrees a stage can write,
@@ -16,8 +16,6 @@ export PATH
 
 NIGHTSHIFT_HOME="${NIGHTSHIFT_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 NIGHTSHIFT_AGENT="${NIGHTSHIFT_AGENT:-}"
-RUN_PRIMARY_AGENT="$NIGHTSHIFT_AGENT"
-RUN_AGENT_ROUTE="$NIGHTSHIFT_AGENT"
 # After pushing a nightshift/* branch, optionally open a PR for it (1=on). OFF by default:
 # a PR is a host-API object that needs per-host API credentials (a forge API token, for example) which the SSH git transport does NOT provide — so branch-only is the credential-
 # free baseline and the pushed branch is the unit of review. Opt in with NIGHTSHIFT_OPEN_PR=1
@@ -81,10 +79,10 @@ unset _ns_lib _ns_part
 # --setting-sources cannot drop (verified 2026-08-02, claude 2.1.205). Worktrees default under
 # ${TMPDIR:-/tmp}, outside $HOME, where the isolation holds. Overriding NIGHTSHIFT_WORKTREES into
 # $HOME silently reopens the leak, so say so instead of failing the run (see docs/design/hook-spec.md).
-# Called from main() after parsing the rulebook, which can select Claude as the reviewer.
+# Called from main() after parsing the rulebook and resolving the branch advisors.
 warn_worktrees_in_home() {
   local a
-  for a in "$NIGHTSHIFT_AGENT" "$(review_stage_agent)"; do
+  for a in "$NIGHTSHIFT_AGENT" ${ADVISORS[@]+"${ADVISORS[@]}"}; do
     [ "$a" = claude ] || continue
     [ -n "${HOME:-}" ] || continue
     local home_p wt_p
@@ -106,13 +104,9 @@ declare -a REPO_PATHS=() REPO_MODES=() REPO_BASES=() REPO_FINDINGS=() REPO_DIMS=
 BASE_RESOLUTION_WARN_MISSING=1
 # shellcheck source=../lib/base_resolution.sh
 source "$NIGHTSHIFT_HOME/lib/base_resolution.sh"
-# Rulebook-declared model per adapter (ADR 0020); empty = the rulebook declares none. Kept separate
+# Rulebook-declared models (ADR 0020, ADR 0044); empty = the rulebook declares none. Kept separate
 # from the NIGHTSHIFT_*_MODEL env vars so the precedence env > rulebook > CLI default stays legible.
-RB_CLAUDE_MODEL="" RB_CODEX_MODEL="" RB_CODEX_EFFORT="" RB_MAX_VERIFY=""
-# Which adapter serves the Review stage (ADR 0031); empty = the night's own adapter, as before.
-RB_REVIEW_AGENT=""
-# `review_agent: auto` resolves to this, refreshed before every Review stage (refresh_review_vendor).
-REVIEW_VENDOR=""
+RB_CLAUDE_MODEL="" RB_REVIEW_MODEL="" RB_MAX_VERIFY=""
 # Which adapters advise on every open branch each night (ADR 0038), comma-separated; empty = none.
 RB_ADVISORS=""
 # The night's own adapter as declared by the rulebook.
@@ -123,14 +117,17 @@ RB_PRIMARY_AGENT=""
 # the selection is still the point: stage isolation (ADR 0019) means a machine-wide pin in the CLI's
 # own config no longer reaches a stage, so a host that believes it pinned one must learn otherwise at
 # the start of the night rather than the morning after.
-log_model_selection() { # adapter env_var_name rulebook_value
-  local adapter="$1" name="$2" rb="$3"
-  if [ -n "${!name+set}" ]; then
-    log "$adapter model: ${!name:-<none — no --model passed>} (from \$$name)"
+log_model_selection() { # label env_var_name rulebook_value rulebook_key [fallback]
+  local label="$1" name="$2" rb="$3" key="$4" fallback="${5:-}"
+  [ -n "$fallback" ] || fallback="the CLI's own default applies (runs.jsonl model_id records what served)"
+  if [ -n "${!name:-}" ]; then
+    log "$label model: ${!name} (from \$$name)"
+  elif [ -n "${!name+set}" ]; then
+    log "$label model: <none> (\$$name is set empty) — $fallback"
   elif [ -n "$rb" ]; then
-    log "$adapter model: $rb (from rulebook agent.${adapter}_model)"
+    log "$label model: $rb (from rulebook agent.$key)"
   else
-    log "$adapter model: not declared — the CLI's own default applies (runs.jsonl model_id records what served)"
+    log "$label model: not declared — $fallback"
   fi
 }
 
@@ -164,9 +161,7 @@ load_rulebook() {
       max_files)             MAX_FILES="$a" ;;
       max_lines)             MAX_LINES="$a" ;;
       claude_model)          RB_CLAUDE_MODEL="$a" ;;
-      codex_model)           RB_CODEX_MODEL="$a" ;;
-      codex_effort)          RB_CODEX_EFFORT="$a" ;;
-      review_agent)          RB_REVIEW_AGENT="$a" ;;
+      review_model)          RB_REVIEW_MODEL="$a" ;;
       advisors)              RB_ADVISORS="$a" ;;
       primary_agent)         RB_PRIMARY_AGENT="$a" ;;
       dimension)             DIMENSIONS+=("$a") ;;
@@ -214,15 +209,13 @@ load_rulebook() {
   # ops override for when it is not set there; 50 is the last-resort default.
   MAX_RUN_BRANCHES="${rb_run_branches:-${NIGHTSHIFT_MAX_RUN_BRANCHES:-50}}"
   NIGHTSHIFT_AGENT="${NIGHTSHIFT_AGENT:-$RB_PRIMARY_AGENT}"
-  RUN_PRIMARY_AGENT="$NIGHTSHIFT_AGENT"
-  RUN_AGENT_ROUTE="$NIGHTSHIFT_AGENT"
   export NIGHTSHIFT_BRANCH_PREFIX="$BRANCH_PREFIX"
 }
 
 # --------------------------------------------------------------- telemetry ----
-# `model` is the ADAPTER name (claude|codex|mock) and stays that way — harvest/digest code may read
+# `model` is the ADAPTER name (claude|mock) and stays that way — harvest/digest code may read
 # it. The model that ACTUALLY served the stage is the separate `model_id` field ("claude-opus-5",
-# "claude-opus-4-8[1m]", "gpt-5-codex", …), self-reported by the CLI; null whenever the CLI reports
+# "claude-opus-4-8[1m]", …), self-reported by the CLI; null whenever the CLI reports
 # none (mock, older CLI shapes). `tokens` remains OUTPUT tokens for backwards compatibility; the
 # input/cache counters are per-stage CUMULATIVE over every request the stage made, so they bound
 # (never equal) the peak context of a single request. `context_window` answers the 200k-vs-[1m]
@@ -443,20 +436,22 @@ write_claude_settings() {
 # ("Not logged in · Please run /login"), the log said "nothing worth doing" four times, and the four
 # resulting `empty` rows are fiction. So classify the failure once and let main() abort the night.
 AGENT_FATAL=""         # non-empty = the agent itself is unusable; set by run_agent, read by main()
-AGENT_FATAL_AGENT=""   # WHICH adapter died — the advisor may legitimately run on a different one
+AGENT_FATAL_AGENT=""   # WHICH adapter died — an advisor may legitimately run on a different one
 
 # An agent that cannot reach its model — spent quota, an outage, a CLI that dies on start — is the
 # same class of event as a bad credential (ADR 0023): nothing it "returned" is evidence about the
-# code. Every CLI reports it differently and the reports drift: Claude's spent five-hour window was
-# a `rate_limit_event` on 2026-08-21 and an `is_error` result with `api_error_status` 429 on
-# 2026-10-31; Codex's weekly limit on 2026-10-28 was a `turn.failed` event in prose. A signature per
-# CLI misses each new shape until it has cost a night, so the test reads the one receipt every
+# code. The CLI's reports drift: Claude's spent five-hour window was a `rate_limit_event` on
+# 2026-08-21 and an `is_error` result with `api_error_status` 429 on 2026-10-31. A signature per
+# shape misses each new one until it has cost a night, so the test reads the one receipt every
 # adapter writes instead: the stage failed quickly and its token counters (.usage_<stage>) show no
 # request. In runs.jsonl up to 2026-10-31 all 46 such failures fell in seven nights where the agent
 # was blocked from the first stage on, and none in a healthy night; failures without tokens that ran
 # longer (7 of 61-300 s, 2 over 300 s) were real stages, hence the time bound.
+# Counted per adapter AND model (ADR 0044): a spent window belongs to one model, and Fix and Review
+# alternate on the same adapter. Keyed by adapter alone, a Fix on a working model between two walled
+# reviews restarted the count, and the night kept building fixes nothing could review.
 AGENT_WALL_LIMIT=2        # this many such failures in a row make the adapter unusable for the night
-declare -gA AGENT_WALL_STREAK=()   # adapter -> consecutive failures that never reached the model
+declare -gA AGENT_WALL_STREAK=()   # "adapter[:model]" -> consecutive failures that never reached it
 AGENT_LAST_WALLED=0       # 1 = the latest stage was such a failure: record nothing derived from it
 
 # How many EXTRA attempts a stage gets after the model returns nothing at all (ADR 0034). One, so a
@@ -558,9 +553,12 @@ collect_agent_note() { # stage workdir repo -> move a stage's note into the note
 
 run_agent() { # stage workdir item_dir [attempt]
   local stage="$1" workdir="$2" item_dir="$3" attempt="${4:-1}" start end status=0 usage='{}'
-  local attempt_agent="$NIGHTSHIFT_AGENT" fallback="${NIGHTSHIFT_QUOTA_FALLBACK_AGENT:-}" walls=0
-  # A retry of this stage — empty-answer or fallback, both called from below with _run_agent_retry
-  # set in this scope — inherits the first attempt's wall: only an attempt that reaches the model
+  local attempt_agent="$NIGHTSHIFT_AGENT" walls=0 wall_key wall_model=""
+  # The wall streak's key: the adapter, plus the model this stage requests (ADR 0044).
+  [ "$attempt_agent" = mock ] || wall_model="$(stage_model "$stage")"
+  wall_key="$attempt_agent${wall_model:+:$wall_model}"
+  # An empty-answer retry of this stage, called from below with _run_agent_retry set in this
+  # scope, inherits the first attempt's wall: only an attempt that reaches the model
   # clears it, or a failed retry would let Recon negative-cache the wall after all.
   [ -n "${_run_agent_retry:-}" ] || AGENT_LAST_WALLED=0
   local _run_agent_retry=1
@@ -569,8 +567,7 @@ run_agent() { # stage workdir item_dir [attempt]
   case "$NIGHTSHIFT_AGENT" in
     mock)   "mock_$stage" "$workdir" "$item_dir" || status=$? ;;
     claude) claude_run "$stage" "$workdir" "$item_dir" || status=$? ;;
-    codex)  codex_run "$stage" "$workdir" "$item_dir" || status=$? ;;
-    *) log "unknown NIGHTSHIFT_AGENT=$NIGHTSHIFT_AGENT (expected mock, claude, or codex)"; status=2 ;;
+    *) log "unknown NIGHTSHIFT_AGENT=$NIGHTSHIFT_AGENT (expected mock or claude)"; status=2 ;;
   esac
   # Before anything else looks at the worktree — including the failure paths below and the ship
   # gate — so a note survives a stage that failed, which is when it is most likely to exist. The
@@ -578,13 +575,13 @@ run_agent() { # stage workdir item_dir [attempt]
   collect_agent_note "$stage" "$workdir" "$(cat "$item_dir/repo" 2>/dev/null || true)"
   # A stage that succeeded or spent tokens proves the adapter reaches its model; its wall count restarts.
   if [ "$status" -eq 0 ] || agent_reached_the_api "$item_dir/.usage_$stage"; then
-    AGENT_WALL_STREAK[$attempt_agent]=0
+    AGENT_WALL_STREAK[$wall_key]=0
     AGENT_LAST_WALLED=0
   fi
   # A non-zero stage is reported as a FAILURE, not absorbed into "found nothing". The exit code has
   # always been recorded in runs.jsonl, but nothing ever read it back out — so a stage that could not
   # run at all was indistinguishable, in the night log and in the digest, from one that ran and had
-  # nothing to say. Both adapters leave the CLI's own diagnosis in $stage.err (stderr) and
+  # nothing to say. The claude adapter leaves the CLI's own diagnosis in $stage.err (stderr) and
   # .raw_$stage (unparsed stdout); the last non-blank stderr line goes straight into the log so the
   # morning does not start with an archaeology session.
   if [ "$status" -ne 0 ]; then
@@ -606,31 +603,15 @@ run_agent() { # stage workdir item_dir [attempt]
     # verdict reported on its own, not a wall. The mock agent reaches no model and counts nothing.
     if [ -z "$AGENT_FATAL" ] && [ "$status" -ne 2 ] && [ "$attempt_agent" != mock ] \
        && agent_hit_a_wall "$item_dir/.usage_$stage" "$(( $(date +%s) - start ))"; then
-      walls=$(( ${AGENT_WALL_STREAK[$attempt_agent]:-0} + 1 ))
-      AGENT_WALL_STREAK[$attempt_agent]=$walls
+      walls=$(( ${AGENT_WALL_STREAK[$wall_key]:-0} + 1 ))
+      AGENT_WALL_STREAK[$wall_key]=$walls
       AGENT_LAST_WALLED=1
-      log "  stage $stage: $attempt_agent did not reach its model ($walls in a row) — its answer is in $rawf"
+      log "  stage $stage: $attempt_agent did not reach its model${wall_model:+ $wall_model} ($walls in a row) — its answer is in $rawf"
     fi
+    # No other adapter takes over (ADR 0044): the night stops, and the digest and the operator's
+    # notify command say so.
     if [ "$walls" -ge "$AGENT_WALL_LIMIT" ]; then
-      if { [ "$fallback" = claude ] || [ "$fallback" = codex ]; } \
-         && [ "$fallback" != "$attempt_agent" ]; then
-        # Keep both attempts in runs.jsonl. The failed attempt's raw output is renamed before the
-        # retry clears the canonical stage paths, so the morning still has the provider's own words.
-        if [ -s "$item_dir/.usage_$stage" ]; then
-          usage=$(jq -c 'if type=="object" then . else {} end' "$item_dir/.usage_$stage" 2>/dev/null || true)
-          [ -n "$usage" ] || usage='{}'
-        fi
-        end=$(date +%s)
-        append_run "$stage" "$attempt_agent" "$start" "$((end - start))" "$status" \
-          "$(basename "$item_dir")" "$usage"
-        preserve_stage_attempt "$stage" "$item_dir" "$attempt_agent-wall"
-        NIGHTSHIFT_AGENT="$fallback"
-        RUN_AGENT_ROUTE="$RUN_PRIMARY_AGENT -> $fallback"
-        log "  stage $stage: $attempt_agent could not reach its model $walls stages in a row — switching the rest of the night to $fallback"
-        run_agent "$stage" "$workdir" "$item_dir"
-        return $?
-      fi
-      AGENT_FATAL="$attempt_agent could not reach its model $walls stages in a row (stage $stage)"
+      AGENT_FATAL="$attempt_agent could not reach its model $walls stages in a row (stage $stage${wall_model:+, model $wall_model})"
       AGENT_FATAL_AGENT="$attempt_agent"
       log "FATAL: $AGENT_FATAL — aborting the night rather than spending every remaining lens on the same wall."
       log "FATAL: check that the $attempt_agent CLI is logged in and has quota left ($rawf says why), then run bin/nightshift.sh again."
@@ -671,62 +652,6 @@ run_agent() { # stage workdir item_dir [attempt]
   end=$(date +%s)
   append_run "$stage" "$attempt_agent" "$start" "$((end - start))" "$status" "$(basename "$item_dir")" "$usage"
   return "$status"
-}
-
-# ------------------------------------------------------------ review route ----
-# Which adapter judges a fix (ADR 0031). Empty rulebook key and empty env = the night's own adapter,
-# which is the pre-0031 behaviour. A DIFFERENT adapter here is the point: Fix and Review are the same
-# model marking its own homework, and a reviewer from another vendor cannot share the author's blind
-# spot — the same reasoning that already gave advise_branches its NIGHTSHIFT_ADVISOR_AGENT.
-# Resolved in two steps rather than one nested default, so that an explicitly EMPTY
-# NIGHTSHIFT_REVIEW_AGENT means "no routing tonight" — the escape hatch every other adapter env var
-# has — while the function still never returns the empty string. Collapsing it into
-# `${NIGHTSHIFT_REVIEW_AGENT-${RB_REVIEW_AGENT:-$NIGHTSHIFT_AGENT}}` returns "" for that case, which
-# main()'s validation then rejects as an unknown adapter: the documented way to switch the routing
-# off for one hand-run would kill the night before it started. Using `:-` instead loses the escape
-# hatch altogether, because the rulebook key would win over the operator's explicit "off".
-review_stage_agent() {
-  local ra="${NIGHTSHIFT_REVIEW_AGENT-${RB_REVIEW_AGENT:-}}"
-  [ -n "$ra" ] || ra="$NIGHTSHIFT_AGENT"
-  [ "$ra" = auto ] && ra="${REVIEW_VENDOR:-codex}"
-  printf '%s' "$ra"
-}
-
-# `review_agent: auto`: the host decides per Review stage which vendor judges the fix, through the
-# command in NIGHTSHIFT_REVIEW_VENDOR_CMD, which prints `claude` or `codex`. The operator's rule is a
-# reviewer from the other vendor while the Claude quota allows it, otherwise the same vendor with an
-# adversarial brief (stage_prompt). Asked before every review, not once a night, because the quota
-# moves while the night runs. Anything but `claude` — a failure, a timeout, garbage — means `codex`:
-# an unreadable quota must never route reviews onto the account the rule is protecting.
-refresh_review_vendor() {
-  [ "${NIGHTSHIFT_REVIEW_AGENT-${RB_REVIEW_AGENT:-}}" = auto ] || return 0
-  local out
-  # Its answer counts only from a command that succeeded: one that printed `claude` and then failed
-  # or timed out has not shown that the quota allows it.
-  out="$(timeout "${NIGHTSHIFT_REVIEW_VENDOR_TIMEOUT:-150}" sh -c "$NIGHTSHIFT_REVIEW_VENDOR_CMD" </dev/null 2>/dev/null)" || out=""
-  out="$(printf '%s\n' "$out" | head -n 1 | tr -d '[:space:]')"
-  case "$out" in claude|codex) REVIEW_VENDOR="$out" ;; *) REVIEW_VENDOR=codex
-    log "review vendor command gave '${out:-nothing}'; reviewing on codex" ;; esac
-}
-
-# Run the Review stage on that adapter. Same dynamic-scope override advise_branches uses: run_agent
-# reads the global NIGHTSHIFT_AGENT, so a `local` rebinds it for this call alone and every helper it
-# reaches (agent_diagnosis, the wall count, the telemetry adapter name) sees the adapter that
-# actually ran.
-run_review_stage() { # workdir item_dir
-  refresh_review_vendor
-  local ra; ra="$(review_stage_agent)"
-  [ -n "$ra" ] || ra="$NIGHTSHIFT_AGENT"
-  if [ "$ra" = "$NIGHTSHIFT_AGENT" ]; then
-    local NS_REVIEW_SAME_VENDOR=1
-    run_agent review "$1" "$2"
-    return $?
-  fi
-  # The quota fallback route is claude -> codex and belongs to the NIGHT's adapter. Carrying it into
-  # a deliberately-chosen reviewer would silently swap the reviewer for the very vendor the routing
-  # exists to differ from, so a reviewer that cannot reach its model aborts the night instead.
-  local NIGHTSHIFT_AGENT="$ra" NIGHTSHIFT_QUOTA_FALLBACK_AGENT=""
-  run_agent review "$1" "$2"
 }
 
 # ----------------------------------------------------------- commit subject ----
@@ -909,8 +834,9 @@ $(tail -n 100 "$id/tests.log" | fence_safe)
 \`\`\`"
     fi
   fi
-  # A reviewer from the fix's own vendor shares its blind spots, so it gets told to hunt for them.
-  if [ "$stage" = review ] && [ "${NS_REVIEW_SAME_VENDOR:-0}" = 1 ]; then
+  # The reviewer is always the fix's own vendor (ADR 0044), even on a separate review model, so it
+  # shares the author's blind spots and gets told to hunt for them.
+  if [ "$stage" = review ]; then
     prompt="$prompt
 
 ## You are the same model family that wrote this fix
@@ -1515,9 +1441,9 @@ open_pr() { # repo wt branch item_dir base -> echoes PR url ("" if none)
 
 # Claude loads these from a stage's cwd (`--setting-sources project,local`) and runs the hooks and
 # MCP servers they name, unsandboxed, as the operator (docs/design/hook-spec.md). The PreToolUse
-# guard keeps a CLAUDE Fix away from them; a Codex Fix can write the worktree freely, and the
-# Review stage or a branch advisor may well be Claude. So the Runner checks the result itself, for
-# every adapter. `.claude` is listed on its own because a symlink in its place would redirect all
+# guard keeps a Claude Fix away from them, but the guard is one layer, a pushed branch reaches the
+# branch advisors without passing through it, and the Review stage and the advisors run Claude on
+# whatever the worktree holds. So the Runner checks the result itself, for every adapter. `.claude` is listed on its own because a symlink in its place would redirect all
 # three paths without git ever naming them.
 CLAUDE_CONTROL_PATHS=(.claude/settings.json .claude/settings.local.json .mcp.json .claude)
 # Keeps only the paths that ARE control data from a list of changed paths: the `.claude` pathspec
@@ -1564,9 +1490,8 @@ branch_control_files_changed() { # repo base tip -> prints the paths; 1 if none
 }
 
 # The dependency setup before a Fix stage (ADR 0037): the repo's `setup_cmd`, run in the ship gate's
-# sandbox over the worktree, so a Fix stage that can execute commands (codex) finds the dependencies
-# its checks need. That stage has no network and cannot write the shared package store, so it cannot
-# install them itself. An aid, not a gate: a failed setup is logged and the Fix stage runs anyway.
+# sandbox over the worktree, so a Fix stage that can execute commands finds the dependencies its
+# checks need. The Claude Fix stage has no shell (ADR 0044), so on it the setup only costs time. An aid, not a gate: a failed setup is logged and the Fix stage runs anyway.
 # The ship gate decides, and it purges everything this installed before it runs.
 provision_worktree() { # repo worktree item_dir -> 0 ran or skipped, 2 not hermetic, 3 .git pointer tampered
   local repo="$1" wt="$2" id="$3" scmd rc=0 before after
@@ -2065,12 +1990,12 @@ verify_findings() {
 # recommendation on every open nightshift/* branch, combined into one table in the morning digest. It
 # NEVER merges or pushes (read-only tool profile + git-confinement hold). The advisors are
 # NIGHTSHIFT_ADVISORS if set (explicitly EMPTY switches the rulebook's list off for one run), else
-# the rulebook's agent.advisors, else the pre-0038 single-advisor opt-in NIGHTSHIFT_BRANCH_REVIEW=1
-# on NIGHTSHIFT_ADVISOR_AGENT (default: the night's adapter). "" = no branch review.
+# the rulebook's agent.advisors, else the pre-0038 opt-in NIGHTSHIFT_BRANCH_REVIEW=1 on the night's
+# adapter. "" = no branch review. With `claude` the only real adapter (ADR 0044) there is at most one real advisor; `mock` slots stay repeatable.
 advisor_list() {
   local l="${NIGHTSHIFT_ADVISORS-${RB_ADVISORS:-}}"
   if [ -z "$l" ] && [ -z "${NIGHTSHIFT_ADVISORS+set}" ] && [ "${NIGHTSHIFT_BRANCH_REVIEW:-0}" = 1 ]; then
-    l="${NIGHTSHIFT_ADVISOR_AGENT:-$NIGHTSHIFT_AGENT}"
+    l="$NIGHTSHIFT_AGENT"
   fi
   printf '%s' "$l"
 }
@@ -2089,9 +2014,9 @@ resolve_advisors() {
   for a in "${parts[@]}"; do
     a="${a#"${a%%[![:space:]]*}"}"; a="${a%"${a##*[![:space:]]}"}"
     case "$a" in
-      claude|codex|mock) ;;
+      claude|mock) ;;
       "") log "invalid branch advisors '$raw': empty entry"; return 1 ;;
-      *)  log "invalid branch advisor '$a' (expected claude, codex, or mock)"; return 1 ;;
+      *)  log "invalid branch advisor '$a' (expected claude or mock)"; return 1 ;;
     esac
     if [ "$a" != mock ] && [[ "$seen" == *",$a,"* ]]; then
       log "invalid branch advisors '$raw': '$a' is listed twice"; return 1
@@ -2101,17 +2026,17 @@ resolve_advisors() {
 }
 
 # The model an advise stage on that adapter will request — part of the cache key, so a model change
-# re-reviews every branch. The mock has no model; each slot stands in for a distinct one.
+# re-reviews every branch. Claude advises on the review model (stage_model). The mock has no model;
+# each slot stands in for a distinct one.
 advisor_model() { # adapter slot
   case "$1" in
-    claude) printf '%s' "${NIGHTSHIFT_CLAUDE_MODEL-${RB_CLAUDE_MODEL:-}}" ;;
-    codex)  printf '%s' "${NIGHTSHIFT_CODEX_MODEL-${RB_CODEX_MODEL:-}}" ;;
+    claude) stage_model advise ;;
     *)      printf '%s-%s' "$1" "$2" ;;
   esac
 }
 
 advisor_label() { # adapter -> digest column header
-  case "$1" in claude) printf 'Claude' ;; codex) printf 'GPT' ;; *) printf '%s' "$1" ;; esac
+  case "$1" in claude) printf 'Claude' ;; *) printf '%s' "$1" ;; esac
 }
 
 # An answer is a verdict only if it names one of the three; anything else — no file, prose, a
@@ -2135,9 +2060,8 @@ advise_branches() {
   [ "${#ADVISORS[@]}" -gt 0 ] || return 0
   local -a advisors=("${ADVISORS[@]}")
   # Dynamic-scope override: run_agent reads the global NIGHTSHIFT_AGENT; a local here rebinds it per
-  # advisor without disturbing the night's own adapter. The quota fallback would swap an advisor for
-  # the very vendor it was chosen to differ from (ADR 0031), so it stays off.
-  local NIGHTSHIFT_AGENT="$NIGHTSHIFT_AGENT" NIGHTSHIFT_QUOTA_FALLBACK_AGENT="" ADVISE_SLOT=1 NIGHTSHIFT_ADVISE_BASE=""
+  # advisor without disturbing the night's own adapter.
+  local NIGHTSHIFT_AGENT="$NIGHTSHIFT_AGENT" ADVISE_SLOT=1 NIGHTSHIFT_ADVISE_BASE=""
   # Dead adapters are tracked per adapter (ADR 0038 §1), not in run_agent's night-wide slot: that
   # slot keeps only the FIRST death, so a second dead advisor went unrecorded and was called again on
   # every branch, and a full slot also switched off every advisor's empty-answer retry (ADR 0034).
@@ -2194,7 +2118,7 @@ advise_branches() {
           log "branch review: $adapter on $name — cached ($(jq -r .recommendation "$ans"))"
         elif [ -n "${dead[$adapter]+x}" ]; then
           # The adapter that failed to authenticate would die the same way on every branch; a
-          # DIFFERENT vendor is unaffected, so gate per adapter, not on the fact that one died.
+          # DIFFERENT adapter is unaffected, so gate per adapter, not on the fact that one died.
           log "branch review: $adapter skipped on $name — ${dead[$adapter]}"
         else
           if [ -z "$wt" ]; then
@@ -2310,6 +2234,17 @@ guard_ledger_valid() {
   exit 1
 }
 
+# ------------------------------------------------------------------- notify ----
+# One line to the operator through the host's command (NIGHTSHIFT_NOTIFY_CMD, `$1` = the line), here
+# when a running night stops for `agent_unavailable` — usually a spent quota mid-night (ADR 0044).
+# The launcher calls the same contract when its quota check pauses a night. Optional and never fatal:
+# a missing, failing or hanging command is logged and the night ends as it would have anyway.
+notify_operator() { # line
+  [ -n "${NIGHTSHIFT_NOTIFY_CMD:-}" ] || return 0
+  timeout "${NIGHTSHIFT_NOTIFY_TIMEOUT:-60}" sh -c "$NIGHTSHIFT_NOTIFY_CMD" sh "$1" \
+    </dev/null >/dev/null 2>&1 || log "notify command failed (rc=$?) — the operator was not told"
+}
+
 # --------------------------------------------------------------------- main ----
 main() {
   load_rulebook
@@ -2317,33 +2252,16 @@ main() {
     log "no agent configured. Set NIGHTSHIFT_AGENT or agent.primary in $RULEBOOK"
     return 2
   fi
-  case "${NIGHTSHIFT_QUOTA_FALLBACK_AGENT:-}" in
-    "") ;;
-    codex)
-      if [ "$NIGHTSHIFT_AGENT" != claude ]; then
-        log "invalid quota fallback route: $NIGHTSHIFT_AGENT -> codex (currently supported: claude -> codex)"
-        return 2
-      fi ;;
-    *)
-      log "invalid NIGHTSHIFT_QUOTA_FALLBACK_AGENT=$NIGHTSHIFT_QUOTA_FALLBACK_AGENT (currently supported: codex)"
-      return 2 ;;
-  esac
-  # The rulebook's `agent.review_agent` is validated by the parser; NIGHTSHIFT_REVIEW_AGENT is not,
-  # and an unrecognised value there would fail EVERY review stage one at a time (run_agent's unknown-
-  # adapter branch) instead of saying so once, before the night spends anything.
-  if [ "${NIGHTSHIFT_REVIEW_AGENT-${RB_REVIEW_AGENT:-}}" = auto ] && [ -z "${NIGHTSHIFT_REVIEW_VENDOR_CMD:-}" ]; then
-    log "review_agent: auto needs NIGHTSHIFT_REVIEW_VENDOR_CMD (a command printing claude or codex)"
-    return 2
-  fi
-  refresh_review_vendor
-  case "$(review_stage_agent)" in
-    claude|codex|mock) ;;
-    *) log "invalid review agent '$(review_stage_agent)' (expected claude, codex, or mock)"
+  # The rulebook's `agent.primary` is validated by the parser; NIGHTSHIFT_AGENT is not, and an
+  # unrecognised value there (a removed adapter, say) would fail EVERY stage one at a time instead
+  # of saying so once, before the night spends anything.
+  case "$NIGHTSHIFT_AGENT" in
+    claude|mock) ;;
+    *) log "unknown NIGHTSHIFT_AGENT=$NIGHTSHIFT_AGENT (expected claude or mock)"
        return 2 ;;
   esac
-  # Same for NIGHTSHIFT_ADVISORS / NIGHTSHIFT_ADVISOR_AGENT: the rulebook list is parser-validated,
+  # The same for NIGHTSHIFT_ADVISORS: the rulebook list is parser-validated,
   # an env typo would otherwise surface only as a "?" column in the morning.
-  local adv
   resolve_advisors || return 2
   warn_worktrees_in_home
   guard_state_remote_incoherence
@@ -2356,33 +2274,21 @@ main() {
   if [ -z "$MAX_RUN_SECONDS" ] && [ -n "${RB_MAX_RUN_MINUTES:-}" ]; then
     MAX_RUN_SECONDS=$(( RB_MAX_RUN_MINUTES * 60 ))
   fi
-  # Announce the configured route before verify_findings makes the first agent call. A fallback
-  # there changes NIGHTSHIFT_AGENT for the rest of the process, so logging afterwards
-  # would mislabel the fallback as the primary.
+  # Announce the configured models before verify_findings makes the first agent call (ADR 0020):
+  # the night's model, and the review model the Review stage and the branch advice request
+  # (ADR 0044). The reviewer's model is a governance fact the morning needs stated, not inferred from
+  # runs.jsonl.
   log "agent=$NIGHTSHIFT_AGENT prefix=$BRANCH_PREFIX · cap: max $MAX_OPEN undecided ${BRANCH_PREFIX} branches · run ceiling $MAX_RUN_BRANCHES · fix iters $MAX_FIX_ITER"
-  announce_agent_model() { # adapter
-    case "$1" in
-      claude) log_model_selection claude NIGHTSHIFT_CLAUDE_MODEL "$RB_CLAUDE_MODEL" ;;
-      codex)  log_model_selection codex  NIGHTSHIFT_CODEX_MODEL  "$RB_CODEX_MODEL"  ;;
-    esac
-  }
-  announce_agent_model "$NIGHTSHIFT_AGENT"
-  # A reviewer on another adapter is a governance fact the morning needs stated, not inferred from
-  # runs.jsonl: it is the difference between a fix judged by its own author and one judged by a
-  # different vendor (ADR 0031).
-  if [ "$(review_stage_agent)" != "$NIGHTSHIFT_AGENT" ]; then
-    log "review stage: $(review_stage_agent) (the rest of the night runs on $NIGHTSHIFT_AGENT)"
-    announce_agent_model "$(review_stage_agent)"
+  local adv uses_claude=0
+  [ "$NIGHTSHIFT_AGENT" = claude ] && uses_claude=1
+  for adv in ${ADVISORS[@]+"${ADVISORS[@]}"}; do [ "$adv" != claude ] || uses_claude=1; done
+  if [ "$uses_claude" = 1 ]; then
+    log_model_selection claude NIGHTSHIFT_CLAUDE_MODEL "$RB_CLAUDE_MODEL" claude_model
+    log_model_selection "claude review" NIGHTSHIFT_REVIEW_MODEL "$RB_REVIEW_MODEL" review_model \
+      "Review and branch advice use the claude model"
   fi
   if [ "${#ADVISORS[@]}" -gt 0 ]; then
     log "branch advisors: $(IFS=,; printf '%s' "${ADVISORS[*]}") (ADR 0038)"
-    for adv in "${ADVISORS[@]}"; do
-      [ "$adv" = "$NIGHTSHIFT_AGENT" ] || announce_agent_model "$adv"
-    done
-  fi
-  if [ -n "${NIGHTSHIFT_QUOTA_FALLBACK_AGENT:-}" ]; then
-    log "quota fallback: $NIGHTSHIFT_QUOTA_FALLBACK_AGENT (activated only after the night's agent could not reach its model $AGENT_WALL_LIMIT stages in a row)"
-    log_model_selection codex NIGHTSHIFT_CODEX_MODEL "$RB_CODEX_MODEL"
   fi
   local made=0 considered=0 findings=0 repo mode cfgbase id fp fnj iter verdict wt base base_sha b summary open="" pass=0 progress ship_progress stop_reason=ok disp rfind farr n_find k fd dim explore_rc n_partial fix_rc prc=0 review_rc hook_retry=0 retry_ok=0 retry_why="" frc=0 fix_cap=0
   local runner_pid="$BASHPID"
@@ -2677,7 +2583,7 @@ main() {
         git -C "$wt" add -A
         git -C "$wt" write-tree > "$fd/reviewed-tree" 2>/dev/null || rm -f "$fd/reviewed-tree"
         review_rc=0
-        run_review_stage "$wt" "$fd" || review_rc=$?
+        run_agent review "$wt" "$fd" || review_rc=$?
         if [ -n "$AGENT_FATAL" ]; then gate=agent-fatal; verdict=""; break; fi
         if ! review_artifact_usable "$fd"; then
           gate=stage-failed; verdict=""
@@ -2811,6 +2717,7 @@ main() {
   trap - TERM INT
   if [ -n "$AGENT_FATAL" ]; then
     log "night ABORTED: $AGENT_FATAL — $considered repos considered, nothing recorded."
+    notify_operator "nightshift $NIGHT stopped: $AGENT_FATAL"
     return 3
   fi
   if [ "$stop_reason" = branch_inventory_unavailable ]; then

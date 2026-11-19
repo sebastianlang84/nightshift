@@ -1,6 +1,6 @@
 # ADR 0031 — the reviewer may run on another adapter
 
-- Status: accepted
+- Status: superseded by [ADR 0044](0044-claude-only-opus-works-a-review-model-reviews.md) — the Codex adapter and the reviewer routing were removed on 2026-11-19; Review runs on a separate review model instead
 - Date: 2026-08-30
 - 2026-11-18 — the pi adapter was removed entirely (never used): neither Review nor Fix can run on pi; everything below about pi is history.
 - Related: [ADR 0019](0019-stage-context-excludes-operator-config.md),
@@ -57,4 +57,4 @@ fix. Pi Fix remains an explicit, sandboxed option; unconfined writes are never i
 provider choice. See [the threat model](../design/risk-analysis.md) for read and network limits.
 
 Regression coverage: test-pi-adapter.sh (removed 2026-11-18), test-pi-stage-failure.sh (removed 2026-11-18),
-`tests/test-rulebook-validation.sh`, and `tests/test-review-vendor.sh`.
+`tests/test-rulebook-validation.sh`, and test-review-vendor.sh (removed 2026-11-19).

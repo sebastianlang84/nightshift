@@ -5,7 +5,7 @@ unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this
 # The rulebook's `agent:` block declares which model a stage runs on (ADR 0020). It exists because
 # stage isolation (ADR 0019) drops the CLI's `user` settings scope, so a machine-wide pin in
 # ~/.claude/settings.json can no longer reach a stage — the host declares the model in its own
-# governance file instead. Precedence under test: NIGHTSHIFT_*_MODEL if SET (an explicitly EMPTY
+# governance file instead. Precedence under test: NIGHTSHIFT_CLAUDE_MODEL if SET (an explicitly EMPTY
 # value is the escape hatch and must beat the rulebook) > rulebook > nothing at all.
 # A stub `claude` on PATH records its own argv, NUL-separated so no flag value can be mistaken for
 # a separate argument.
@@ -24,29 +24,15 @@ printf '%s\0' "$@" > "$NIGHTSHIFT_TEST_ARGV"
 jq -nc '{type:"result",result:"{}",usage:{output_tokens:1},total_cost_usd:0.01}'
 EOF
 chmod +x "$TMP/bin/claude"
-# The codex half needs its own stub: the two adapters build argv independently, so a claude-only
-# test would pass while codex_run ignored the rulebook, used the wrong `${VAR:-}` form (breaking the
-# empty escape hatch), or mis-split the value.
-cat > "$TMP/bin/codex" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\0' "$@" > "$NIGHTSHIFT_TEST_ARGV"
-out=""; prev=""
-for a in "$@"; do [ "$prev" = -o ] && out="$a"; prev="$a"; done
-[ -z "$out" ] || printf '%s' '{}' > "$out"
-cat >/dev/null
-printf '%s\n' '{"type":"turn.completed","usage":{"output_tokens":1}}'
-EOF
-chmod +x "$TMP/bin/codex"
 export PATH="$TMP/bin:$PATH"
 
-# A rulebook that declares BOTH adapters' models. `repos:` must stay valid — load_rulebook fails
+# A rulebook that declares both models (the review model's routing is in test-review-model.sh). `repos:` must stay valid — load_rulebook fails
 # closed on a parse error, which would make every assertion below meaningless.
 cat > "$TMP/rulebook.yaml" <<EOF
 branch_prefix: nightshift/
 agent:
   claude_model: rulebook-claude-model
-  codex_model: rulebook-codex-model
+  review_model: rulebook-review-model
 limits:
   max_open_branches: 1
 recon:
@@ -65,9 +51,9 @@ export RULEBOOK="$TMP/rulebook.yaml"
 NIGHTSHIFT_SOURCED=1 source "$ROOT/bin/nightshift.sh"
 load_rulebook
 
-# The parser must surface BOTH adapters' keys, not just the one the claude path exercises below.
+# The parser must surface both keys, not just the one the recon stage exercises below.
 [ "$RB_CLAUDE_MODEL" = rulebook-claude-model ] || fail "rulebook claude_model not loaded: '$RB_CLAUDE_MODEL'"
-[ "$RB_CODEX_MODEL"  = rulebook-codex-model  ] || fail "rulebook codex_model not loaded: '$RB_CODEX_MODEL'"
+[ "$RB_REVIEW_MODEL" = rulebook-review-model ] || fail "rulebook review_model not loaded: '$RB_REVIEW_MODEL'"
 
 : > "$STATE_DIR/claude-settings.json"
 export NIGHTSHIFT_TEST_ARGV="$TMP/argv"
@@ -83,8 +69,6 @@ invoke() { # label adapter_fn
 index_of() { local i; for i in "${!ARGV[@]}"; do [ "${ARGV[$i]}" = "$1" ] && { echo "$i"; return; }; done; }
 show() { printf '[%s] ' "${ARGV[@]}"; }
 
-# Both adapters get the identical four-case treatment: the precedence rule is shared, but the argv
-# construction is not, so proving it once proves only one of them.
 check_precedence() { # adapter_fn env_var rulebook_var rulebook_value
   local fn="$1" env_var="$2" rb_var="$3" rb_value="$4" i
 
@@ -124,14 +108,15 @@ check_precedence() { # adapter_fn env_var rulebook_var rulebook_value
 }
 
 check_precedence claude_run NIGHTSHIFT_CLAUDE_MODEL RB_CLAUDE_MODEL rulebook-claude-model
-check_precedence codex_run  NIGHTSHIFT_CODEX_MODEL  RB_CODEX_MODEL  rulebook-codex-model
 
 # (f) the SELECTION is announced, never silent — a host that lost its pin must see it. What the run
 # can announce is the model it requests and where that came from; which model actually served the
 # stage is only knowable afterwards, from runs.jsonl `model_id`.
-out="$(log_model_selection claude NIGHTSHIFT_CLAUDE_MODEL rulebook-claude-model 2>&1)"
-case "$out" in *rulebook-claude-model*rulebook*) ;; *) fail "rulebook source not announced: $out" ;; esac
-out="$(log_model_selection claude NIGHTSHIFT_CLAUDE_MODEL "" 2>&1)"
+out="$(log_model_selection claude NIGHTSHIFT_CLAUDE_MODEL rulebook-claude-model claude_model 2>&1)"
+case "$out" in *rulebook-claude-model*"rulebook agent.claude_model"*) ;; *) fail "rulebook source not announced: $out" ;; esac
+out="$(log_model_selection claude NIGHTSHIFT_CLAUDE_MODEL "" claude_model 2>&1)"
 case "$out" in *"not declared"*) ;; *) fail "undeclared model not announced: $out" ;; esac
+out="$(NIGHTSHIFT_CLAUDE_MODEL= log_model_selection claude NIGHTSHIFT_CLAUDE_MODEL rulebook-claude-model claude_model 2>&1)"
+case "$out" in *"set empty"*) ;; *) fail "the empty escape hatch is not announced: $out" ;; esac
 
 echo "test-rulebook-agent-model: ok"

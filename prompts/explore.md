@@ -3,7 +3,7 @@ repository — up to the findings budget stated near the end of this prompt. Do 
 any files in this stage.
 
 Your output lands on an isolated `nightshift/*` branch, created in a throwaway git
-worktree — `main` is untouched until two reviewers of different vendors, who challenge each
+worktree — `main` is untouched until two independent reviewers on different models, who challenge each
 other's findings, agree to merge the branch and its tests pass; then it merges without a human.
 So optimize for VALUE, and give those reviewers what they need to judge. A branch is not free: the reviewer spends
 time on it, and every merged change can regress something that worked. Do not

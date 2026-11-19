@@ -118,9 +118,9 @@ case "$cmd" in
     # Bash startup files can export nightly routes again after these overrides are set.
     env -u BASH_ENV NIGHTSHIFT_HOME="$NIGHTSHIFT_HOME" \
         NIGHTSHIFT_AGENT=mock \
-        NIGHTSHIFT_REVIEW_AGENT=mock \
         NIGHTSHIFT_ADVISORS= \
-        NIGHTSHIFT_QUOTA_FALLBACK_AGENT= \
+        NIGHTSHIFT_QUOTA_CMD= \
+        NIGHTSHIFT_NOTIFY_CMD= \
         RULEBOOK="$SB/rulebook.yaml" \
         NIGHTSHIFT_STATE_DIR="$SB/state" \
         NIGHTSHIFT_RUNS_DIR="$SB/runs" \

@@ -1,6 +1,6 @@
 # ADR 0023 — an unusable agent aborts the night
 
-- Status: accepted
+- Status: accepted; **the quota fallback (amendment 2026-08-27) superseded by [ADR 0044](0044-claude-only-opus-works-a-review-model-reviews.md)** — no other adapter takes over, the night stops, and the wall count is kept per model
 - Date: 2026-08-06
 - Extends: [ADR 0001](0001-ports-and-adapters-runner.md) (the adapter seam this failure classification sits on)
 - Touches: [ADR 0010](0010-recon-dimensions-and-coverage-rotation.md) (the negative recon cache it must not poison) ·
@@ -92,7 +92,7 @@ adapter, Nightshift records and preserves the rejected attempt, retries the same
 that adapter, and keeps later stages on it. If the fallback fails, the existing fatal path still
 aborts before derived repo state is written. Credential failures and ordinary stage failures never
 switch vendors. This is host opt-in; unset keeps the original abort behavior.
-Regression coverage: [`tests/test-agent-wall-fallback.sh`](../../tests/test-agent-wall-fallback.sh). (Since 2026-10-31 the trigger is the wall rule below, not the event.)
+Regression coverage: test-agent-wall-fallback.sh (removed 2026-11-19). (Since 2026-10-31 the trigger is the wall rule below, not the event.)
 
 ### Amendment 2026-10-31 — one test for every adapter
 
@@ -113,7 +113,7 @@ nights where the agent was blocked from the first stage on; none occurred in a h
 reset time is parsed any more; the digest points to the stage's raw output, which carries the CLI's
 own message.
 Regression coverage: [`tests/test-agent-wall-abort.sh`](../../tests/test-agent-wall-abort.sh),
-[`tests/test-agent-wall-fallback.sh`](../../tests/test-agent-wall-fallback.sh),
+test-agent-wall-fallback.sh (removed 2026-11-19),
 [`tests/test-agent-wall-reviewer.sh`](../../tests/test-agent-wall-reviewer.sh).
 
 ### Amendment 2026-08-24 — the signatures read the CLI, not the repo

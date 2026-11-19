@@ -21,6 +21,10 @@ aborted_streak() { # -> "<count> <newest-aborted> <oldest-aborted> <last-complet
     [[ "$b" < "$NIGHT" ]] || continue
     if grep -q '^- \*\*ABORTED:' "$f" 2>/dev/null; then
       count=$((count + 1)); oldest="$b"; [ "$newest" = - ] && newest="$b"
+    elif grep -q '^- \*\*PAUSED:' "$f" 2>/dev/null && ! grep -q '^- agent:' "$f" 2>/dev/null; then
+      # A night the launcher's quota check paused (ADR 0044) is a deliberate pause, not a lost
+      # night and not a serviced one: skipped like a missing date.
+      continue
     else
       last_ok="$b"; break
     fi
@@ -35,7 +39,7 @@ write_digest() { # made open status [advice]
     echo
     local fcount=0
     [ -f "$LEDGER" ] && fcount=$(jq -s --arg n "$NIGHT" '[.[]|select(.night==$n and .outcome=="finding")]|length' "$LEDGER" 2>/dev/null || echo 0)
-    echo "- agent: \`$RUN_AGENT_ROUTE\` · shipped this run: ${made} · surfaced (findings): ${fcount} · open (awaiting a merge decision): ${open}/${MAX_OPEN} (cap)"
+    echo "- agent: \`$NIGHTSHIFT_AGENT\` · shipped this run: ${made} · surfaced (findings): ${fcount} · open (awaiting a merge decision): ${open}/${MAX_OPEN} (cap)"
     # A repo whose suite is red on its unchanged base was skipped before Explore (base_precheck). It
     # stays blocked until someone repairs the suite, so it leads the digest.
     local b brepo bsha bstate blog
@@ -53,9 +57,8 @@ write_digest() { # made open status [advice]
     # An aborted night must announce itself in the ONE artifact the operator actually reads in the
     # morning. Without this the digest of a credential outage is indistinguishable from a clean
     # fleet: same "shipped: 0", same empty tables, no reason given.
-    # Name the adapter that DIED, not the night's: a routed Codex reviewer runs under a `local`
-    # NIGHTSHIFT_AGENT that is gone by now. And give the remedy for the cause run_agent found — an
-    # agent that could not reach its model may be logged in with its quota spent, so name both.
+    # Name the adapter that DIED (run_agent records it), and give the remedy for the cause it found —
+    # an agent that could not reach its model may be logged in with its quota spent, so name both.
     if [ "$status" = agent_unavailable ]; then
       local dead="${AGENT_FATAL_AGENT:-$NIGHTSHIFT_AGENT}" remedy
       case "$AGENT_FATAL" in
@@ -285,7 +288,7 @@ interrupted_digest() { # signal exit-code; main's counters are dynamically scope
     echo "# nightshift digest — $NIGHT"
     echo
     echo "- **ABORTED: interrupted by SIG$signal** — the run did not complete."
-    echo "- agent: \`$RUN_AGENT_ROUTE\` · shipped this run: ${made:-0} · last observed open: ${open:-unknown}/${MAX_OPEN} (cap)"
+    echo "- agent: \`$NIGHTSHIFT_AGENT\` · shipped this run: ${made:-0} · last observed open: ${open:-unknown}/${MAX_OPEN} (cap)"
     echo "- The in-flight operation has no final verdict. Only persisted results are listed; worktrees are retained for inspection."
     echo
     if [ -f "$LEDGER" ]; then

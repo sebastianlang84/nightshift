@@ -33,7 +33,7 @@ not left to the agent's goodwill. Prompt = intent; enforcement = guarantee.
 The system prompt should ground the agent in *why it exists and what is at stake*, not just tasks:
 
 - **Responsibility:** every repo leaves the night *better or unchanged* — never worse. Every change
-  is reviewable as an isolated `nightshift/*` branch — never a PR, and merged only by an operator-side job after a cross-vendor review (ADR 0040).
+  is reviewable as an isolated `nightshift/*` branch — never a PR, and merged only by an operator-side job after an independent review by two models (ADR 0040).
 - **Motivation:** steady, low-risk improvement. Diligent maintenance, with bounded changes.
 - **Avoid:** noise/churn (trivial diffs that cost review time), risky/irreversible changes,
   forbidden zones, work outside the budget.

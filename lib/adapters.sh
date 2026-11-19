@@ -1,55 +1,24 @@
 #!/usr/bin/env bash
 # Sourced by bin/nightshift.sh after its path globals are initialized.
 
-# The Runner-owned CODEX_HOME a codex stage runs under (ADR 0019) — echoes the path, empty on
-# failure. It deliberately contains NOTHING but a symlink to the operator's credentials: no
-# AGENTS.md (the leak this closes), no config.toml, no skills, no memories, no session history.
-# NIGHTSHIFT_CODEX_STAGE_HOME overrides the location; set it EMPTY to run under the operator's real
-# home instead (escape hatch — reopens the leak). Cheap enough to re-assert per stage, and doing so
-# self-heals a stale symlink after `codex login`.
-codex_stage_home() {
-  local real stage
-  real="${CODEX_HOME:-$HOME/.codex}"
-  stage="${NIGHTSHIFT_CODEX_STAGE_HOME-$STATE_DIR/codex-home}"
-  [ -n "$stage" ] || { printf '%s' "$real"; return 0; }
-  mkdir -p "$stage" || { log "codex stage home $stage not creatable"; return 1; }
-  # Same path = the operator's own home; never relink credentials onto themselves.
-  # Reaching the operator's own directory is a supported escape hatch, but never a silent one: it
-  # reopens the AGENTS.md leak this function exists to close, and a stage worknote is pushed.
-  [ "$(cd "$stage" && pwd -P)" != "$(cd "$real" 2>/dev/null && pwd -P || echo "$real")" ] || {
-    log "WARNING: codex stage home IS the operator's codex directory ($real) — stages inherit its AGENTS.md"
-    printf '%s' "$stage"; return 0; }
-  if [ -e "$real/auth.json" ]; then
-    ln -sfn "$real/auth.json" "$stage/auth.json"
-  else
-    # No credential file to carry over (e.g. API-key-in-env auth). Isolating still beats leaking:
-    # codex fails loudly on a real auth problem, whereas falling back to the real home would fail
-    # SILENTLY — as a leak nobody sees until it is in a commit body.
-    log "codex: no auth.json under $real — stage home carries no credentials"
-  fi
-  printf '%s' "$stage"
-}
-
 # Credential-failure signatures, matched against what the CLI says about ITSELF: the stage's
 # captured stderr, plus the CLI's own verdict inside raw stdout (the claude CLI reports the failure
-# as a JSON result object there, codex on stderr). Deliberately broad, because a false negative
-# costs a forged clean fleet.
-AGENT_AUTH_RE='not logged in|/login|authentication_failed|invalid api key|unauthorized|oauth token|credentials? (not found|expired|invalid)|codex login'
+# as a JSON result object there). Deliberately broad, because a false negative costs a forged clean
+# fleet.
+AGENT_AUTH_RE='not logged in|/login|authentication_failed|invalid api key|unauthorized|oauth token|credentials? (not found|expired|invalid)'
 
 # The signatures are PROSE, and prose matched against a stage's whole raw stdout matches the prose
-# of the repo under review. On 2026-08-24 an explore lens read bin/nightshift.sh — including line
-# 331, which self-heals a stale symlink after `codex login` — and AGENT_AUTH_RE read that as the
-# account being logged out. The night aborted after one stage while .usage_explore recorded 29,600
-# output tokens, 2.4M cache reads and $3.32 spent; a CLI that cannot authenticate spends nothing.
-# The pattern sits latent in 33 of 197 archived raw streams, and goes off whenever a stage fails to
-# parse for any other reason.
+# of the repo under review. On 2026-08-24 an explore lens read bin/nightshift.sh — including a
+# comment about re-running a CLI's login — and AGENT_AUTH_RE read that as the account being logged
+# out. The night aborted after one stage while .usage_explore recorded 29,600 output tokens, 2.4M
+# cache reads and $3.32 spent; a CLI that cannot authenticate spends nothing. The pattern sits
+# latent in 33 of 197 archived raw streams, and goes off whenever a stage fails to parse for any
+# other reason.
 #
 # So the raw stream is no longer searched whole. claude's is a JSON event array in which the CLI's
 # own verdict is the `result` event; the assistant/user/system events are the model's work, i.e.
-# the repo's words. codex's shape is unverified here (no codex night has run), so its raw passes
-# through unfiltered rather than through a guess — a CLI signature is claimed only once a run has
-# shown it. A raw stream that is not a parseable event array is not model output either, and passes
-# through whole: that is the shape of the 2026-08-05 outage, where the CLI printed one line.
+# the repo's words. A raw stream that is not a parseable event array is not model output either, and
+# passes through whole: that is the shape of the 2026-08-05 outage, where the CLI printed one line.
 agent_diagnosis() { # raw_file -> what the CLI said about the run, on stdout
   local f="$1" n
   [ -s "$f" ] || return 0
@@ -79,8 +48,8 @@ agent_credentials_failed() { # errfile rawfile -> 0 if the CLI's own output repo
   agent_diagnosis "$rawf" | grep -qiE "$AGENT_AUTH_RE"
 }
 
-# Second, adapter-independent riddle-out, and the one that covers codex too: a stage that reached
-# the API cannot have failed to authenticate. The adapters write .usage_$stage from the CLI's own
+# Second, adapter-independent riddle-out: a stage that reached the API cannot have failed to
+# authenticate. The adapters write .usage_$stage from the CLI's own
 # counters, so a non-zero token count is the CLI's receipt for a completed request.
 agent_reached_the_api() { # usage_file -> 0 if the run spent tokens or money
   local f="$1"
@@ -288,6 +257,25 @@ materialize_stage_output() { # stage item_dir
   return $rc
 }
 
+# The model a stage requests, "" = pass no --model and let the CLI resolve its own default. The work
+# stages use the night's model: NIGHTSHIFT_CLAUDE_MODEL if SET (an explicitly empty value is the
+# escape hatch — no --model), else the rulebook's `agent.claude_model` (ADR 0020), else nothing. The
+# rulebook layer matters because stage isolation (ADR 0019) drops the CLI's `user` settings scope,
+# so a pin in ~/.claude/settings.json cannot reach a stage; the host declares the model in its own
+# governance file instead. nightshift still commits no model of its own — rulebook.yaml is
+# host-owned and untracked.
+# The judging stages — Review and the branch advice — use the review model instead when one resolves
+# (ADR 0044): NIGHTSHIFT_REVIEW_MODEL if SET, else `agent.review_model`. An explicitly empty
+# NIGHTSHIFT_REVIEW_MODEL switches the review model off for the run, so those stages fall back to the
+# night's model like every other stage.
+stage_model() { # stage -> model id or ""
+  local review="${NIGHTSHIFT_REVIEW_MODEL-${RB_REVIEW_MODEL:-}}"
+  case "$1" in
+    review|advise) [ -z "$review" ] || { printf '%s' "$review"; return 0; } ;;
+  esac
+  printf '%s' "${NIGHTSHIFT_CLAUDE_MODEL-${RB_CLAUDE_MODEL:-}}"
+}
+
 # ---- claude adapter (first-party CLI headless, ADR 0003) ----
 # The agent only reads/edits files; the Runner owns all git (branch/commit/push).
 # Sandbox default uses --dangerously-skip-permissions (throwaway repo; git-level
@@ -310,14 +298,9 @@ claude_run() { # stage workdir item_dir
   # that is hit routinely is the wrong ceiling: 60 still hard-stops a loop, but leaves a navigating
   # stage room to finish. Every abort is now visible in the digest rather than read as "found nothing".
   local flags="${NIGHTSHIFT_CLAUDE_FLAGS:---dangerously-skip-permissions --max-turns 60}"
-  # Which model this stage runs on. Precedence: the env var if SET (an explicitly empty value is the
-  # escape hatch — pass no --model), else the rulebook's `agent.claude_model` (ADR 0020), else
-  # nothing and the CLI resolves its own default. The rulebook layer matters because stage isolation
-  # (ADR 0019) drops the CLI's `user` settings scope, so a pin in ~/.claude/settings.json cannot
-  # reach a stage; the host declares the model in its own governance file instead. nightshift still
-  # commits no model of its own — rulebook.yaml is host-owned and untracked.
+  # Which model this stage runs on (stage_model above; ADR 0020, ADR 0044).
   local -a model_arg=()
-  model="${NIGHTSHIFT_CLAUDE_MODEL-${RB_CLAUDE_MODEL:-}}"
+  model="$(stage_model "$stage")"
   [ -z "$model" ] || model_arg=(--model "$model")
   # Stage isolation from the OPERATOR's personal Claude Code config (docs/design/hook-spec.md).
   # `--setting-sources` selects which settings SCOPES the CLI loads; dropping `user` drops both
@@ -399,113 +382,6 @@ claude_run() { # stage workdir item_dir
   materialize_stage_output "$stage" "$id" || parse_rc=$?
   # Preserve the CLI's own nonzero status, but only AFTER materializing any valid partial result it
   # returned. main() can then keep a grounded finding while still logging that Explore hit a limit.
-  [ "$rc" -eq 0 ] || return "$rc"
-  return "$parse_rc"
-}
-
-# ---- codex adapter (first-party CLI headless, ADR 0003) ----
-# Recon/Explore/Review run read-only. Fix can write and execute commands only inside the disposable
-# worktree, with network disabled. The Runner still owns branch/commit/push.
-#
-# Fix-stage confinement — the two adapters differ, deliberately, and NOT symmetrically:
-#   claude: capability-restricted to Read,Grep,Glob,Write,Edit — NO Bash, so it cannot run any
-#           command (git or otherwise). Its PreToolUse guard confines Write/Edit paths to the
-#           Runner-injected worktree root, including absolute paths.
-#   codex:  OS-level `--sandbox workspace-write` — CAN exec commands (incl. git) but only inside the
-#           worktree, and network is off. Out-of-tree writes are blocked by the sandbox.
-# Neither can push (the Runner owns push; the pre-push hook + PreToolUse guard hold regardless), so
-# neither is exploitable to reach main — but their fix-stage boundaries are enforced by different
-# mechanisms (tool capability vs OS sandbox) with different residual gaps. See risk-analysis.md.
-codex_run() { # stage workdir item_dir
-  local stage="$1" wd="$2" id="$3" prompt sandbox events model effort rc=0 parse_rc=0
-  local -a args=(--ask-for-approval never exec --ephemeral --ignore-user-config --ignore-rules
-    --strict-config --json -o "$id/$stage.out")
-  prompt="$(stage_prompt "$stage" "$wd" "$id")"
-  case "$stage" in
-    fix) sandbox=workspace-write ;;
-    *)   sandbox=read-only ;;
-  esac
-  args+=(--sandbox "$sandbox")
-  [ "$stage" != fix ] || args+=(-c 'sandbox_workspace_write.network_access=false')
-  # Same precedence as the claude half: env if SET (empty = pass no --model), else the rulebook's
-  # `agent.codex_model` (ADR 0020), else the CLI default.
-  model="${NIGHTSHIFT_CODEX_MODEL-${RB_CODEX_MODEL:-}}"
-  [ -z "$model" ] || args+=(--model "$model")
-  # Effort resolves the same way: env if SET (empty = pass none), else `agent.codex_effort`, else
-  # the CLI default.
-  effort="${NIGHTSHIFT_CODEX_REASONING_EFFORT-${RB_CODEX_EFFORT:-}}"
-  [ -z "$effort" ] || args+=(-c "model_reasoning_effort=\"$effort\"")
-  # Stage isolation, codex half (ADR 0019). `--ignore-user-config` covers $CODEX_HOME/config.toml and
-  # `--ignore-rules` the execpolicy files, but NEITHER covers $CODEX_HOME/AGENTS.md — the operator's
-  # global instructions leak into the stage verbatim (verified 2026-08-02, codex-cli 0.145.0). The
-  # only lever that separates the scopes is the home itself: a Runner-owned CODEX_HOME with no
-  # AGENTS.md in it drops the global file while the TARGET repo's own AGENTS.md still loads. The
-  # config-level knob is the wrong way round — `project_doc_max_bytes=0` kills the repo's AGENTS.md
-  # and leaves the global one standing. Auth is the one thing the isolated home must keep: codex
-  # resolves credentials under CODEX_HOME, so auth.json is symlinked in (verified: a real API call
-  # succeeds through it). No auth.json -> still isolate, and let codex report the auth failure
-  # itself rather than silently reopening the leak.
-  local cx_home
-  cx_home="$(codex_stage_home)"
-  [ -n "$cx_home" ] || return 2   # configuration refusal, not a wall (see claude_run)
-
-  # Same capture contract as the claude half: stderr to $stage.err, unparsed stdout to .raw_$stage
-  # (here the event stream, which is also what codex uses to report an auth failure), so run_agent
-  # can name the reason a stage died and spot a credential failure. Codex's stderr previously landed
-  # unlabelled in the night log; per stage and per item dir it is attributable.
-  events="$id/.raw_$stage"
-  # The repo's toolchain goes in FRONT of PATH for this subprocess alone (ADR 0037): under the
-  # unattended launcher /usr/bin comes first and its node is v18, which a Node 24 repo's pnpm refuses
-  # to start under. This prefix applies only to Codex, so the Runner's own
-  # unqualified calls keep resolving to the system dirs (R10/N4). The binary is resolved first, so
-  # the prepended directory can never decide which `codex` runs.
-  local cx_bin
-  local -a cx_env=()
-  # Anything but an absolute executable file (unresolved, a relative PATH entry that would resolve
-  # inside the worktree after the cd, a function) becomes a path that cannot exist, so it fails as
-  # a missing codex did before (127) instead of being found in the prepended directory.
-  cx_bin="$(command -v codex 2>/dev/null)" || cx_bin=""
-  case "$cx_bin" in /*) [ -x "$cx_bin" ] || cx_bin=/nonexistent/codex ;; *) cx_bin=/nonexistent/codex ;; esac
-  # pnpm records the store it installed from and, from pnpm 11 on, reinstalls before every `pnpm
-  # run`/`exec` when the store it resolves differs. Inside the gate's sandbox HOME is a separate
-  # mount, so the setup's store lands in `<worktree>/.pnpm-store`; outside it pnpm would resolve the
-  # operator's shared store, which this sandbox cannot write ("could not open its store database").
-  # So a Fix stage whose setup left a store in the worktree is pointed at that store — inside the
-  # worktree, ignored by the repo, and purged before the gate like every other ignored file.
-  [ "$stage" != fix ] || [ ! -d "$wd/.pnpm-store" ] || cx_env+=("pnpm_config_store_dir=$wd/.pnpm-store")
-  # Every variable goes through `env`, which is resolved on the Runner's PATH before the prefixed
-  # one takes effect.
-  (cd "$wd" && printf '%s' "$prompt" | \
-    env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="$HOOKS_DIR" \
-      CODEX_HOME="$cx_home" PATH="${NIGHTSHIFT_CODEX_PATH:+$NIGHTSHIFT_CODEX_PATH:}$PATH" \
-      ${cx_env[@]+"${cx_env[@]}"} "$cx_bin" "${args[@]}" - > "$events" 2>"$id/$stage.err") || rc=$?
-  # Telemetry sidecar for run_agent — same object contract as the claude adapter. Codex's event
-  # stream is no more stable than claude's JSON: a payload sits either at the top level of an event
-  # or wrapped in `.msg`, so consider both for every event. Usage rides on `turn.completed` (with
-  # `token_count`/`total_token_usage` as the older shape) and is cumulative, hence `last`. The model
-  # ID is announced once by a session/thread event. Codex's `input_tokens` INCLUDES
-  # `cached_input_tokens`, unlike claude's, and codex reports neither cost nor the context window it
-  # ran with — those degrade to null rather than being inferred. See documentation-system.md.
-  jq -sc '
-    def evs: [.[] | select(type == "object") | ., (.msg | select(type == "object"))];
-    def usage: [ evs[]
-                 | (select(.type == "turn.completed") | .usage)
-                 , (select(.type == "token_count")   | .info.total_token_usage)
-                 | select(type == "object") ] | last // {};
-    def modelid: [ evs[]
-                   | (try (.model, .session.model, .thread.model, .turn.model) catch empty)
-                   | select(type == "string" and . != "") ] | last // null;
-    usage as $u |
-    { model_id: modelid,
-      output_tokens:         ($u.output_tokens // null),
-      input_tokens:          ($u.input_tokens // null),
-      cache_read_tokens:     ($u.cached_input_tokens // $u.cache_read_input_tokens // null),
-      cache_creation_tokens: null,
-      context_window:        null,
-      cost_usd:              null,
-      model_cost_usd:        null }' \
-    "$events" > "$id/.usage_$stage" 2>/dev/null || true
-  materialize_stage_output "$stage" "$id" || parse_rc=$?
   [ "$rc" -eq 0 ] || return "$rc"
   return "$parse_rc"
 }

@@ -90,13 +90,8 @@ reject "an agent key with no colon" 'agent:
   claude_model'                     'agent: expected `key: value`'
 reject "an unterminated quote"      'agent:
   claude_model: "m'                 "unterminated quoted value"
-# `review_agent` names an ADAPTER, not a model (ADR 0031), so it is validated against the set the
-# Runner implements. A typo here would leave Review on the night's own adapter with nothing said —
-# i.e. the fix judged by its own author, which is exactly what the key exists to prevent.
-reject "an unknown review agent"    'agent:
-  review_agent: gemini'             "unknown adapter 'gemini'"
-reject "an empty review agent"      'agent:
-  review_agent:'                    "agent.review_agent is empty"
+reject "an empty review model"      'agent:
+  review_model:'                    "agent.review_model is empty"
 reject "an unknown primary agent"   'agent:
   primary: gemini'                  "agent.primary: unknown adapter 'gemini'"
 # The pi adapter was removed on 2026-11-18; a rulebook that still names it must fail, not fall back.
@@ -106,14 +101,16 @@ reject "a removed pi key"            'agent:
   pi_model: x'                       "pi_model"
 reject "an empty primary agent"     'agent:
   primary:'                         "agent.primary is empty"
-# codex does not check a reasoning effort itself — an unknown one passes `--strict-config` and reaches
-# the API — so the parser holds the closed set. `High` and `extra-high` are the plausible typos.
-reject "an unknown codex effort"     'agent:
-  codex_effort: extra-high'         "agent.codex_effort: unknown effort 'extra-high'"
-reject "a capitalised codex effort"  'agent:
-  codex_effort: High'               "agent.codex_effort: unknown effort 'High'"
-reject "an empty codex effort"       'agent:
-  codex_effort:'                    "agent.codex_effort is empty"
+# The Codex adapter and the reviewer routing were removed on 2026-11-19 (ADR 0044); a rulebook that
+# still names them must fail, not silently run the night on something else.
+reject "the removed codex adapter"   'agent:
+  primary: codex'                    "agent.primary: unknown adapter 'codex'"
+reject "a removed codex model key"   'agent:
+  codex_model: x'                    "agent: unknown key 'codex_model'"
+reject "a removed codex effort key"  'agent:
+  codex_effort: high'                "agent: unknown key 'codex_effort'"
+reject "the removed review routing"  'agent:
+  review_agent: claude'              "agent: unknown key 'review_agent'"
 
 # The same standard applies to EVERY mapping section, not just `agent:`. Each section's key set is
 # closed — the parser reads exactly those keys — so a key outside one is a typo, and the only other
@@ -213,10 +210,8 @@ grep -q "indent with spaces, not tabs" "$TMP/stderr"
 cat > "$TMP/agent-ok.yaml" <<'EOF'
 agent:   # the model this host runs its nights on
   claude_model: "claude-opus-5"
-  codex_model: 'gpt-5 #2'
-  codex_effort: xhigh
-  primary: codex
-  review_agent: claude
+  review_model: 'claude-fable #2'
+  primary: mock
 repos:
   - path: /srv/example
     mode: findings-only
@@ -226,28 +221,19 @@ grep -qx "$(printf 'claude_model\tclaude-opus-5')" "$TMP/stdout" || {
   echo "quoted claude_model not unquoted: $(grep claude_model "$TMP/stdout")" >&2
   exit 1
 }
-grep -qx "$(printf 'codex_model\tgpt-5 #2')" "$TMP/stdout" || {
-  echo "quoted codex_model with '#' mangled: $(grep codex_model "$TMP/stdout")" >&2
+grep -qx "$(printf 'review_model\tclaude-fable #2')" "$TMP/stdout" || {
+  echo "quoted review_model with '#' mangled: $(grep review_model "$TMP/stdout")" >&2
   exit 1
 }
-grep -qx "$(printf 'codex_effort\txhigh')" "$TMP/stdout" || {
-  echo "codex_effort not emitted: $(grep codex_effort "$TMP/stdout")" >&2
-  exit 1
-}
-grep -qx "$(printf 'primary_agent\tcodex')" "$TMP/stdout" || {
+grep -qx "$(printf 'primary_agent\tmock')" "$TMP/stdout" || {
   echo "primary_agent not emitted: $(grep primary_agent "$TMP/stdout")" >&2
   exit 1
 }
 printf 'repos:\n  - path: /srv/example\n    mode: findings-only\n' > "$TMP/no-agent.yaml"
 python3 "$ROOT/lib/parse_rulebook.py" "$TMP/no-agent.yaml" > "$TMP/stdout-no-agent"
-# Omitted, the effort is emitted EMPTY, which the Runner reads as "let the CLI default apply".
-grep -qx "$(printf 'codex_effort\t')" "$TMP/stdout-no-agent" || {
-  echo "an omitted codex_effort was not emitted empty: $(grep codex_effort "$TMP/stdout-no-agent")" >&2
-  exit 1
-}
-
-grep -qx "$(printf 'review_agent\tclaude')" "$TMP/stdout" || {
-  echo "review_agent not emitted: $(grep review_agent "$TMP/stdout")" >&2
+# Omitted, the review model is emitted EMPTY, which the Runner reads as "review on claude_model".
+grep -qx "$(printf 'review_model\t')" "$TMP/stdout-no-agent" || {
+  echo "an omitted review_model was not emitted empty: $(grep review_model "$TMP/stdout-no-agent")" >&2
   exit 1
 }
 
@@ -257,15 +243,20 @@ grep -qx "$(printf 'review_agent\tclaude')" "$TMP/stdout" || {
   export NIGHTSHIFT_STATE_DIR="$TMP/state" NIGHTSHIFT_RUNS_DIR="$TMP/runs"
   export NIGHTSHIFT_DIGEST_DIR="$TMP/digests" NIGHTSHIFT_WORKTREES="$TMP/worktrees"
   export RULEBOOK="$TMP/agent-ok.yaml"
-  route='source "$1"; load_rulebook; printf "%s %s" "$NIGHTSHIFT_AGENT" "$RUN_PRIMARY_AGENT"'
-  [ "$(env -u NIGHTSHIFT_AGENT bash -c "$route" _ "$ROOT/bin/nightshift.sh")" = "codex codex" ]
-  [ "$(NIGHTSHIFT_AGENT=claude bash -c "$route" _ "$ROOT/bin/nightshift.sh")" = "claude claude" ]
+  route='source "$1"; load_rulebook; printf "%s" "$NIGHTSHIFT_AGENT"'
+  [ "$(env -u NIGHTSHIFT_AGENT bash -c "$route" _ "$ROOT/bin/nightshift.sh")" = mock ]
+  [ "$(NIGHTSHIFT_AGENT=claude bash -c "$route" _ "$ROOT/bin/nightshift.sh")" = claude ]
+  # An env value the parser never sees is refused once, before the night spends anything.
+  if NIGHTSHIFT_AGENT=codex bash -c 'source "$1"; main' _ "$ROOT/bin/nightshift.sh" >/dev/null 2>"$TMP/codex-env.err"; then
+    exit 1
+  fi
+  grep -q 'unknown NIGHTSHIFT_AGENT=codex (expected claude or mock)' "$TMP/codex-env.err"
 
   cron_env="$(sed -n '1,/^# Make the tools nightshift invokes findable/p' "$ROOT/bin/nightshift-cron.sh")"
   cron_env+=$'\nprintf "%s" "${NIGHTSHIFT_AGENT:-<unset>}"'
   [ "$(env -u NIGHTSHIFT_AGENT bash -c "$cron_env")" = "<unset>" ]
   [ "$(env -u NIGHTSHIFT_AGENT RULEBOOK="$TMP/no-agent.yaml" bash -c "$cron_env")" = claude ]
-  [ "$(NIGHTSHIFT_AGENT=codex RULEBOOK="$TMP/no-agent.yaml" bash -c "$cron_env")" = codex ]
+  [ "$(NIGHTSHIFT_AGENT=mock RULEBOOK="$TMP/no-agent.yaml" bash -c "$cron_env")" = mock ]
 )
 
 # Standard YAML permits sequence items at the same indentation as their section key. This used to

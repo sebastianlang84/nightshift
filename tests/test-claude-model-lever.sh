@@ -2,8 +2,7 @@
 set -euo pipefail
 unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
-# NIGHTSHIFT_CLAUDE_MODEL is an OPTIONAL per-host lever (mirrors NIGHTSHIFT_CODEX_MODEL), not a
-# second default: unset MUST invoke `claude` with no --model at all, so the nightly model stays
+# NIGHTSHIFT_CLAUDE_MODEL is an OPTIONAL per-host lever, not a second default: unset MUST invoke `claude` with no --model at all, so the nightly model stays
 # whatever the CLI itself resolves. Set MUST pass --model <value> through verbatim. A stub `claude`
 # on PATH records its own argv; the adapter is exercised directly via NIGHTSHIFT_SOURCED=1.
 

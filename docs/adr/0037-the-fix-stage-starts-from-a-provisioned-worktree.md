@@ -1,6 +1,6 @@
 # ADR 0037 — the Fix stage starts from a provisioned worktree
 
-- Status: accepted
+- Status: accepted; **the Codex toolchain PATH and the pnpm-store setting superseded by [ADR 0044](0044-claude-only-opus-works-a-review-model-reviews.md)** — the Codex adapter was removed on 2026-11-19, and a Claude Fix stage has no shell to use what `setup_cmd` installs
 - Date: 2026-10-02
 - Extends: [ADR 0026](0026-the-ship-gate-runs-in-a-sandbox.md) (a second command runs in the gate's sandbox) · [ADR 0028](0028-gate-egress-goes-through-a-vetting-proxy.md) (with the same egress)
 - Touches: [ADR 0022](0022-a-repos-own-tests-gate-the-ship.md) (the gate now purges ignored files before it runs) · [ADR 0027](0027-the-reviewed-tree-is-what-ships.md) (a setup may not add to the reviewed tree)
@@ -76,4 +76,4 @@ For example, a repository entry can declare `setup_cmd: bash scripts/worktree-se
   stage can write, where a relative entry would resolve to a planted binary.
 
 Covered by `tests/test-fix-stage-provisioning.sh`, `tests/test-reviewed-tree-ships.sh` and
-`tests/test-codex-adapter.sh`.
+test-codex-adapter.sh (removed 2026-11-19; its PATH-filter check moved to test-runner-path.sh).

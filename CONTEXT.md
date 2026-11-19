@@ -26,8 +26,8 @@ The system needs no server or database service.
 
 Recon prioritizes review dimensions from repository evidence. Explore traces a flow and checks
 invariants, returning ranked findings or a valid empty result. Each finding gets its own
-disposable worktree. Fix and Review iterate within configured limits, optionally using separate
-vendors. A repository's declared test command runs in a sandbox before Finalize pushes the
+disposable worktree. Fix and Review iterate within configured limits, Review optionally on a
+separate review model. A repository's declared test command runs in a sandbox before Finalize pushes the
 reviewed tree to a `nightshift/*` branch.
 
 `findings-only` reports without pushing. Verify can close earlier findings after their target
@@ -41,8 +41,8 @@ PR creation is optional, disabled by default, and requires separate API credenti
 
 ## Boundaries
 
-The runner owns branch creation, commit, and push. Each adapter enforces its own tool and write
-boundary. The ship gate executes candidate content and uses bubblewrap without host credentials,
+The runner owns branch creation, commit, and push. The Claude adapter enforces its tool and write
+boundary through per-stage tool profiles and a `PreToolUse` guard. The ship gate executes candidate content and uses bubblewrap without host credentials,
 with network disabled unless public egress is explicitly enabled through a vetting proxy.
 These boundaries do not prevent all secret reads by agents or all prompt injection; see the
 [threat model](docs/design/risk-analysis.md).

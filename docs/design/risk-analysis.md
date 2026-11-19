@@ -28,10 +28,10 @@ An optional external merge job is a separate authorization decision ([ADR 0040](
 
 | ID | Control | Mechanism |
 | --- | --- | --- |
-| C1 | Stage capabilities | Claude receives a tool allowlist without Bash. Codex uses read-only or workspace-write sandboxing, with Fix network disabled. |
+| C1 | Stage capabilities | Claude receives a tool allowlist without Bash. |
 | C2 | Disposable worktrees | Each work item runs in a detached worktree; the target checkout is not the edit destination. |
 | C3 | Push confinement | `hooks/pre-push` checks Git's resolved refs, refusing destinations outside `nightshift/*`, deletion, tag pushes, and non-fast-forward updates. |
-| C4 | Adapter write boundaries | Claude's tool guard confines write paths and rejects hook bypasses. Codex uses its OS sandbox. |
+| C4 | Adapter write boundaries | Claude's tool guard confines write paths and rejects hook bypasses. |
 | C5 | Separate merge authority | The runner never merges; review and merge authority stay with the operator or a separately authorized external job. |
 | C6 | Runaway bounds | Iteration, pending-branch, per-run branch, and optional wall-clock caps; launcher flock; scheduler hard timeout. Claude also has a turn cap. |
 | C7 | Report-only mode | `findings-only` reports without pushing. |
@@ -44,8 +44,7 @@ Implementation: [adapters.sh](../../lib/adapters.sh), [sandbox.sh](../../lib/san
 [pretooluse-guard.sh](../../hooks/pretooluse-guard.sh), and
 [check_claude_controls.py](../../lib/check_claude_controls.py).
 
-Codex stage isolation excludes host-global configuration and rules. Claude's tool restrictions do
-not provide an OS filesystem read boundary.
+Claude's tool restrictions do not provide an OS filesystem read boundary.
 Disabling a sandbox through an explicit environment override removes that control.
 
 ## 3. Risk register
@@ -84,7 +83,7 @@ pre-push hook validates refs, not content; branch deletion cannot undo disclosur
 
 Tool guards do not remove underlying account privileges. A CLI change or guard bypass can expose
 host-root-equivalent Docker access, administrative capabilities, or other services' secrets if
-those capabilities belong to the account. Gate and Codex sandboxing limit some of that exposure.
+those capabilities belong to the account. Gate sandboxing limits some of that exposure.
 Use M1 and M2.
 
 ### R3 — Unattended permission bypass <a id="r3"></a>
@@ -102,26 +101,25 @@ not implemented. See M4.
 ### R5 — Persistent prompt injection <a id="r5"></a>
 
 Repository text shapes Explore output, which is then embedded in Fix and Review prompts. A hostile
-finding and diff can influence both author and reviewer. Separate vendors and full diff evidence
+finding and diff can influence both author and reviewer. A separate review model and full diff evidence
 help, but do not prove correctness. Merge review cannot prevent R1's push-time disclosure.
 
 ### R6 — Agent egress <a id="r6"></a>
 
-Claude runs without a general OS egress policy. The Codex Fix sandbox disables network access for
-its commands. The gate's public-only proxy applies only to repository setup and tests. See M2.
+Claude runs without a general OS egress policy. The gate's public-only proxy applies only to repository setup and tests. See M2.
 
 ### R7 — Runaway usage <a id="r7"></a>
 
 Iteration, pending-verdict, per-run branch, time, and scheduler limits bound work. Usage is recorded
-in the ledger. A quota fallback records rejected and retried stages separately under the same run
-caps. A wall-clock budget may let an in-flight stage finish; no cap guarantees a dollar ceiling.
+in the ledger. A model that cannot be reached two stages in a row stops the night instead of
+switching to another one. A wall-clock budget may let an in-flight stage finish; no cap guarantees a dollar ceiling.
 
 ### R8 — Absolute write paths <a id="r8"></a>
 
 Changing cwd does not confine Write/Edit. An out-of-tree write could alter shell startup, SSH
 configuration, user services, CLI hooks, or a binary in a user-writable PATH directory without any
-shell tool. Claude's guard resolves paths and confines writes to the injected worktree. Codex uses
-its workspace sandbox. See N1 and N2.
+shell tool. Claude's guard resolves paths and confines writes to the injected worktree. See N1 and
+N2.
 
 ### R9 — Untracked review gap <a id="r9"></a>
 
@@ -140,8 +138,8 @@ runtime paths are prepended only for the relevant subprocess. See N4.
 ### R11 — Scope of Git controls <a id="r11"></a>
 
 Push hooks guard Git ref updates, not arbitrary file reads, writes, or candidate-code execution.
-Claude's Bash bypass guard is latent protection while Bash is withheld. Codex may run sandboxed
-commands, so capability assumptions must be adapter-specific. Keep Git safeguards but avoid
+Claude's Bash bypass guard is latent protection while Bash is withheld; an operator who grants Bash
+changes the capability assumptions. Keep Git safeguards but avoid
 counting them as a complete sandbox. See N7 and M5.
 
 ### R12 — Forge credentials and PR text <a id="r12"></a>
@@ -172,11 +170,6 @@ run in the gate sandbox, with no host home, credential files, or daemon sockets.
 worktree Git metadata and refuses test-induced changes before committing the reviewed tree.
 Setup must not change files that would become part of the candidate commit.
 
-Open gap: the Codex Fix stage may run the repository's own checks through its `workspace-write`
-shell, outside the gate sandbox. There, candidate code can read what the Codex sandbox can read,
-including host files outside the worktree, and write it into the worktree before the push (R1).
-Until Codex Fix is confined to the worktree, run it only under a dedicated account (M1).
-
 An allowed public network destination can still receive worktree content. Remote CI can execute
 pushed workflow changes with forge-side secrets before merge. Kernel namespaces, bubblewrap,
 trusted runner code, and configured read-only binds remain in the trust base. See N8.
@@ -186,7 +179,7 @@ trusted runner code, and configured read-only binds remain in the trust base. Se
 | ID | Mitigation | Status |
 | --- | --- | --- |
 | <a id="m1"></a>M1 | Dedicated unprivileged service account without Docker, administrative groups, or unrelated service secrets | Deployment recommendation; highest priority |
-| <a id="m2"></a>M2 | OS filesystem and endpoint-restricted network sandbox around every agent, exposing only required inputs and model credentials | Partial. Gate and Codex filesystem confinement exist. Full agent isolation remains open. |
+| <a id="m2"></a>M2 | OS filesystem and endpoint-restricted network sandbox around every agent, exposing only required inputs and model credentials | Partial. Gate filesystem confinement exists. Full agent isolation remains open. |
 | <a id="m3"></a>M3 | Scan pushed diff content for secrets before disclosure | Open |
 | <a id="m4"></a>M4 | Halt on anomalies and repeated unsafe behavior | Proposed in [autonomy-and-shutoff.md](autonomy-and-shutoff.md) |
 | <a id="m5"></a>M5 | Re-verify tool-hook contracts against supported CLI versions | Ongoing compatibility responsibility |

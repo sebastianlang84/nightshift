@@ -55,7 +55,7 @@ advise_rows() { jq -s '[.[]|select(.stage=="advise")]|length' "$TMP/state/runs.j
 fail() { echo "$1" >&2; [ -z "${2:-}" ] || cat "$2" >&2; exit 1; }
 
 # Run 2: the legacy single-advisor opt-in still works. It advises the open branch, into the digest.
-run 2 NIGHTSHIFT_BRANCH_REVIEW=1 NIGHTSHIFT_ADVISOR_AGENT=mock
+run 2 NIGHTSHIFT_BRANCH_REVIEW=1
 grep -qF 'open-branch cap reached (1/1)' "$TMP/err.2" || fail "narrow clone missed backpressure" "$TMP/err.2"
 [ "$(git -C "$TMP/repo" config --get-all remote.origin.fetch)" = '+refs/heads/main:refs/remotes/origin/main' ] \
   || fail "branch refresh changed the checkout's configured refspec"
@@ -147,13 +147,14 @@ printf '%s' "$out" | grep -qF '| **?** | **fix (1 advisor missing)** |' || fail 
 # The env list is normalised once, and that reading is what both validation and execution use.
 ( export NIGHTSHIFT_SOURCED=1 NIGHTSHIFT_STATE_DIR="$TMP/state" NIGHTSHIFT_RUNS_DIR="$TMP/runs"
   source "$ROOT/bin/nightshift.sh"
-  NIGHTSHIFT_ADVISORS=' claude , codex'; resolve_advisors && [ "${ADVISORS[*]}" = "claude codex" ] || exit 1
+  NIGHTSHIFT_ADVISORS=' claude , mock'; resolve_advisors && [ "${ADVISORS[*]}" = "claude mock" ] || exit 1
   NIGHTSHIFT_ADVISORS='mock,mock'; resolve_advisors && [ "${#ADVISORS[@]}" -eq 2 ] || exit 1
-  for bad in 'claude,claude' 'claude,,codex' 'claude,' ' , ' $'claude,\ncodex'; do
+  # `codex` is a removed adapter (ADR 0044) and refused like any other unknown name.
+  for bad in 'claude,claude' 'claude,,mock' 'claude,' ' , ' $'claude,\nmock' 'codex' 'claude,codex'; do
     NIGHTSHIFT_ADVISORS="$bad"; ! resolve_advisors 2>/dev/null || { echo "accepted '$bad'" >&2; exit 1; }
   done ) || fail "resolve_advisors normalisation wrong"
 
-# The rulebook key alone turns the review on, and is validated like review_agent.
+# The rulebook key alone turns the review on, and is validated like `primary`.
 sed 's/^recon:/agent:\n  advisors: mock\nrecon:/' "$TMP/rulebook.yaml" > "$TMP/rulebook-adv.yaml"
 python3 "$ROOT/lib/parse_rulebook.py" "$TMP/rulebook-adv.yaml" | grep -qx "$(printf 'advisors\tmock')" || fail "advisors not emitted"
 rm -rf "$TMP/state/advice"
@@ -169,14 +170,15 @@ reject_adv() { # value expected-error
 }
 reject_adv claude,gemini "agent.advisors: unknown adapter 'gemini'"
 reject_adv claude,claude "agent.advisors: an adapter is listed twice"
-printf 'agent:\n  advisors: claude, codex\nrepos:\n  - path: /srv/x\n    mode: findings-only\n' > "$TMP/ok.yaml"
-python3 "$ROOT/lib/parse_rulebook.py" "$TMP/ok.yaml" | grep -qx "$(printf 'advisors\tclaude,codex')" || fail "advisors: claude, codex not normalised"
+reject_adv claude,codex "agent.advisors: unknown adapter 'codex'"
+printf 'agent:\n  advisors: claude, mock\nrepos:\n  - path: /srv/x\n    mode: findings-only\n' > "$TMP/ok.yaml"
+python3 "$ROOT/lib/parse_rulebook.py" "$TMP/ok.yaml" | grep -qx "$(printf 'advisors\tclaude,mock')" || fail "advisors: claude, mock not normalised"
 # An env typo is refused before the night spends anything.
 run 5 NIGHTSHIFT_ADVISORS=mock,gemini && fail "NIGHTSHIFT_ADVISORS=mock,gemini was accepted"
 grep -q "invalid branch advisor 'gemini'" "$TMP/err.5" || fail "env advisor typo not reported" "$TMP/err.5"
 
-run 6 NIGHTSHIFT_ADVISORS='codex, codex' && fail "a duplicate env advisor was accepted"
-grep -q "'codex' is listed twice" "$TMP/err.6" || fail "duplicate env advisor not reported" "$TMP/err.6"
+run 6 NIGHTSHIFT_ADVISORS='claude, claude' && fail "a duplicate env advisor was accepted"
+grep -q "'claude' is listed twice" "$TMP/err.6" || fail "duplicate env advisor not reported" "$TMP/err.6"
 
 # A branch name holding `|` is escaped like any other cell text.
 git -C "$TMP/repo" checkout -q -b 'nightshift/a|b'

@@ -18,9 +18,10 @@ ledgers diverge silently: duplicate branches, broken caps and rotation). See
 
 1. **Clone** the Nightshift repo somewhere stable — this path becomes `NIGHTSHIFT_HOME`, and the
    installed systemd unit hard-codes it. Moving the checkout later requires re-running `install`.
-2. **Provide the binaries a run shells out to.** Nightly runs default to the `claude` adapter
-   (`NIGHTSHIFT_AGENT=claude`), and also support `codex`. The launcher looks for these binaries
-   on its `PATH`, which is
+2. **Provide the binaries a run shells out to.** Nightly runs use the `claude` adapter
+   (`NIGHTSHIFT_AGENT=claude`); the only other adapter is the deterministic `mock`
+   ([ADR 0044](adr/0044-claude-only-opus-works-a-review-model-reviews.md)). The launcher looks for
+   these binaries on its `PATH`, which is
    `/usr/local/bin:/usr/bin:/bin:~/.local/bin` — systemd user services start with a minimal env, so
    the launcher sets that list explicitly (system dirs first, deliberately: see
    [`docs/design/risk-analysis.md`](design/risk-analysis.md) R10). "It works in my login shell" is not
@@ -28,16 +29,13 @@ ledgers diverge silently: duplicate branches, broken caps and rotation). See
 
    | Binary | Used for | Missing |
    |--------|----------|---------|
-   | `claude` or `codex` | every stage that thinks | every stage fails; nothing ships |
+   | `claude` | every stage that thinks | every stage fails; nothing ships |
    | `git` | worktrees, commits, branch pushes | run aborts |
    | `jq` | every ledger and telemetry read/write | run aborts |
    | `python3` (stdlib only — nothing to install) | rulebook parsing, JSON extraction, finding probes | run aborts |
    | `bwrap` (`apt install bubblewrap`; on Debian 11 from bullseye-backports, because 0.4.1 lacks `--clearenv` and `--size`) | sandboxing the ship gate (ADR 0026) | every `branch-fix` repo refuses to ship |
    | `gh` | opening PRs when `NIGHTSHIFT_OPEN_PR=1` | branch still pushed, no PR |
 
-   The launcher exports the nvm bin directory as `NIGHTSHIFT_CODEX_PATH` and prepends it to
-   PATH for Codex alone. Codex Fix runs the repository's checks, which can need a newer Node
-   than the system default (ADR 0037).
    A run started by hand from an interactive shell already has nvm on PATH and needs nothing.
 
    `bwrap` and `gh` are probed with `command -v`; only a missing `gh` lets the run continue unchanged. `git`, `jq` and `python3` are hard
@@ -90,8 +88,9 @@ ledgers diverge silently: duplicate branches, broken caps and rotation). See
    ```
    It builds a disposable sandbox (`bin/setup-sandbox.sh` — a target repo whose `origin` is a local
    bare remote) under `$TMPDIR` and runs the night against *that*: its own rulebook, state, runs,
-   digests, worktrees, launcher log and flock. It uses mock for the main run and Review and disables
-   branch advisors and quota fallback, even if the invoking shell configured them. It exercises
+   digests, worktrees, launcher log and flock. It uses mock for every stage and disables
+   branch advisors, the quota check and the notify command, even if the invoking shell configured
+   them. It exercises
    the whole path, push included, while writing nothing under `NIGHTSHIFT_HOME` — no ledger rows,
    no `empty` rows that the cadence and the
    [ADR 0015](adr/0015-recon-reprioritizes-never-excludes.md) exclusion window would later read as a
@@ -110,20 +109,19 @@ e.g. a smaller/cheaper model for one night.
 ```yaml
 agent:
   claude_model: claude-opus-5-5
-  codex_model: gpt-6.2-sol
-  codex_effort: high
+  review_model: claude-fable-5-2
 ```
+
+`review_model` is the model the Review stage and the branch advice run on; every other stage runs on
+`claude_model`. Omitted, they all run on `claude_model`
+([ADR 0044](adr/0044-claude-only-opus-works-a-review-model-reviews.md)).
 
 | Variable | Adapter | Effect when unset |
 |----------|---------|-------------------|
 | `NIGHTSHIFT_CLAUDE_MODEL` | claude | the rulebook's `agent.claude_model`, else no `--model` |
+| `NIGHTSHIFT_REVIEW_MODEL` | claude | the rulebook's `agent.review_model`, else the claude model; set empty to review on the claude model for one run |
 | `NIGHTSHIFT_CLAUDE_FLAGS` | claude | `--dangerously-skip-permissions --max-turns 60` |
 | `NIGHTSHIFT_CLAUDE_SETTING_SOURCES` | claude | `--setting-sources project,local` (stage isolation) |
-| `NIGHTSHIFT_QUOTA_FALLBACK_AGENT` | claude | unset; an agent that cannot reach its model twice in a row aborts the night |
-| `NIGHTSHIFT_CODEX_MODEL` | codex | the rulebook's `agent.codex_model`, else no `--model` |
-| `NIGHTSHIFT_CODEX_REASONING_EFFORT` | codex | the rulebook's `agent.codex_effort`, else the CLI default |
-| `NIGHTSHIFT_CODEX_PATH` | codex | nothing is prepended, so the codex stages see `/usr/bin/node` first (ADR 0037) |
-| `NIGHTSHIFT_CODEX_STAGE_HOME` | codex | `state/codex-home` (stage isolation); empty = your own `CODEX_HOME` |
 | `NIGHTSHIFT_EMPTY_ANSWER_RETRIES` | all | `1` — a stage whose model returned nothing is retried once (ADR 0034); `0` disables it |
 | `NIGHTSHIFT_TEST_TIMEOUT` | all | the rulebook's `limits.test_timeout_seconds`, else 600s per `test_cmd` |
 | `NIGHTSHIFT_TEST_PATH` | all | nothing is prepended, so a `test_cmd` sees only `/usr/local/bin:/usr/bin:/bin` |
@@ -135,16 +133,16 @@ agent:
 | `NIGHTSHIFT_TEST_FSIZE_MB` | all | the rulebook's `limits.test_fsize_mb`, else 2048 (`RLIMIT_FSIZE`) |
 | `NIGHTSHIFT_TEST_MAX_PROCS` | all | the rulebook's `limits.test_max_procs`, else 2048 (`RLIMIT_NPROC`) |
 | `NIGHTSHIFT_BLOCKED_BASE_CMD` | all | unset; a shell command run once per red spell with the repo, base commit, `red` or `unavailable` and the log path as `$1`..`$4`, to tell the repo's owner (ADR 0041) |
+| `NIGHTSHIFT_QUOTA_CMD` | launcher | unset = every night starts; a shell command `bin/nightshift-cron.sh` runs once before the night (stdin closed, `NIGHTSHIFT_QUOTA_TIMEOUT` seconds, default 60). Exit 75 = pause: the night does not start, the day's digest gets a `PAUSED` entry with the first line of the command's stdout as the reason, the notify command is called, and the launcher exits 0. Any other exit, a command that cannot run, or a timeout means go, logged (ADR 0044) |
+| `NIGHTSHIFT_NOTIFY_CMD` | all | unset = nobody is told; a shell command called with one line as `$1` (stdin closed, `NIGHTSHIFT_NOTIFY_TIMEOUT` seconds, default 60) when the quota check pauses a night and when a running night stops for `agent_unavailable` — usually a quota spent mid-night. A failure is logged and changes nothing else (ADR 0044) |
 
-`NIGHTSHIFT_QUOTA_FALLBACK_AGENT=codex` takes over when Claude could not reach its model two stages
-in a row — each failed within 30 s with no tokens counted, which is how a spent quota or an outage
-looks from any CLI (ADR 0023). The second stage is retried once through the Codex adapter, and the
-rest of the night stays on Codex. The failed attempts and the retry are separate `runs.jsonl` rows,
-and the failed attempt's raw output is kept in the item directory as `.raw_<stage>.claude-wall`.
-Credentials and ordinary stage failures do not trigger the fallback. A routed reviewer has no
-fallback: when it cannot reach its model twice in a row, the night aborts. Configure its model and effort
-through the normal Codex settings, for example `agent.codex_model: gpt-6.2-sol` plus
-`agent.codex_effort: medium` (or `NIGHTSHIFT_CODEX_REASONING_EFFORT=medium` for a one-off run).
+A model that cannot be reached two stages in a row — each failed within 30 s with no tokens counted,
+which is how a spent quota or an outage looks from the CLI — stops the night (ADR 0023). The count is
+kept per model, so a spent review model stops the night even while the claude model still answers
+the Fix stages in between. No other adapter or model takes over
+([ADR 0044](adr/0044-claude-only-opus-works-a-review-model-reviews.md)): the digest says `ABORTED`
+and `NIGHTSHIFT_NOTIFY_CMD`, if set, gets one line. To avoid starting a night on a nearly spent week
+at all, point `NIGHTSHIFT_QUOTA_CMD` at a check that exits 75 when the night should pause.
 
 A provider sometimes accepts a turn, bills it, and returns an empty answer. That is not a verdict
 about the repository, so `run_agent` calls the stage again — once, and only when the answer file is
@@ -284,7 +282,9 @@ choice came from — which model actually served is a separate, after-the-fact q
 
 ```
 [nightshift] claude model: claude-opus-5-5 (from rulebook agent.claude_model)
+[nightshift] claude review model: claude-fable-5-2 (from rulebook agent.review_model)
 [nightshift] claude model: not declared — the CLI's own default applies (runs.jsonl model_id records what served)
+[nightshift] claude review model: not declared — Review and branch advice use the claude model
 ```
 
 and `runs.jsonl` records the model that actually served each stage (`model_id`, `context_window`). The
@@ -346,7 +346,6 @@ these flags, is what confines the agent (see [`docs/design/risk-analysis.md`](de
 | `state/dim-scans/` | Per-(repo,dim) explore markers driving rotation | `NIGHTSHIFT_STATE_DIR` |
 | `state/.ledger-epoch.idx` | Cached per-(repo,dim) ledger aggregates the rotation reads (last service epoch, last shipped epoch) — derived, disposable, rebuilt from the ledger whenever it changes; safe to delete | `NIGHTSHIFT_STATE_DIR` |
 | `state/.ledger-gap.idx` | Cached per-repo service cadence the overdue ceiling reads (service count, median inter-service interval) — derived, disposable, rebuilt from the ledger whenever it changes; safe to delete | `NIGHTSHIFT_STATE_DIR` |
-| `state/codex-home/` | `CODEX_HOME` a codex stage runs under: a symlink to your `auth.json` plus codex's own caches, and deliberately no `AGENTS.md`/`config.toml` (derived, disposable) | `NIGHTSHIFT_CODEX_STAGE_HOME` |
 | `runs/<date>/` | Per-item working dirs (prompts, agent output) | `NIGHTSHIFT_RUNS_DIR` |
 | `digests/<date>.md` | The morning report | `NIGHTSHIFT_DIGEST_DIR` |
 | `~/.local/state/nightshift/logs/<date>.log` | Launcher log (also in journald) | `NIGHTSHIFT_LOG_DIR` |
@@ -381,11 +380,6 @@ Agent capabilities depend on the adapter and stage.
   tools to the disposable worktree. The default profiles omit Bash, so agents have no shell to run
   `git push`. If the operator enables Bash, the guard rejects commands that try to bypass or widen
   the injected `pre-push` hook.
-- **Codex** can read host files visible to its sandbox, including paths outside the worktree.
-  Non-Fix stages use `read-only`. Fix uses `workspace-write` for worktree edits and shell commands.
-  Those shell commands can include the repository's own checks, so candidate code runs there
-  outside the gate sandbox (risk analysis, R15): run Codex Fix only under a dedicated account.
-  Fix shell commands have network access disabled, and Git inherits the `pre-push` hook.
 
 The runner performs the branch push. Its `pre-push` hook allows new branches and fast-forward updates
 under the configured `branch_prefix` (`nightshift/` by default) and rejects deletions, tags and other
@@ -436,14 +430,13 @@ destinations. See the [hook specification](design/hook-spec.md) and [risk analys
   another harvest can reorder them between commands; copy the stable `ITEM` from `todos`. Your verdict outranks the
   machine's ([ADR 0007](adr/0007-human-verdicts-outrank-machine-reconcile.md),
   [ADR 0021](adr/0021-closing-open-findings.md)).
-- **Independent branch review:** set `agent.advisors` in the rulebook (e.g. `advisors: claude,codex`)
-  and every open branch gets a merge / fix / reject recommendation from each advisor every night. The
+- **Independent branch review:** set `agent.advisors: claude` in the rulebook and every open branch
+  gets a merge / fix / reject recommendation every night, on the review model. The
   digest shows them as one table with a combined recommendation and the required fix
   ([ADR 0038](adr/0038-every-open-branch-gets-two-vendors-advice.md)). Answers are cached in
   `state/advice/` per branch tip, base, adapter and model, so an unchanged branch is not reviewed
   again; delete that directory to force a fresh review. `NIGHTSHIFT_ADVISORS` overrides the list
-  (empty = off for one run). The older `NIGHTSHIFT_BRANCH_REVIEW=1` with `NIGHTSHIFT_ADVISOR_AGENT`
-  still runs a single advisor. It never merges or pushes.
+  (empty = off for one run). The older `NIGHTSHIFT_BRANCH_REVIEW=1` still turns it on as well. It never merges or pushes.
 - **Logs:** `bin/schedule.sh logs [N]` or `journalctl --user -u nightshift.service`.
 - **Time limits:** keep `limits.max_run_minutes` below the scheduler's hard timeout (the shipped
   unit uses five hours). The application checks its budget between work items, so an in-flight
@@ -455,10 +448,10 @@ destinations. See the [hook specification](design/hook-spec.md) and [risk analys
 - **An aborted night (exit 3):** the night stopped because an agent CLI could not authenticate or
   could not reach its model two stages in a row — usually a spent quota
   ([ADR 0023](adr/0023-an-unusable-agent-aborts-the-night.md)). The digest says
-  `ABORTED`, names the adapter that died (which may be a routed reviewer rather than the night's
-  agent) and the cause, the day's log carries a `FATAL:` line naming the stage, and the systemd unit
+  `ABORTED`, names the adapter that died, the model when it was the one that could not be
+  reached, and the cause, the day's log carries a `FATAL:` line naming the stage, and the systemd unit
   is marked failed. Nothing was recorded — no recon caches, no `empty` ledger rows — so there is no
-  state to clean up. For a credentials abort, log in to that CLI again (`claude` / `codex login`);
+  state to clean up. For a credentials abort, log in to the `claude` CLI again;
   otherwise the `FATAL:` line names the stage's raw output, where the CLI says why — for a spent
   quota, wait until the reset it gives. Then re-run:
   ```

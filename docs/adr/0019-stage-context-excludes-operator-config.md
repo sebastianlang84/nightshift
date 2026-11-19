@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Date: 2026-08-02
+- 2026-11-19 — the Codex adapter was removed ([ADR 0044](0044-claude-only-opus-works-a-review-model-reviews.md)): only the Claude half of stage isolation remains; everything below about codex and `state/codex-home` is history.
 - Extends the "capability, not convention" principle of the confinement hooks
   ([`docs/design/hook-spec.md`](../design/hook-spec.md)) from *what an agent may do* to *what it may read*.
 - Left open which model a stage then runs on; resolved by
@@ -92,4 +93,4 @@ is loud and recoverable, a reopened leak is silent until it is in a commit body.
 - `state/codex-home` is new Runner-owned local state. Codex populates it itself (model cache,
   bundled skills, an empty memory store) — nothing is copied from the operator's home, verified by
   checksum. It is disposable: deleting it costs one model-cache refetch.
-- Regression cover: `tests/test-claude-context-isolation.sh`, `tests/test-codex-context-isolation.sh`.
+- Regression cover: `tests/test-claude-context-isolation.sh`, test-codex-context-isolation.sh (removed 2026-11-19).

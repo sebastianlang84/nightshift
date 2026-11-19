@@ -32,21 +32,13 @@ RECON_KEYS = ("enabled", "ttl_days")
 AGENT_KEYS = (
     "primary",
     "claude_model",
-    "codex_model",
-    "codex_effort",
-    "review_agent",
+    "review_model",
     "advisors",
 )
-# Adapters the Runner implements. `review_agent` names one of these; anything else is a typo, and
-# a typo here would silently leave Review on the night's primary adapter — the opposite of what the
-# host asked for, with no signal that the routing never took effect.
-REVIEW_AGENTS = ("claude", "codex", "mock")
-# Reasoning efforts the codex adapter may request. codex itself does NOT validate the value: an
-# unknown one passes `--strict-config` and reaches the API (verified 2026-09-24, codex-cli 0.155.1),
-# so a typo here would silently spend a night on a request the provider rejects or reinterprets.
-# The set is the CLI's own `ReasoningEffort` variants as serialized in that binary; `none` is left
-# out because it could not be confirmed there.
-CODEX_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+# Adapters the Runner implements (ADR 0044). `primary` and every `advisors` entry name one of these;
+# anything else — a removed adapter included — is a typo, and tolerating it would run the night on
+# something the host never asked for.
+ADAPTERS = ("claude", "mock")
 # The emitter below reads only these top-level sections. A typo here would otherwise be ignored and
 # every setting beneath it would silently revert to its default.
 TOP_LEVEL_KEYS = ("branch_prefix", "limits", "recon", "agent", "dimensions", "repos")
@@ -313,7 +305,9 @@ def main(path: str) -> None:
     # "no model" would silently run the night on something else. Model ID *syntax* stays
     # unvalidated — it belongs to the CLI vendor and any pattern here would go stale — but a tab
     # would corrupt the TSV transport to bash.
-    for key in ("claude_model", "codex_model"):
+    # `review_model` is the model the Review stage and the branch advice request instead (ADR 0044);
+    # omitted, they run on `claude_model` like every other stage.
+    for key in ("claude_model", "review_model"):
         model = agent.get(key, "")
         if key in agent and not model:
             raise SystemExit(
@@ -322,18 +316,6 @@ def main(path: str) -> None:
         if "\t" in model:
             raise SystemExit(f"agent.{key} must not contain a tab")
         print(f"{key}\t{model}")
-    # The codex adapter's reasoning effort, declared beside its model and resolved the same way:
-    # NIGHTSHIFT_CODEX_REASONING_EFFORT if set > this key > the CLI default. Unlike a model id, the
-    # domain is small and fixed, so it is closed (CODEX_EFFORTS).
-    effort = agent.get("codex_effort", "")
-    if "codex_effort" in agent and not effort:
-        raise SystemExit("agent.codex_effort is empty — give it a value, or omit the key entirely")
-    if effort and effort not in CODEX_EFFORTS:
-        raise SystemExit(
-            f"agent.codex_effort: unknown effort {effort!r} — "
-            f"expected one of {', '.join(CODEX_EFFORTS)}"
-        )
-    print(f"codex_effort\t{effort}")
     # Which adapter runs the night. Omitted = whatever $NIGHTSHIFT_AGENT says, which is the
     # pre-existing behaviour; the env var still wins when explicitly set, so a one-off hand run needs
     # no rulebook edit. Declared here for the same reason the models are (ADR 0020): the host owns
@@ -341,30 +323,15 @@ def main(path: str) -> None:
     primary = agent.get("primary", "")
     if "primary" in agent and not primary:
         raise SystemExit("agent.primary is empty - name an adapter, or omit the key entirely")
-    if primary and primary not in REVIEW_AGENTS:
+    if primary and primary not in ADAPTERS:
         raise SystemExit(
             f"agent.primary: unknown adapter {primary!r} - "
-            f"expected one of {', '.join(sorted(REVIEW_AGENTS))}"
+            f"expected one of {', '.join(sorted(ADAPTERS))}"
         )
     print(f"primary_agent\t{primary}")
-    # Which adapter serves the Review stage (ADR 0031). Omitted = Review runs on the night's own
-    # adapter, which is the pre-0031 behaviour. Validated against the implemented set for the same
-    # reason `mode` is: an unrecognised value cannot be a feature request, and tolerating one would
-    # leave the routing silently off.
-    review_agent = agent.get("review_agent", "")
-    if "review_agent" in agent and not review_agent:
-        raise SystemExit(
-            "agent.review_agent is empty — name an adapter, or omit the key entirely"
-        )
-    if review_agent and review_agent != "auto" and review_agent not in REVIEW_AGENTS:
-        raise SystemExit(
-            f"agent.review_agent: unknown adapter {review_agent!r} — "
-            f"expected one of {', '.join(sorted(REVIEW_AGENTS))}"
-        )
-    print(f"review_agent\t{review_agent}")
     # Which adapters give every open branch its nightly merge/fix/reject recommendation (ADR 0038).
     # A comma-separated scalar (block-style only, like a repo's `dimensions`). Omitted = no branch
-    # review. Each entry names an ADAPTER and is validated like review_agent; a duplicate would ask
+    # review. Each entry names an ADAPTER and is validated like `primary`; a duplicate would ask
     # the same model twice, which is one opinion billed as two. `mock` alone may repeat: it is the
     # test adapter, and each of its slots stands in for a distinct model.
     advisors_raw = agent.get("advisors", "")
@@ -372,10 +339,10 @@ def main(path: str) -> None:
         raise SystemExit("agent.advisors is empty — name one or more adapters, or omit the key entirely")
     advisors = [a.strip() for a in advisors_raw.split(",")] if advisors_raw else []
     for a in advisors:
-        if a not in REVIEW_AGENTS:
+        if a not in ADAPTERS:
             raise SystemExit(
                 f"agent.advisors: unknown adapter {a!r} — "
-                f"expected a comma-separated list of {', '.join(sorted(REVIEW_AGENTS))}"
+                f"expected a comma-separated list of {', '.join(sorted(ADAPTERS))}"
             )
     real = [a for a in advisors if a != "mock"]
     if len(set(real)) != len(real):
