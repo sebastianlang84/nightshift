@@ -22,7 +22,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from ledger import TERMINAL_VERDICTS, latest_branch_verdicts
+from ledger import TERMINAL_VERDICTS, latest_branch_verdicts, repo_labels, verdict_item_key
 
 HOME = Path(os.environ.get('NIGHTSHIFT_HOME') or Path(__file__).resolve().parent.parent)
 STATE_DIR = Path(os.environ.get('NIGHTSHIFT_STATE_DIR') or HOME / 'state')
@@ -160,7 +160,7 @@ def finding_states(rows):
 def item_state(row, verdicts, job, bases, no_fetch):
     """(plain state, settled?) of one ledger item other than a finding, most authoritative first."""
     repo, branch, outcome, sha = row['repo'], row.get('branch'), row['outcome'], row.get('sha')
-    v = verdicts.get(row.get('item')) or verdicts.get((repo, branch, sha))
+    v = verdicts.get(verdict_item_key(row)) or verdicts.get(('commit', repo, branch, sha))
     if outcome == 'tests-failed':
         return 'not shipped: tests failed', True
     if outcome == 'abandoned':
@@ -194,10 +194,10 @@ def overview(rows, job, bases, since, no_fetch):
     verdicts = {}
     for r in rows:
         if r.get('outcome') == 'verdict':
-            if r.get('item'):
-                verdicts[r['item']] = r.get('verdict')
+            if key := verdict_item_key(r):
+                verdicts[key] = r.get('verdict')
             if r.get('branch'):
-                verdicts[(r['repo'], r['branch'], r.get('sha'))] = r.get('verdict')
+                verdicts[('commit', r['repo'], r['branch'], r.get('sha'))] = r.get('verdict')
     findings = finding_states(rows)
     items = []
     for n, r in enumerate(rows):
@@ -215,14 +215,16 @@ def overview(rows, job, bases, since, no_fetch):
     if not items:
         print('Nothing.\n')
         return
-    print('| night | repo | kind | what | state |')
-    print('|---|---|---|---|---|')
+    print('| night | repo | kind | what | state | branch |')
+    print('|---|---|---|---|---|---|')
     kinds = {'shipped': 'fix', 'finding': 'finding', 'tests-failed': 'attempt',
              'abandoned': 'attempt'}
+    labels = repo_labels(r['repo'] for r, _ in items)
     for r, state in sorted(items, key=lambda x: (x[0].get('night', ''), x[0]['repo'])):
-        print('| %s | %s | %s | %s | %s |' % (
-            r.get('night', '?'), os.path.basename(r['repo']), kinds[r['outcome']],
-            short(r.get('summary') or r.get('fingerprint')).replace('|', '/'), state))
+        print('| %s | %s | %s | %s | %s | %s |' % (
+            r.get('night', '?'), labels[r['repo']].replace('|', r'\|'), kinds[r['outcome']],
+            short(r.get('summary') or r.get('fingerprint')).replace('|', '/'), state,
+            (r.get('branch') or '').replace('|', r'\|')))
     print()
 
 

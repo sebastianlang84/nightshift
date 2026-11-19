@@ -31,6 +31,8 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 
+from ledger import repo_labels, verdict_item_key
+
 SCHEMA_VERSION = 2   # 2: revert detection reads git's own revert line; items carry their base
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
@@ -52,15 +54,15 @@ def resolve_base_ref(repo: str, configured: str) -> str | None:
 
 def merged_items(ledger: str) -> list[dict]:
     """Latest verdict per item; keep those that are `merged` and carry a sha."""
-    last: dict[str, dict] = {}
+    last: dict[tuple, dict] = {}
     with open(ledger, encoding="utf-8") as f:
         for line in f:
             try:
                 row = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if row.get("outcome") == "verdict" and row.get("item"):
-                last[row["item"]] = row
+            if row.get("outcome") == "verdict" and (key := verdict_item_key(row)):
+                last[key] = row
     return [r for r in last.values() if r.get("verdict") == "merged" and r.get("sha")]
 
 
@@ -131,7 +133,8 @@ def reverted(repo: str, sha: str, cutoff: str) -> bool:
 
 def measure(row: dict, base_ref: str | None, window: int, now: datetime) -> dict:
     repo, sha = row["repo"], row["sha"]
-    rec = {"item": row["item"], "repo": repo, "sha": sha, "merged_seen": row.get("ts"),
+    rec = {"item": row["item"], "repo": repo, "branch": row.get("branch"),
+           "sha": sha, "merged_seen": row.get("ts"),
            "base": base_ref, "fingerprint": row.get("fingerprint")}
     try:
         seen = datetime.fromisoformat(row["ts"])
@@ -164,7 +167,7 @@ def measure(row: dict, base_ref: str | None, window: int, now: datetime) -> dict
 def summarize(items: list[dict]) -> dict:
     by: dict[str, dict] = {}
     for it in items:
-        s = by.setdefault(os.path.basename(it["repo"]),
+        s = by.setdefault(it["repo"],
                           {"measured": 0, "held": 0, "reverted": 0, "added": 0, "kept": 0,
                            "pending": 0, "unknown": 0, "removed": 0})
         if it["state"] == "measured":
@@ -175,17 +178,19 @@ def summarize(items: list[dict]) -> dict:
             s["kept"] += it["kept"]
         else:
             s[it["state"]] += 1
-    return by
+    labels = repo_labels(by)
+    return {labels[repo]: counts for repo, counts in by.items()}
 
 
 def probe(ledger: str, out: str, bases: dict[str, str], window: int) -> dict:
     now = datetime.now(timezone.utc)
-    cache: dict[str, dict] = {}
+    cache: dict[tuple, dict] = {}
     try:
         with open(out, encoding="utf-8") as f:
             old = json.load(f)
         if old.get("schema_version") == SCHEMA_VERSION:
-            cache = {i["item"]: i for i in old.get("items", [])
+            cache = {(i.get("repo"), i.get("item"), i.get("sha"), i.get("merged_seen"), i.get("base")): i
+                     for i in old.get("items", [])
                      if i.get("state") in ("measured", "removed") and i.get("window_days") == window}
     except (OSError, ValueError):
         pass
@@ -195,11 +200,11 @@ def probe(ledger: str, out: str, bases: dict[str, str], window: int) -> dict:
         repo = row["repo"]
         if repo not in refs:
             refs[repo] = resolve_base_ref(repo, bases[repo]) if repo in bases else None
-        hit = cache.get(row["item"])
-        # Reuse only what was measured for this very verdict, on the base the rulebook names now.
-        if (hit and refs[repo] and hit.get("base") == refs[repo] and hit.get("sha") == row["sha"]
-                and hit.get("merged_seen") == row.get("ts")):
-            items.append(hit)
+        # A measurement depends on the fix commit and cutoff, so old snapshots without a
+        # branch can be reused when the repository, verdict and current base all match.
+        hit = cache.get((repo, row["item"], row["sha"], row.get("ts"), refs[repo]))
+        if hit and refs[repo]:
+            items.append({**hit, "branch": row.get("branch"), "fingerprint": row.get("fingerprint")})
             continue
         items.append(measure(row, refs[repo], window, now))
     snap = {"schema_version": SCHEMA_VERSION, "generated": now.isoformat(), "window_days": window,

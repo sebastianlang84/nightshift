@@ -15,7 +15,7 @@ unset GIT_CONFIG_COUNT
 #   unmerged  its merge commit reverted (-m 1)    -> reverted
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d "$ROOT/.test-survival.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 fail() { echo "test-fix-survival: $*" >&2; exit 1; }
 
@@ -95,5 +95,33 @@ python3 "$ROOT/lib/probe_survival.py" --ledger "$L" --out "$S" --base "$R" main 
 python3 "$ROOT/lib/probe_survival.py" --ledger "$L" --out "$TMP/none.json" >/dev/null
 [ "$(jq '[.items[] | select(.state=="measured")] | length' "$TMP/none.json")" -eq 0 ] \
   || fail "a repo without a base was measured"
+
+# Old adoptions all shared one item id, and old snapshots did not record the branch.
+# Rewrite the original repo's base so only its matching frozen measurement can still be used.
+other="$TMP/other/repo"
+git clone -q "$R" "$other"
+L="$TMP/adoptions.jsonl"
+S_LEGACY="$TMP/adopted-survival.json"
+jq '{schema_version, items: [.items[] | select(.item == "i-held")
+  | .item = "orphan-adopt" | del(.branch)]}' "$S" > "$S_LEGACY"
+adopted_verdict() { # repo branch sha verdict
+  jq -nc --arg r "$1" --arg b "$2" --arg sha "$3" --arg v "$4" --arg ts "$(day 89)" \
+    '{outcome:"verdict",item:"orphan-adopt",repo:$r,branch:$b,sha:$sha,verdict:$v,ts:$ts}' >> "$L"
+}
+adopted_verdict "$R" nightshift/held "$(sha held)" merged
+adopted_verdict "$R" nightshift/dropped "$(sha held)" dropped
+adopted_verdict "$other" nightshift/reworked "$(sha reworked)" merged
+git -C "$R" update-ref refs/heads/main "$(git -C "$R" rev-list --max-parents=0 main)"
+report="$(python3 "$ROOT/lib/probe_survival.py" --ledger "$L" --out "$S_LEGACY" \
+  --base "$R" main --base "$other" main --print)"
+jq -e --arg r "$R" --arg other "$other" --arg cutoff "$cutoff" '
+  (.items | length == 2)
+  and any(.items[]; .repo == $r and .branch == "nightshift/held"
+                   and .state == "measured" and .held and .cutoff == $cutoff)
+  and (.repos[$r] | .held == 1 and .measured == 1)
+  and (.repos[$other] | .held == 0 and .measured == 1)
+' "$S_LEGACY" >/dev/null || fail "legacy adoptions lost their own verdicts or frozen measurement"
+[[ "$report" == *"$R"$'\theld 1/1'* && "$report" == *"$other"$'\theld 0/1'* ]] \
+  || fail "same-named repositories are not distinguishable in the survival report"
 
 echo "test-fix-survival: ok"

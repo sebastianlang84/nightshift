@@ -10,7 +10,7 @@ unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this
 # ref survives on origin (curator clutter), a clean merged worktree and a stash.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d "$ROOT/.test-status.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 g() { git -c user.name=test -c user.email=test@localhost "$@"; }
 
@@ -76,6 +76,18 @@ mkdir -p "$TMP/state" "$TMP/worktrees"
 {
   printf '{"night":"%s","item":"i1","repo":"%s","branch":"nightshift/merged","sha":"%s","outcome":"shipped","summary":"Fix one"}\n' "$today" "$R" "$merged_sha"
   printf '{"night":"%s","item":"i2","repo":"%s","branch":"nightshift/open","sha":"%s","outcome":"shipped","summary":"Fix two"}\n' "$today" "$R" "$open_sha"
+  # Old adoptions share their item, fingerprint and summary. A verdict belongs to just one branch.
+  for branch in adopted-merged open; do
+    printf '{"night":"%s","item":"orphan-adopt","repo":"%s","branch":"nightshift/%s","sha":"%s","outcome":"shipped","source":"orphan-adopt","adopted":true,"summary":"adopted orphan branch (lost shipped row restored)"}\n' \
+      "$today" "$R" "$branch" "$open_sha"
+  done
+  printf '{"night":"%s","item":"orphan-adopt","repo":"%s","branch":"nightshift/adopted-merged","sha":"%s","outcome":"verdict","verdict":"merged"}\n' \
+    "$today" "$R" "$open_sha"
+  # Another checkout can have the same directory name and the same adopted branch.
+  printf '{"night":"%s","item":"orphan-adopt","repo":"%s","branch":"nightshift/open","sha":"%s","outcome":"shipped","source":"orphan-adopt","adopted":true,"summary":"adopted orphan branch (lost shipped row restored)"}\n' \
+    "$today" "$TMP/other/repo" "$open_sha"
+  printf '{"night":"%s","item":"orphan-adopt","repo":"%s","branch":"nightshift/open","sha":"%s","outcome":"verdict","verdict":"dropped"}\n' \
+    "$today" "$TMP/other/repo" "$open_sha"
   # A shipped branch settled as `resolved` is decided, as for the runner (ADR 0025).
   printf '{"night":"%s","item":"s1","repo":"%s","branch":"nightshift/resolved","sha":"%s","outcome":"shipped","summary":"Fix resolved"}\n' "$today" "$R" "$resolved_sha"
   printf '{"night":"%s","item":"s1","repo":"%s","branch":"nightshift/resolved","sha":"%s","outcome":"verdict","verdict":"resolved"}\n' "$today" "$R" "$resolved_sha"
@@ -118,6 +130,9 @@ out=$(status_report)
 expect() { grep -qF -- "$1" <<<"$out" || { echo "missing: $1" >&2; echo "$out" >&2; exit 1; }; }
 expect "| fix | Fix one | merged |"
 expect "| fix | Fix two | reviewed: merge conflict (issue #9) |"
+expect "| fix | adopted orphan branch (lost shipped row restored) | merged | nightshift/adopted-merged |"
+expect "| $R | fix | adopted orphan branch (lost shipped row restored) | reviewed: merge conflict (issue #9) | nightshift/open |"
+expect "| $TMP/other/repo | fix | adopted orphan branch (lost shipped row restored) | dropped | nightshift/open |"
 custom="$(NIGHTSHIFT_MERGE_ISSUE_LABEL=ticket status_report)"
 grep -qF 'reviewed: merge conflict (ticket #9)' <<<"$custom" || {
   echo "merge issue label override was ignored" >&2; exit 1;

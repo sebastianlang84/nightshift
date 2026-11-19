@@ -7,7 +7,7 @@ unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this
 # (has a shipped row) is NOT reported as orphan.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d "$ROOT/.test-adopt.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/state"
 LEDGER="$TMP/state/ledger.jsonl"
@@ -81,6 +81,10 @@ known_lines="$(grep -c 'nightshift/known' <<<"$sect" || true)"
 grep -q "(adopted -> shipped)" "$TMP/out" || { echo "orphan not marked adopted" >&2; cat "$TMP/out" >&2; exit 1; }
 adopted="$(jq -sc '[.[]|select(.branch=="nightshift/orphan" and .outcome=="shipped" and .adopted==true)]|length' "$LEDGER")"
 [ "$adopted" = 1 ] || { echo "expected exactly 1 adopted shipped row for the orphan, got $adopted" >&2; exit 1; }
+jq -es --arg r "$TMP/repo" '
+  any(.[]; .item == ("orphan-adopt:" + $r + ":nightshift/orphan") and .adopted == true)
+  and any(.[]; .item == "orphan-adopt:" + ($r + "2") + ":nightshift/known" and .adopted == true)
+' "$LEDGER" >/dev/null
 same_name_adopted="$(jq -sc --arg r "$TMP/repo2" '[.[]|select(.repo==$r and .branch=="nightshift/known" and .outcome=="shipped" and .adopted==true)]|length' "$LEDGER")"
 [ "$same_name_adopted" = 1 ] \
   || { echo "same-named branch in repo2 was hidden by repo1's ledger row" >&2; exit 1; }

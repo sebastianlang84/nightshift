@@ -174,14 +174,15 @@ reconcile() { # repo base branch sha [pr_url]
 # and `source` mark the row so it is never mistaken for a first-hand shipped record. Idempotent:
 # once written, the branch is in the ledger's `known` set and is never adopted twice.
 adopt_orphan() { # repo branch sha
-  jq -nc \
-    --arg item "orphan-adopt" --arg repo "$1" --arg branch "$2" --arg sha "$3" \
+  jq -L "$NIGHTSHIFT_HOME/lib" -nc \
+    --arg repo "$1" --arg branch "$2" --arg sha "$3" \
     --arg ts "$(date -Iseconds)" --arg night "$(date +%F)" --argjson sv "$SCHEMA_VERSION" \
-    '{night:$night,item:$item,repo:$repo,fingerprint:null,
+    'include "ledger";
+     {night:$night,repo:$repo,fingerprint:null,
       branch:$branch,sha:($sha|if .=="" then null else . end),pr_url:null,
       outcome:"shipped",source:"orphan-adopt",adopted:true,
       summary:"adopted orphan branch (lost shipped row restored)",
-      ts:$ts,schema_version:$sv}' >> "$LEDGER"
+      ts:$ts,schema_version:$sv} | .item = adopted_item_id' >> "$LEDGER"
 }
 
 # Orphan sweep (ADR 0016) + adoption (ADR 0018): a <prefix>* branch on origin that the ledger has no
@@ -231,21 +232,48 @@ sweep_orphans() {
 }
 
 # ---------------------------------------------------------- manual verdict ----
-manual_verdict() { # selector verdict [reason]
-  local sel="$1" verdict="$2" reason="${3:-}"
+verdict_candidates() {
+  if [ "$1" = findings ]; then
+    PYTHONPATH="$NIGHTSHIFT_HOME/lib" python3 -c '
+import json
+import sys
+from probe_findings import open_findings, read_ledger
+
+for row in open_findings(read_ledger(sys.argv[1])):
+    print(json.dumps(row))
+' "$LEDGER"
+  else
+    jq -c 'select(.outcome == "shipped" or .outcome == "finding")' "$LEDGER"
+  fi
+}
+
+manual_verdict() { # scope selector verdict [reason]
+  local scope="$1" sel="$2" verdict="$3" reason="${4:-}"
   if ! jq -L "$NIGHTSHIFT_HOME/lib" -ne --arg v "$verdict" \
     'include "ledger"; terminal_verdicts + ["open"] | index($v) != null' >/dev/null; then
     echo "verdict must be one of: $(jq -L "$NIGHTSHIFT_HOME/lib" -nr \
       'include "ledger"; terminal_verdicts + ["open"] | join(" ")')" >&2
     exit 2
   fi
-  # all shipped/finding rows matching the selector by item, branch, or fingerprint
   local matches
-  matches=$(jq -sc --arg s "$sel" \
-    '[.[]|select(.outcome=="shipped" or .outcome=="finding")
-         |select(.item==$s or .branch==$s or .fingerprint==$s)]' "$LEDGER")
+  matches=$(verdict_candidates "$scope" | jq -L "$NIGHTSHIFT_HOME/lib" -sc \
+    --arg s "$sel" --arg scope "$scope" '
+      include "ledger";
+      [.[] | .selector = (if .outcome == "shipped" and is_adoption then adopted_item_id else .item end)
+       | if $scope == "adopted" then
+           select(.outcome == "shipped" and is_adoption and .selector == $s)
+         elif $scope == "fingerprint" then
+           select(.fingerprint == $s)
+         else
+           select(.item == $s or .branch == $s or .fingerprint == $s)
+         end]')
   if [ "$matches" = "[]" ]; then
-    echo "no shipped/finding ledger row matches '$sel'" >&2; exit 1
+    case "$scope" in
+      findings) echo "no open finding matches '$sel'" >&2 ;;
+      adopted)  echo "no adopted branch matches '$sel'" >&2 ;;
+      *)        echo "no shipped/finding ledger row matches '$sel'" >&2 ;;
+    esac
+    exit 1
   fi
   # Human verdicts outrank the machine, so ambiguity is not a warning. A branch/fingerprint can be
   # repeated in another fleet repo; refuse it and require the stable item id instead of choosing
@@ -253,14 +281,17 @@ manual_verdict() { # selector verdict [reason]
   local ndistinct
   ndistinct=$(jq -r '[.[]|[.repo, (.branch // ""), (.fingerprint // "")]]|unique|length' <<<"$matches")
   if [ "$ndistinct" -gt 1 ]; then
-    echo "ambiguous selector '$sel' matches $ndistinct repo-scoped findings/branches; use an item id —" >&2
-    jq -r '.[]|"  \(.repo)  \(.branch // "(finding)")  [\(.item)]"' <<<"$matches" | sort -u >&2
+    echo "ambiguous selector '$sel' matches $ndistinct repo-scoped findings/branches; use an item id, --adopted, or --fingerprint —" >&2
+    jq -L "$NIGHTSHIFT_HOME/lib" -r 'include "ledger";
+      .[] | (if .outcome == "shipped" and is_adoption
+             then "--adopted " + (.selector | @sh) else .item end) as $selector
+          | "  \(.repo)  \(.branch // "(finding)")  [\($selector)]"' <<<"$matches" | sort -u >&2
     exit 2
   fi
   local row item repo fp branch sha
   row=$(jq -c 'last' <<<"$matches")
   item=$(jq -r '.item' <<<"$row"); repo=$(jq -r '.repo' <<<"$row")
-  fp=$(jq -r '.fingerprint' <<<"$row"); branch=$(jq -r '.branch // ""' <<<"$row")
+  fp=$(jq -r '.fingerprint // ""' <<<"$row"); branch=$(jq -r '.branch // ""' <<<"$row")
   sha=$(jq -r '.sha // ""' <<<"$row")
   # Idempotent: don't append a duplicate identical manual verdict on the same branch.
   local was was_src
@@ -345,7 +376,7 @@ close_todo() { # <selector> [reason]
     echo "numeric close selectors are unsafe because todo numbering can change; use the ITEM shown by: harvest.sh todos" >&2
     exit 2
   fi
-  manual_verdict "$sel" resolved "$reason"
+  manual_verdict findings "$sel" resolved "$reason"
   # Re-probe so the snapshot (and with it the dashboard) drops the item immediately instead of
   # carrying a closed finding until the next harvest.
   run_probe >/dev/null || true
@@ -400,6 +431,9 @@ usage:
   harvest.sh --dry-run                          show the reconciliation, write nothing
   harvest.sh verdict <sel> <verdict> [reason]   record a manual verdict (findings/override)
       <sel>      item id | branch | fingerprint
+  harvest.sh verdict --adopted <sel> <verdict> [reason]
+      <sel>      orphan-adopt:<ledger repo path>:<branch>
+  harvest.sh verdict --fingerprint <sel> <verdict> [reason]
 EOF
   printf '      <verdict>  %s\n' "$(jq -L "$NIGHTSHIFT_HOME/lib" -nr \
     'include "ledger"; terminal_verdicts + ["open"] | join(" | ")')"
@@ -438,8 +472,10 @@ esac
 # otherwise be silently truncated to its first word in the ledger.
 case "${1:-}" in
   verdict)
-    [ "$#" -ge 3 ] && [ "$#" -le 4 ] \
-      || { echo "verdict takes <selector> <verdict> [reason] (quote a multi-word reason)" >&2; usage >&2; exit 2; } ;;
+    verdict_args=$#
+    case "${2:-}" in --adopted|--fingerprint) verdict_args=$((verdict_args - 1)) ;; esac
+    [ "$verdict_args" -ge 3 ] && [ "$verdict_args" -le 4 ] \
+      || { echo "verdict takes [--adopted|--fingerprint] <selector> <verdict> [reason] (quote a multi-word reason)" >&2; usage >&2; exit 2; } ;;
   close)
     [ "$#" -ge 2 ] && [ "$#" -le 3 ] \
       || { echo "close takes <item|selector> [reason] (quote a multi-word reason)" >&2; usage >&2; exit 2; } ;;
@@ -460,7 +496,12 @@ jq -e . "$LEDGER" >/dev/null 2>&1 \
   || { echo "ledger is not valid JSONL ($LEDGER) — aborting harvest" >&2; exit 1; }
 
 case "${1:-}" in
-  verdict) shift; manual_verdict "$@"; exit 0 ;;
+  verdict)
+    shift
+    verdict_scope=all
+    case "$1" in --adopted|--fingerprint) verdict_scope="${1#--}"; shift ;; esac
+    manual_verdict "$verdict_scope" "$@"
+    exit 0 ;;
   todos)   list_todos;        exit 0 ;;
   close)   shift; close_todo "$@"; exit 0 ;;
   probe)   run_probe --print; exit 0 ;;
