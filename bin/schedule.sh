@@ -114,8 +114,12 @@ case "$cmd" in
       echo "WARN: no rulebook.yaml — a real night would fall back to rulebook.example.yaml" >&2
     fi
 
+    # An explicitly empty advisor list also disables the legacy single-advisor route.
     env NIGHTSHIFT_HOME="$NIGHTSHIFT_HOME" \
         NIGHTSHIFT_AGENT=mock \
+        NIGHTSHIFT_REVIEW_AGENT=mock \
+        NIGHTSHIFT_ADVISORS= \
+        NIGHTSHIFT_QUOTA_FALLBACK_AGENT= \
         RULEBOOK="$SB/rulebook.yaml" \
         NIGHTSHIFT_STATE_DIR="$SB/state" \
         NIGHTSHIFT_RUNS_DIR="$SB/runs" \

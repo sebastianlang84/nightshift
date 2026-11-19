@@ -48,7 +48,16 @@ exec 8>"$TMP/nightshift.lock"
 flock -n 8 || fail "could not take the default lock for the test"
 
 out="$TMP/dry-run.out"
-bash "$ROOT/bin/schedule.sh" dry-run >"$out" 2>&1 || { echo "dry-run failed:" >&2; cat "$out" >&2; exit 1; }
+# Block vendor CLIs even if a regression routes a stage to one. The launcher prepends system
+# directories to PATH, so use Bash functions. Codex's executable lookup rejects function names.
+claude() { return 1; }
+codex() { return 1; }
+export -f claude codex
+
+NIGHTSHIFT_AGENT=claude NIGHTSHIFT_REVIEW_AGENT=claude NIGHTSHIFT_ADVISORS=codex \
+  NIGHTSHIFT_BRANCH_REVIEW=1 NIGHTSHIFT_ADVISOR_AGENT=codex NIGHTSHIFT_QUOTA_FALLBACK_AGENT=codex \
+  bash "$ROOT/bin/schedule.sh" dry-run >"$out" 2>&1 \
+  || { echo "dry-run failed:" >&2; cat "$out" >&2; exit 1; }
 
 grep -q "another run holds" "$out" && { cat "$out" >&2; fail "dry-run shares the nightly flock — it would be skipped by (and would skip) a real run"; }
 
@@ -59,6 +68,11 @@ SB="$(sed -n 's/^dry-run sandbox: \([^ ]*\).*/\1/p' "$out" | head -1)"
 [ -s "$SB/state/ledger.jsonl" ] || { cat "$out" >&2; fail "no sandbox ledger — the night did not run"; }
 [ -n "$(find "$SB/digests" -name '*.md' 2>/dev/null)" ] || fail "no digest written in the sandbox"
 [ -n "$(find "$SB/logs" -name '*.log' 2>/dev/null)" ] || fail "no launcher log written in the sandbox"
+
+# The demo reached Review on mock and ignored every inherited branch-advice route.
+jq -es 'any(.[]; .stage == "review" and .exit == 0) and
+        all(.[]; .model == "mock" and .stage != "advise")' "$SB/state/runs.jsonl" >/dev/null \
+  || fail "expected a successful mock review and no production adapters or branch advice"
 
 # ... and it reached the push path, into the sandbox's LOCAL bare remote rather than a real origin.
 git -C "$SB/remote.git" for-each-ref --format='%(refname:short)' refs/heads | grep -q '^nightshift/' \
