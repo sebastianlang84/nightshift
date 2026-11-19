@@ -401,8 +401,11 @@ destinations. See the [hook specification](design/hook-spec.md) and [risk analys
   stops at the cap check.
   With `bin/status.sh --no-fetch`, ancestry checks require a configured base and complete local
   history. A managed branch missing from the local tracking refs is reported as unknown.
-- **Record verdicts** the machine can't derive with `bin/harvest.sh verdict <selector> <verdict>`;
-  harvest also reconciles merged/dropped branches automatically each run.
+- **Record verdicts** the machine can't derive with `bin/harvest.sh verdict <selector> <verdict>`.
+  When a branch name is shared across repositories, copy the item ID from the ambiguity message.
+  For adopted branches, including older adoptions, the selector is
+  `orphan-adopt:<ledger repo path>:<branch>`. Quote it as one argument if the path contains spaces.
+  Harvest also reconciles merged/dropped branches automatically each run.
 - **Clear open findings** — the work items nightshift reported but did not fix. A finding has **no
   branch**, so the merge/delete flow above structurally cannot reach it; it is closed from the
   numbered list instead:

@@ -22,7 +22,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from ledger import TERMINAL_VERDICTS, latest_branch_verdicts
+from ledger import TERMINAL_VERDICTS, latest_branch_verdicts, verdict_item_id
 
 HOME = Path(os.environ.get('NIGHTSHIFT_HOME') or Path(__file__).resolve().parent.parent)
 STATE_DIR = Path(os.environ.get('NIGHTSHIFT_STATE_DIR') or HOME / 'state')
@@ -160,7 +160,7 @@ def finding_states(rows):
 def item_state(row, verdicts, job, bases, no_fetch):
     """(plain state, settled?) of one ledger item other than a finding, most authoritative first."""
     repo, branch, outcome, sha = row['repo'], row.get('branch'), row['outcome'], row.get('sha')
-    v = verdicts.get(row.get('item')) or verdicts.get((repo, branch, sha))
+    v = verdicts.get(verdict_item_id(row)) or verdicts.get((repo, branch, sha))
     if outcome == 'tests-failed':
         return 'not shipped: tests failed', True
     if outcome == 'abandoned':
@@ -194,8 +194,8 @@ def overview(rows, job, bases, since, no_fetch):
     verdicts = {}
     for r in rows:
         if r.get('outcome') == 'verdict':
-            if r.get('item'):
-                verdicts[r['item']] = r.get('verdict')
+            if item := verdict_item_id(r):
+                verdicts[item] = r.get('verdict')
             if r.get('branch'):
                 verdicts[(r['repo'], r['branch'], r.get('sha'))] = r.get('verdict')
     findings = finding_states(rows)

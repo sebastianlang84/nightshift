@@ -31,6 +31,8 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 
+from ledger import verdict_item_id
+
 SCHEMA_VERSION = 2   # 2: revert detection reads git's own revert line; items carry their base
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
@@ -59,8 +61,8 @@ def merged_items(ledger: str) -> list[dict]:
                 row = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if row.get("outcome") == "verdict" and row.get("item"):
-                last[row["item"]] = row
+            if row.get("outcome") == "verdict" and (item := verdict_item_id(row)):
+                last[item] = row
     return [r for r in last.values() if r.get("verdict") == "merged" and r.get("sha")]
 
 
@@ -131,7 +133,8 @@ def reverted(repo: str, sha: str, cutoff: str) -> bool:
 
 def measure(row: dict, base_ref: str | None, window: int, now: datetime) -> dict:
     repo, sha = row["repo"], row["sha"]
-    rec = {"item": row["item"], "repo": repo, "sha": sha, "merged_seen": row.get("ts"),
+    rec = {"item": row["item"], "repo": repo, "branch": row.get("branch"),
+           "sha": sha, "merged_seen": row.get("ts"),
            "base": base_ref, "fingerprint": row.get("fingerprint")}
     try:
         seen = datetime.fromisoformat(row["ts"])
@@ -185,8 +188,10 @@ def probe(ledger: str, out: str, bases: dict[str, str], window: int) -> dict:
         with open(out, encoding="utf-8") as f:
             old = json.load(f)
         if old.get("schema_version") == SCHEMA_VERSION:
-            cache = {i["item"]: i for i in old.get("items", [])
-                     if i.get("state") in ("measured", "removed") and i.get("window_days") == window}
+            # An old cached adoption without a branch cannot be attributed safely.
+            cache = {key: i for i in old.get("items", [])
+                     if i.get("state") in ("measured", "removed") and i.get("window_days") == window
+                     and (key := verdict_item_id(i))}
     except (OSError, ValueError):
         pass
     refs: dict[str, str | None] = {}
@@ -195,7 +200,7 @@ def probe(ledger: str, out: str, bases: dict[str, str], window: int) -> dict:
         repo = row["repo"]
         if repo not in refs:
             refs[repo] = resolve_base_ref(repo, bases[repo]) if repo in bases else None
-        hit = cache.get(row["item"])
+        hit = cache.get(verdict_item_id(row))
         # Reuse only what was measured for this very verdict, on the base the rulebook names now.
         if (hit and refs[repo] and hit.get("base") == refs[repo] and hit.get("sha") == row["sha"]
                 and hit.get("merged_seen") == row.get("ts")):

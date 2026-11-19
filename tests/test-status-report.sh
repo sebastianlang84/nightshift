@@ -75,12 +75,13 @@ today=$(date +%F)
 mkdir -p "$TMP/state" "$TMP/worktrees"
 {
   printf '{"night":"%s","item":"i1","repo":"%s","branch":"nightshift/merged","sha":"%s","outcome":"shipped","summary":"Fix one"}\n' "$today" "$R" "$merged_sha"
-  printf '{"night":"%s","item":"i2","repo":"%s","branch":"nightshift/open","sha":"%s","outcome":"shipped","summary":"Fix two"}\n' "$today" "$R" "$open_sha"
+  # Legacy adoptions share an item ID. The open branch must remain open after the other's verdict.
+  printf '{"night":"%s","item":"orphan-adopt","repo":"%s","branch":"nightshift/open","sha":"%s","outcome":"shipped","summary":"Fix two","adopted":true}\n' "$today" "$R" "$open_sha"
   # A shipped branch settled as `resolved` is decided, as for the runner (ADR 0025).
   printf '{"night":"%s","item":"s1","repo":"%s","branch":"nightshift/resolved","sha":"%s","outcome":"shipped","summary":"Fix resolved"}\n' "$today" "$R" "$resolved_sha"
   printf '{"night":"%s","item":"s1","repo":"%s","branch":"nightshift/resolved","sha":"%s","outcome":"verdict","verdict":"resolved"}\n' "$today" "$R" "$resolved_sha"
-  printf '{"night":"%s","item":"s3","repo":"%s","branch":"nightshift/squashed","sha":"%s","outcome":"shipped","summary":"Fix squashed"}\n' "$today" "$R" "$squashed_sha"
-  printf '{"night":"%s","item":"s3","repo":"%s","branch":"nightshift/squashed","sha":"%s","outcome":"verdict","verdict":"merged"}\n' "$today" "$R" "$squashed_sha"
+  printf '{"night":"%s","item":"orphan-adopt","repo":"%s","branch":"nightshift/squashed","sha":"%s","outcome":"shipped","summary":"Fix squashed","adopted":true}\n' "$today" "$R" "$squashed_sha"
+  printf '{"night":"%s","item":"orphan-adopt","repo":"%s","branch":"nightshift/squashed","sha":"%s","outcome":"verdict","verdict":"merged"}\n' "$today" "$R" "$squashed_sha"
   printf '{"night":"2020-01-01","item":"s2","repo":"%s","branch":"nightshift/old-resolved","sha":"%s","outcome":"shipped","summary":"Old fix resolved"}\n' "$R" "$resolved_sha"
   printf '{"night":"2020-01-02","item":"s2","repo":"%s","branch":"nightshift/old-resolved","sha":"%s","outcome":"verdict","verdict":"resolved"}\n' "$R" "$resolved_sha"
   printf '{"night":"%s","item":"i3","repo":"%s","branch":null,"sha":null,"outcome":"finding","summary":"Finding three"}\n' "$today" "$R"
@@ -117,6 +118,7 @@ out=$(status_report)
 
 expect() { grep -qF -- "$1" <<<"$out" || { echo "missing: $1" >&2; echo "$out" >&2; exit 1; }; }
 expect "| fix | Fix one | merged |"
+expect "| fix | Fix squashed | merged |"
 expect "| fix | Fix two | reviewed: merge conflict (issue #9) |"
 custom="$(NIGHTSHIFT_MERGE_ISSUE_LABEL=ticket status_report)"
 grep -qF 'reviewed: merge conflict (ticket #9)' <<<"$custom" || {

@@ -84,6 +84,10 @@ adopted="$(jq -sc '[.[]|select(.branch=="nightshift/orphan" and .outcome=="shipp
 same_name_adopted="$(jq -sc --arg r "$TMP/repo2" '[.[]|select(.repo==$r and .branch=="nightshift/known" and .outcome=="shipped" and .adopted==true)]|length' "$LEDGER")"
 [ "$same_name_adopted" = 1 ] \
   || { echo "same-named branch in repo2 was hidden by repo1's ledger row" >&2; exit 1; }
+jq -es --arg r1 "$TMP/repo" --arg r2 "$TMP/repo2" '
+  [.[] | select(.outcome == "shipped" and .adopted == true) | .item] | sort
+  | . == (["orphan-adopt:\($r1):nightshift/orphan", "orphan-adopt:\($r2):nightshift/known"] | sort)
+' "$LEDGER" >/dev/null || { echo "adoptions need distinct, repo-scoped item IDs" >&2; exit 1; }
 
 # idempotent: a second harvest must NOT adopt again (the branch is now in the known set)
 STATE_DIR="$TMP/state" LEDGER="$LEDGER" RULEBOOK="$TMP/rulebook.yaml" \

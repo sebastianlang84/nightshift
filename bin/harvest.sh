@@ -174,14 +174,15 @@ reconcile() { # repo base branch sha [pr_url]
 # and `source` mark the row so it is never mistaken for a first-hand shipped record. Idempotent:
 # once written, the branch is in the ledger's `known` set and is never adopted twice.
 adopt_orphan() { # repo branch sha
-  jq -nc \
-    --arg item "orphan-adopt" --arg repo "$1" --arg branch "$2" --arg sha "$3" \
+  jq -L "$NIGHTSHIFT_HOME/lib" -nc \
+    --arg repo "$1" --arg branch "$2" --arg sha "$3" \
     --arg ts "$(date -Iseconds)" --arg night "$(date +%F)" --argjson sv "$SCHEMA_VERSION" \
-    '{night:$night,item:$item,repo:$repo,fingerprint:null,
+    'include "ledger";
+     {night:$night,repo:$repo,fingerprint:null,
       branch:$branch,sha:($sha|if .=="" then null else . end),pr_url:null,
       outcome:"shipped",source:"orphan-adopt",adopted:true,
       summary:"adopted orphan branch (lost shipped row restored)",
-      ts:$ts,schema_version:$sv}' >> "$LEDGER"
+      ts:$ts,schema_version:$sv} | .item = adopted_item_id' >> "$LEDGER"
 }
 
 # Orphan sweep (ADR 0016) + adoption (ADR 0018): a <prefix>* branch on origin that the ledger has no
@@ -239,11 +240,13 @@ manual_verdict() { # selector verdict [reason]
       'include "ledger"; terminal_verdicts + ["open"] | join(" ")')" >&2
     exit 2
   fi
-  # all shipped/finding rows matching the selector by item, branch, or fingerprint
+  # Legacy adoptions accept the same scoped selector as new ones, without rewriting the ledger.
   local matches
-  matches=$(jq -sc --arg s "$sel" \
-    '[.[]|select(.outcome=="shipped" or .outcome=="finding")
-         |select(.item==$s or .branch==$s or .fingerprint==$s)]' "$LEDGER")
+  matches=$(jq -L "$NIGHTSHIFT_HOME/lib" -sc --arg s "$sel" \
+    'include "ledger";
+     [.[]|select(.outcome=="shipped" or .outcome=="finding")
+         |.selector = (if .item=="orphan-adopt" and .branch then adopted_item_id else .item end)
+         |select(.selector==$s or .item==$s or .branch==$s or .fingerprint==$s)]' "$LEDGER")
   if [ "$matches" = "[]" ]; then
     echo "no shipped/finding ledger row matches '$sel'" >&2; exit 1
   fi
@@ -254,13 +257,13 @@ manual_verdict() { # selector verdict [reason]
   ndistinct=$(jq -r '[.[]|[.repo, (.branch // ""), (.fingerprint // "")]]|unique|length' <<<"$matches")
   if [ "$ndistinct" -gt 1 ]; then
     echo "ambiguous selector '$sel' matches $ndistinct repo-scoped findings/branches; use an item id —" >&2
-    jq -r '.[]|"  \(.repo)  \(.branch // "(finding)")  [\(.item)]"' <<<"$matches" | sort -u >&2
+    jq -r '.[]|"  \(.repo)  \(.branch // "(finding)")  [\(.selector)]"' <<<"$matches" | sort -u >&2
     exit 2
   fi
   local row item repo fp branch sha
   row=$(jq -c 'last' <<<"$matches")
   item=$(jq -r '.item' <<<"$row"); repo=$(jq -r '.repo' <<<"$row")
-  fp=$(jq -r '.fingerprint' <<<"$row"); branch=$(jq -r '.branch // ""' <<<"$row")
+  fp=$(jq -r '.fingerprint // ""' <<<"$row"); branch=$(jq -r '.branch // ""' <<<"$row")
   sha=$(jq -r '.sha // ""' <<<"$row")
   # Idempotent: don't append a duplicate identical manual verdict on the same branch.
   local was was_src
@@ -400,6 +403,7 @@ usage:
   harvest.sh --dry-run                          show the reconciliation, write nothing
   harvest.sh verdict <sel> <verdict> [reason]   record a manual verdict (findings/override)
       <sel>      item id | branch | fingerprint
+                 adopted branch item id: orphan-adopt:<ledger repo path>:<branch>
 EOF
   printf '      <verdict>  %s\n' "$(jq -L "$NIGHTSHIFT_HOME/lib" -nr \
     'include "ledger"; terminal_verdicts + ["open"] | join(" | ")')"

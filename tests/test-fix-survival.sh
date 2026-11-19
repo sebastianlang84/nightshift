@@ -96,4 +96,15 @@ python3 "$ROOT/lib/probe_survival.py" --ledger "$L" --out "$TMP/none.json" >/dev
 [ "$(jq '[.items[] | select(.state=="measured")] | length' "$TMP/none.json")" -eq 0 ] \
   || fail "a repo without a base was measured"
 
+# A drop on one legacy adoption must leave other adoptions in the survival report.
+for verdict_branch in merged:held merged:reworked dropped:late; do
+  branch=${verdict_branch#*:}
+  printf '{"outcome":"verdict","verdict":"%s","item":"orphan-adopt","repo":"%s","branch":"nightshift/%s","sha":"%s","ts":"%s"}\n' \
+    "${verdict_branch%:*}" "$R" "$branch" "$(sha "$branch")" "$(day 89)" >> "$L"
+done
+python3 "$ROOT/lib/probe_survival.py" --ledger "$L" --out "$S" --base "$R" main >/dev/null
+jq -e '[.items[] | select(.item == "orphan-adopt") | [.branch, .state, .held]] | sort
+  | . == [["nightshift/held", "measured", true], ["nightshift/reworked", "measured", false]]' "$S" >/dev/null \
+  || fail "legacy adopted branches lost distinct survival measurements"
+
 echo "test-fix-survival: ok"

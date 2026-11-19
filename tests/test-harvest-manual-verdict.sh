@@ -47,6 +47,23 @@ rc=0; run verdict nightshift/b1 merged >"$TMP/out" 2>"$TMP/err" || rc=$?
 [ "$rc" = 2 ] || { echo "cross-repo branch selector should exit 2, got $rc" >&2; exit 1; }
 grep -q 'use an item id' "$TMP/err"
 
+# Older adoptions share both an item ID and, here, a branch name. A scoped selector addresses one.
+for repo in /legacy/one '/legacy/two: checkout'; do
+  jq -nc --arg r "$repo" '{item:"orphan-adopt",repo:$r,branch:"nightshift/legacy",
+    fingerprint:null,sha:"legacy-sha",outcome:"shipped",adopted:true}' >> "$LEDGER"
+done
+selector='orphan-adopt:/legacy/two: checkout:nightshift/legacy'
+before=$(wc -l < "$LEDGER")
+for ambiguous in nightshift/legacy orphan-adopt; do
+  rc=0; run verdict "$ambiguous" merged >"$TMP/out" 2>"$TMP/err" || rc=$?
+  [ "$rc" = 2 ] || { echo "ambiguous legacy selector should exit 2, got $rc" >&2; exit 1; }
+  grep -qF "[$selector]" "$TMP/err"
+done
+[ "$(wc -l < "$LEDGER")" = "$before" ] || { echo "ambiguous adoption wrote the ledger" >&2; exit 1; }
+run verdict "$selector" merged >/dev/null
+jq -es 'last | .repo == "/legacy/two: checkout" and .branch == "nightshift/legacy"
+        and .verdict == "merged" and .source == "manual" and .fingerprint == null' "$LEDGER" >/dev/null
+
 # --- unrecognised arguments are rejected, never silently harvested -----------------
 # A typo'd preview flag must NOT fall through to the argument-less (ledger-writing) path.
 before=$(wc -l < "$LEDGER")
