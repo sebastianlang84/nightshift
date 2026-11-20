@@ -277,40 +277,52 @@ stage_model() { # stage -> model id or ""
 }
 
 # ---- claude adapter (first-party CLI headless, ADR 0003) ----
+# Use the same effective source selection for every startup check and the CLI launch.
+check_claude_controls() {
+  python3 "$NIGHTSHIFT_HOME/lib/check_claude_controls.py" \
+    --sources="${NIGHTSHIFT_CLAUDE_SETTING_SOURCES-local}" "$@"
+}
+
 # The agent only reads/edits files; the Runner owns all git (branch/commit/push).
 # Sandbox default uses --dangerously-skip-permissions (throwaway repo; git-level
 # confinement via hooks/pre-push holds regardless of Claude's permission mode).
 claude_run() { # stage workdir item_dir
-  local stage="$1" wd="$2" id="$3" prompt out model
+  local stage="$1" wd="$2" id="$3" prompt out model sources flag
   local rawf="$id/.raw_$stage" errf="$id/$stage.err" rc=0 parse_rc=0
-  # A Read-only tool profile does not stop startup hooks or MCP servers. Inspect before
-  # launching ANY Claude stage, including advice on branches not produced by this Runner.
-  if ! python3 "$NIGHTSHIFT_HOME/lib/check_claude_controls.py" worktree "$wd" >"$errf" 2>&1; then
-    : > "$rawf"
-    log "  stage $stage: Claude control files refused — see $errf"
-    # Status 2: a deterministic configuration refusal, not a wall. As status 1 it counted as "did not
-    # reach its model" and two of them aborted the whole night (run_agent's wall logic).
-    return 2
-  fi
   # --max-turns is the C6 runaway cap (docs/design/risk-analysis.md), not a budget: the spend cap and
   # the wall-clock bound are what limit cost. It was 25, which Explore reached and died on for 5 of 26
   # items on 2026-08-12 — each after spending its full ~$2 of tokens and returning nothing. A ceiling
   # that is hit routinely is the wrong ceiling: 60 still hard-stops a loop, but leaves a navigating
   # stage room to finish. Every abort is now visible in the digest rather than read as "found nothing".
-  local flags="${NIGHTSHIFT_CLAUDE_FLAGS:---dangerously-skip-permissions --max-turns 60}"
+  local flags_override="${NIGHTSHIFT_CLAUDE_FLAGS:---dangerously-skip-permissions --max-turns 60}"
+  local -a flags=()
+  # Read through EOF to split multiline overrides without expanding filenames.
+  IFS=$' \t\n' read -r -d '' -a flags <<< "$flags_override" || true
+  for flag in "${flags[@]}"; do
+    case "${flag%%=*}" in
+      --mcp-config|--setting-sources|--settings)
+        : > "$rawf"
+        printf 'NIGHTSHIFT_CLAUDE_FLAGS contains reserved flag %s\n' "${flag%%=*}" > "$errf"
+        log "  stage $stage: $(<"$errf") — refusing Claude launch"
+        return 2
+        ;;
+    esac
+  done
+  # Startup checks apply even to read-only stages and branches not produced by this Runner.
+  if ! sources="$(check_claude_controls --print-sources worktree "$wd" 2>"$errf")"; then
+    : > "$rawf"
+    out="$(<"$errf")"
+    log "  stage $stage: ${out:-Claude control inspection failed} — see $errf"
+    # Status 2 signals a deterministic configuration refusal to run_agent's wall logic.
+    return 2
+  fi
   # Which model this stage runs on (stage_model above; ADR 0020, ADR 0044).
   local -a model_arg=()
   model="$(stage_model "$stage")"
   [ -z "$model" ] || model_arg=(--model "$model")
-  # Stage isolation from the OPERATOR's personal Claude Code config (docs/design/hook-spec.md).
-  # `--setting-sources` selects which settings SCOPES the CLI loads; dropping `user` drops both
-  # ~/.claude/settings.json AND ~/.claude/CLAUDE.md, while `project,local` keeps the TARGET repo's
-  # own CLAUDE.md — the context a stage actually wants. Without this the operator's private
-  # instructions (chat language, personal conventions, tripwires) end up verbatim in worknotes and
-  # therefore in pushed commit bodies. Empty = pass no flag (escape hatch for a CLI too old to know
-  # the option; the leak returns). Measured: ~3.8k tokens of personal rules dropped per stage call.
+  # The default local scope skips personal settings and project hooks while keeping the repo's
+  # CLAUDE.md. The Runner's --settings still loads its guard (docs/design/hook-spec.md).
   local -a sources_arg=()
-  local sources="${NIGHTSHIFT_CLAUDE_SETTING_SOURCES-project,local}"
   [ -z "$sources" ] || sources_arg=(--setting-sources "$sources")
   # Per-stage CAPABILITY profile: enforce each stage's rules by which tools EXIST, not by
   # asking the prompt nicely (same philosophy as the git-confinement hook). explore/review
@@ -327,7 +339,6 @@ claude_run() { # stage workdir item_dir
   # Layer 1 for the agent: inject core.hooksPath via env so EVERY git the agent runs is
   # confined by hooks/pre-push — no writes to any repo config. Layer 2: the PreToolUse guard
   # (blocks disabling Layer 1) via --settings. NIGHTSHIFT_BRANCH_PREFIX is already exported.
-  # shellcheck disable=SC2086
   # NIGHTSHIFT_WORKTREE tells the PreToolUse guard which root to confine Write/Edit to
   # (the Fix stage has Write/Edit but no Bash; absolute paths would otherwise escape — R8).
   # CLAUDE_CODE_DISABLE_AUTO_MEMORY: the auto-memory store is keyed by cwd under ~/.claude/projects/
@@ -342,7 +353,8 @@ claude_run() { # stage workdir item_dir
   (cd "$wd" && \
     GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="$HOOKS_DIR" \
     NIGHTSHIFT_WORKTREE="$wd" CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 \
-    claude -p --output-format json --settings "$STATE_DIR/claude-settings.json" --tools "$tools" "${model_arg[@]}" "${sources_arg[@]}" $flags < <(printf '%s' "$prompt")) >"$rawf" 2>"$errf" || rc=$?
+    claude -p --output-format json --settings "$STATE_DIR/claude-settings.json" --tools "$tools" \
+      "${model_arg[@]}" "${sources_arg[@]}" --strict-mcp-config "${flags[@]}" < <(printf '%s' "$prompt")) >"$rawf" 2>"$errf" || rc=$?
   out="$(cat "$rawf")"
   # `claude -p --output-format json` is NOT a stable shape. Sometimes it is a single
   # result object ({result,usage,total_cost_usd}); sometimes a JSON ARRAY of events with

@@ -121,7 +121,7 @@ agent:
 | `NIGHTSHIFT_CLAUDE_MODEL` | claude | the rulebook's `agent.claude_model`, else no `--model` |
 | `NIGHTSHIFT_REVIEW_MODEL` | claude | the rulebook's `agent.review_model`, else the claude model; set empty to review on the claude model for one run |
 | `NIGHTSHIFT_CLAUDE_FLAGS` | claude | `--dangerously-skip-permissions --max-turns 60` |
-| `NIGHTSHIFT_CLAUDE_SETTING_SOURCES` | claude | `--setting-sources project,local` (stage isolation) |
+| `NIGHTSHIFT_CLAUDE_SETTING_SOURCES` | claude | `--setting-sources local` keeps the repo's `CLAUDE.md` and skips project hooks. Supply a comma-separated list of `user`, `project`, and `local`, or an exactly empty value to omit the flag and load all scopes. See the [validation rules](design/hook-spec.md#stage-isolation--the-operators-personal-config-is-not-stage-context). |
 | `NIGHTSHIFT_EMPTY_ANSWER_RETRIES` | all | `1` — a stage whose model returned nothing is retried once (ADR 0034); `0` disables it |
 | `NIGHTSHIFT_TEST_TIMEOUT` | all | the rulebook's `limits.test_timeout_seconds`, else 600s per `test_cmd` |
 | `NIGHTSHIFT_TEST_PATH` | all | nothing is prepended, so a `test_cmd` sees only `/usr/local/bin:/usr/bin:/bin` |
@@ -293,8 +293,10 @@ two answer different questions: the log says what was asked for, the ledger what
 These are per-process, so a whole run shares one model. Per-*stage* cost control (a cheap model for
 the recon survey, the full model for fix/review) means one run per model setting today.
 
-`NIGHTSHIFT_CLAUDE_FLAGS` replaces the sandbox defaults wholesale — the `--tools` allowlist, not
-these flags, is what confines the agent (see [`docs/design/risk-analysis.md`](design/risk-analysis.md)).
+`NIGHTSHIFT_CLAUDE_FLAGS` replaces the default extra Claude arguments with whitespace-separated
+arguments. The Runner refuses to start the stage if the override includes `--mcp-config`,
+`--setting-sources`, or `--settings`, including their `--flag=value` forms.
+Use `NIGHTSHIFT_CLAUDE_SETTING_SOURCES` to select the settings scopes.
 
 ## Updating
 

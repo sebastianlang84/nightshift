@@ -6,6 +6,7 @@ Symlink control paths are refused even when unchanged: their targets are outside
 the set of paths a plain control-file diff can protect.
 """
 
+import argparse
 import json
 from pathlib import Path
 import stat
@@ -14,6 +15,17 @@ import sys
 
 
 CONTROL_PATHS = (".claude", ".claude/settings.json", ".claude/settings.local.json", ".mcp.json")
+SETTINGS_SCOPES = {".claude/settings.json": "project", ".claude/settings.local.json": "local"}
+
+
+def parse_setting_sources(value):
+    if value == "":
+        return []
+    scopes = [scope.strip() for scope in value.split(",")]
+    if any(scope not in ("user", "project", "local") for scope in scopes):
+        raise ValueError(f"invalid NIGHTSHIFT_CLAUDE_SETTING_SOURCES value {value!r}. "
+                         "Expected a comma-separated list of user, project, local or an empty value")
+    return scopes
 
 
 def check_config(path, text):
@@ -30,7 +42,7 @@ def check_config(path, text):
         raise ValueError(f"{path}: candidate-controlled {key}")
 
 
-def check_worktree(root):
+def check_worktree(root, content_paths):
     for name in CONTROL_PATHS:
         path = Path(root) / name
         try:
@@ -41,7 +53,8 @@ def check_worktree(root):
             continue
         if not stat.S_ISREG(mode) or name == ".claude":
             raise ValueError(f"{name}: symlink or non-regular control path")
-        check_config(name, path.read_text(encoding="utf-8"))
+        if name in content_paths:
+            check_config(name, path.read_text(encoding="utf-8"))
 
 
 def git(root, *args):
@@ -49,7 +62,7 @@ def git(root, *args):
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout
 
 
-def check_tree(root, tip):
+def check_tree(root, tip, content_paths):
     entries = git(root, "ls-tree", "-z", tip, "--", *CONTROL_PATHS)
     for entry in entries.split(b"\0"):
         if not entry:
@@ -64,20 +77,36 @@ def check_tree(root, tip):
             continue
         if mode not in ("100644", "100755") or kind != "blob" or name == ".claude":
             raise ValueError(f"{name}: symlink or non-regular control path")
-        check_config(name, git(root, "cat-file", "blob", oid).decode("utf-8"))
+        if name in content_paths:
+            check_config(name, git(root, "cat-file", "blob", oid).decode("utf-8"))
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--sources", default="", help="Claude setting sources (empty loads all scopes)")
+    parser.add_argument("--print-sources", action="store_true", help="print the canonical sources on success")
+    parser.add_argument("mode", choices=("worktree", "tree"))
+    parser.add_argument("root")
+    parser.add_argument("tip", nargs="?")
+    args = parser.parse_args()
+    if (args.mode == "tree") != (args.tip is not None):
+        parser.error("tree mode requires TIP and worktree mode takes only ROOT")
+
     try:
-        if len(sys.argv) == 3 and sys.argv[1] == "worktree":
-            check_worktree(sys.argv[2])
-        elif len(sys.argv) == 4 and sys.argv[1] == "tree":
-            check_tree(sys.argv[2], sys.argv[3])
+        scopes = parse_setting_sources(args.sources)
+        content_paths = {".mcp.json"}
+        content_paths.update(
+            name for name, scope in SETTINGS_SCOPES.items() if not scopes or scope in scopes
+        )
+        if args.mode == "worktree":
+            check_worktree(args.root, content_paths)
         else:
-            raise ValueError("usage: check_claude_controls.py worktree ROOT | tree ROOT TIP")
+            check_tree(args.root, args.tip, content_paths)
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:
-        print(f"Claude control files refused: {exc}")
+        print(f"Claude control files refused: {exc}", file=sys.stderr)
         return 1
+    if args.print_sources:
+        print(",".join(scopes))
     return 0
 
 

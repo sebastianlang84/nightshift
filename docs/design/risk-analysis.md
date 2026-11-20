@@ -37,7 +37,7 @@ An optional external merge job is a separate authorization decision ([ADR 0040](
 | C7 | Report-only mode | `findings-only` reports without pushing. |
 | C8 | Reviewable changes | Soft file and line budgets guide Explore and Fix; these are not hard reject limits. |
 | C9 | Sandboxed execution | Ship gates and repository setup run in bubblewrap with an allowlisted environment, no host home or Docker socket, limited writable paths, and resource limits. Network is off unless public egress is explicitly proxied. |
-| C10 | Startup control checks | Claude launches reject unsafe candidate hooks, MCP configuration, executable or unknown settings, and symlink control paths. Post-Fix and branch checks reject control-file changes for every adapter. |
+| C10 | Startup control checks | The default `--setting-sources local` leaves unchanged project settings inert because project hooks never load ([measured on 2026-11-20 with Claude Code 2.1.329](hook-spec.md#stage-isolation--the-operators-personal-config-is-not-stage-context)). `--strict-mcp-config` prevents implicit MCP loading. Checks reject unsafe settings in enabled scopes, unsafe `.mcp.json` content, and symlink or non-regular control paths. Post-Fix and branch checks reject control-file changes for every adapter. |
 
 Implementation: [adapters.sh](../../lib/adapters.sh), [sandbox.sh](../../lib/sandbox.sh),
 [nightshift.sh](../../bin/nightshift.sh), [pre-push](../../hooks/pre-push),

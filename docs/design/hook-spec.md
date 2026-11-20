@@ -63,9 +63,8 @@ symlinks in existing prefixes), and denies anything not equal to or strictly ben
 root. The root is the Runner-injected `NIGHTSHIFT_WORKTREE` (primary), else the payload `.cwd`, else
 `$PWD`. Containment is trailing-slash-safe (a prefix-sibling like `…/worktree-evil` is *not* inside).
 The exceptions inside the root are `.claude/settings.json`, `.claude/settings.local.json`, and
-`.mcp.json`: Claude loads them as executable hook or MCP-server configuration for the next stage, so
-Fix may not create or edit them. A repository that intentionally changes those files needs human
-handling.
+`.mcp.json`. These paths can supply startup configuration, so Fix may not create or edit them.
+A repository that intentionally changes those files needs human handling.
 
 The guard is one layer, and the Review stage and the branch advisors run Claude on whatever a
 worktree or a pushed branch holds. So the Runner enforces the same rule itself, for every adapter (`worktree_control_files_clean` in
@@ -75,18 +74,15 @@ refused as `worktree-tampered` before Review runs. `advise_branches` asks the sa
 against its merge base (`branch_control_files_changed`) and rejects such a branch without checking it
 out for any advisor.
 
-A pathname diff alone cannot cover unchanged settings that execute a changed script, or unchanged
-symlinks whose targets changed. `lib/check_claude_controls.py` therefore also inspects the candidate
-configuration, both after Fix and in the committed tree before an advisor worktree is created.
-Only string-valued `model` and `$schema` preferences and empty `hooks`/`mcpServers` objects are
-allowed; all other settings are refused. This also blocks plugin, environment and command settings
-without depending on a complete list of executable configuration keys. Symlinks at
-`.claude` or any of the three control files, other non-regular paths, malformed or unreadable JSON,
-and failed Git inspections are refused too. Ordinary settings such as an unchanged model preference
-remain allowed. The same check runs before **every** Claude CLI launch, including Review and Advice,
-so even a branch or repository predating these checks cannot start candidate-owned hooks or MCP
-servers through Claude. The Runner-owned `--settings` guard is still loaded. Repositories that need
-these executable project settings require operator handling outside this pipeline.
+A pathname diff alone misses changes to scripts referenced by unchanged settings and changes to
+symlink targets. `lib/check_claude_controls.py` runs before every Claude launch, after Fix, and
+against the committed tree before branch advice. It checks `.claude/settings.json` when `project` is enabled and
+`.claude/settings.local.json` when `local` is enabled. An empty source override enables both checks.
+Under the default `local` scope, unchanged project settings are inert because their hooks never
+load. The checker always inspects `.mcp.json` and rejects symlinks or non-regular entries at any
+control path, with a directory expected at `.claude`. For configuration it reads, the checker allows
+only string-valued `model` and `$schema` preferences and empty `hooks` or `mcpServers` objects.
+Malformed or unreadable checked JSON and failed Git inspections also cause refusal.
 
 **The denial itself is built with `jq`,** not string-interpolated: its reason quotes the resolved
 target, i.e. an agent-supplied path, and a quote/backslash/control character in that path would
@@ -141,15 +137,21 @@ real-model night (2026-08-01): a worknote opened with a tripwire line from the o
 chat-only annotation convention the same file forbids in commits. Same class as the confinement
 hooks — enforce it by what the CLI *loads*, not by asking the prompt nicely.
 
-**claude — mechanism (verified against claude 2.1.205, 2026-08-02).**
+**Claude Code CLI flags and environment**
 
-- **`--setting-sources project,local`** — selects which settings **scopes** the CLI loads. Dropping
-  `user` drops `~/.claude/settings.json` *and* `~/.claude/CLAUDE.md`; keeping `project,local` keeps
-  the **target repo's own** `CLAUDE.md`, which is exactly the context a stage should have. Measured:
-  ~3.8k tokens of personal rules removed per stage call. `--settings`, `--mcp-config` and `--tools`
-  are unaffected — Layer 2 was re-verified firing under the flag, so the confinement is untouched.
-  Override with `NIGHTSHIFT_CLAUDE_SETTING_SOURCES`; **empty disables the flag** (escape hatch for a
-  CLI too old to know the option — the leak returns).
+- **`--setting-sources local`** selects local settings by default and excludes the user and project
+  settings scopes. A throwaway repo test on 2026-11-20 with Claude Code 2.1.329 confirmed that the
+  repo's `CLAUDE.md` still loads and its project `SessionStart` hook is skipped with `local`. The
+  same test with `project,local` loaded `CLAUDE.md` and ran the hook. The Runner passes its own guard
+  via `--settings`. `NIGHTSHIFT_CLAUDE_SETTING_SOURCES` accepts a comma-separated list of the
+  lowercase names `user`, `project`, and `local`. The Runner trims whitespace around each name.
+  An exactly empty value omits `--setting-sources` and lets Claude load all scopes. Empty elements,
+  unknown names, and case variants cause the Runner to log the invalid value and refuse startup,
+  reject the Fix during its control check, or reject the branch before advice.
+- **`--strict-mcp-config`** applies with every source selection. The Runner supplies no
+  `--mcp-config`, so there are no MCP servers to load. The Runner reserves `--mcp-config`,
+  `--setting-sources`, and `--settings` for its own control of startup. Including any of these
+  flags in `NIGHTSHIFT_CLAUDE_FLAGS`, including as `--flag=value`, refuses the stage with status 2.
 - **`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`** — the auto-memory store is keyed by cwd under
   `~/.claude/projects/` and is *not* covered by setting sources. A throwaway worktree has nothing to
   read, but the memory **writer** is a write path outside the worktree that the PreToolUse guard
@@ -169,8 +171,9 @@ API-key auth. `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` would also drop the *target rep
 which a stage legitimately needs. Not tested: `deny`-style permission rules, which do not govern
 context loading at all.
 
-Regression cover: `tests/test-claude-context-isolation.sh` (flag default, escape hatch, verbatim
-pass-through, memory env).
+`tests/test-claude-context-isolation.sh` covers source overrides, reserved flags, strict MCP
+configuration, and the memory environment variable. `tests/test-claude-control-files.sh` covers
+malformed source selections at startup, after Fix, and before branch advice.
 
 ## Out of scope for §2a — narrowed by capability profiles
 

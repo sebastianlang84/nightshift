@@ -1418,12 +1418,10 @@ open_pr() { # repo wt branch item_dir base -> echoes PR url ("" if none)
 }
 
 
-# Claude loads these from a stage's cwd (`--setting-sources project,local`) and runs the hooks and
-# MCP servers they name, unsandboxed, as the operator (docs/design/hook-spec.md). The PreToolUse
-# guard keeps a Claude Fix away from them, but the guard is one layer, a pushed branch reaches the
-# branch advisors without passing through it, and the Review stage and the advisors run Claude on
-# whatever the worktree holds. So the Runner checks the result itself, for every adapter. `.claude` is listed on its own because a symlink in its place would redirect all
-# three paths without git ever naming them.
+# These paths can supply startup configuration (docs/design/hook-spec.md). The PreToolUse guard
+# keeps a Claude Fix away from them. The Runner checks changes itself for every adapter, including
+# branches that reach advice without going through Fix. A symlink replacing `.claude` can redirect
+# settings without Git naming either settings file.
 CLAUDE_CONTROL_PATHS=(.claude/settings.json .claude/settings.local.json .mcp.json .claude)
 # Keeps only the paths that ARE control data from a list of changed paths: the `.claude` pathspec
 # also matches everything beneath it (commands, agents), which is ordinary repository content.
@@ -1434,11 +1432,10 @@ control_path_filter() {
 # A Fix that touched any of them is refused before Review runs. Ignored files count — a gitignored
 # settings.local.json is still loaded — and a failed listing counts as a change: this fails closed.
 worktree_control_files_clean() { # repo worktree -> 0 untouched, 1 touched (and says so)
-  local repo="$1" wt="$2" st hit
-  # Also refuse unchanged config that can execute a changed script, and all symlink
-  # control paths. A pathname diff alone cannot protect either kind of indirection.
-  if ! python3 "$NIGHTSHIFT_HOME/lib/check_claude_controls.py" worktree "$wt" >&2; then
-    log "  $(basename "$repo"): unsafe Claude control files — refusing"
+  local repo="$1" wt="$2" st hit out
+  # Loaded settings can run a changed script even when the settings file is untouched.
+  if ! out="$(check_claude_controls worktree "$wt" 2>&1)"; then
+    log "  $(basename "$repo"): ${out:-Claude control inspection failed} — refusing"
     return 1
   fi
   st="$(git -C "$wt" status --porcelain=v1 --ignored=traditional --untracked-files=all --no-renames \
@@ -1456,7 +1453,7 @@ worktree_control_files_clean() { # repo worktree -> 0 untouched, 1 touched (and 
 # does the branch change against its merge base? Any output (or a failed diff) means do not run.
 branch_control_files_changed() { # repo base tip -> prints the paths; 1 if none
   local repo="$1" base="$2" tip="$3" mb out
-  if ! out="$(python3 "$NIGHTSHIFT_HOME/lib/check_claude_controls.py" tree "$repo" "$tip" 2>&1)"; then
+  if ! out="$(check_claude_controls tree "$repo" "$tip" 2>&1)"; then
     printf '%s\n' "${out:-(control inspection failed)}"
     return 0
   fi
@@ -2046,12 +2043,11 @@ advise_branches() {
         | {summary:(.summary//""),fingerprint:(.fingerprint//""),type:(.type//""),dimension:(.dimension//"")}' \
         "$LEDGER" 2>/dev/null) || finding='{}'
       wt=""; cells=""; fixes=""; what=""; benefit=""; n_missing=0; n_merge=0; n_reject=0
-      # A branch that changes Claude's project settings or MCP config is never checked out for an
-      # advisor: a Claude advisor would run the hooks it names on the host. It is rejected outright.
+      # Reject failed Claude control checks before checking out the branch for any advisor.
       if ctl="$(branch_control_files_changed "$path" "$base_sha" "$tip")"; then
-        log "branch review: $name changes Claude control files ($ctl) — not checked out, rejected"
+        log "branch review: $name failed Claude control checks ($ctl) — rejected before checkout"
         for k in "${!advisors[@]}"; do
-          cells="$cells **reject** — $(md_cell "changes Claude control files: $ctl") |"
+          cells="$cells **reject** — $(md_cell "Claude control check failed ($ctl)") |"
         done
         rows="$rows| $(md_cell "$(basename "$path")") | $(md_cell "$name") | | |$cells **reject** | $(md_cell "needs human handling: $ctl") |"$'\n'
         continue
