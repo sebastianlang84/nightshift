@@ -24,6 +24,7 @@ stdout.
 Usage: parse_rulebook.py [--pairs] RULEBOOK"""
 import json
 import posixpath
+import re
 import sys
 from pathlib import Path
 
@@ -124,6 +125,17 @@ def put(
     if key in target:
         raise SystemExit(f"{section}: duplicate key '{key}'")
     target[key] = read(v)
+
+
+def _int(value: str, minimum: int, message: str) -> str:
+    """Return VALUE as a canonical decimal string, or exit with MESSAGE.
+
+    Only ASCII digits count: `str.isdecimal()` also accepts digits such as fullwidth `１０`, which
+    Bash's `-ge` cannot compare, so a cap would silently stop capping. The canonical form drops
+    leading zeros, which Bash arithmetic would otherwise read as octal (`010` is 8, `08` aborts)."""
+    if not re.fullmatch(r"[0-9]+", value) or int(value) < minimum:
+        raise SystemExit(message)
+    return str(int(value))
 
 
 def load(path: str) -> dict:
@@ -228,9 +240,7 @@ def load(path: str) -> dict:
     lim: dict[str, str] = {}
     out["limits"] = lim
     max_open = limits.get("max_open_branches", "2")
-    if not max_open.isdecimal() or int(max_open) < 1:
-        raise SystemExit("limits.max_open_branches must be a positive integer")
-    lim["max_open_branches"] = max_open
+    lim["max_open_branches"] = _int(max_open, 1, "limits.max_open_branches must be a positive integer")
     # Kept empty when absent: here the rulebook beats the env (precedence: rulebook ->
     # NIGHTSHIFT_MAX_RUN_BRANCHES -> default), and bin/nightshift.sh only reaches the env
     # once the rulebook value is empty, so a parser default would silently disable the
@@ -239,61 +249,47 @@ def load(path: str) -> dict:
     # test_max_procs, test_fsize_mb, max_verifies_per_run) keep a parser default safely.
     # max_run_minutes is also left empty, for its own reason (see its comment below).
     max_run_branches = limits.get("max_branches_per_run", "")
-    if max_run_branches and (
-        not max_run_branches.isdecimal() or int(max_run_branches) < 1
-    ):
-        raise SystemExit("limits.max_branches_per_run must be a positive integer")
+    if max_run_branches:
+        max_run_branches = _int(
+            max_run_branches, 1, "limits.max_branches_per_run must be a positive integer"
+        )
     lim["max_branches_per_run"] = max_run_branches
     # A hand-set 0 would make the fix<->review loop never run — every finding then
     # abandons silently. Require >= 1 so the misconfig fails loudly (with the runner's
     # fail-closed parse handling) instead of doing nothing.
     mfi = limits.get("max_fix_iterations", "3")
-    if not mfi.isdecimal() or int(mfi) < 1:
-        raise SystemExit("limits.max_fix_iterations must be a positive integer")
-    lim["max_fix_iterations"] = mfi
+    lim["max_fix_iterations"] = _int(mfi, 1, "limits.max_fix_iterations must be a positive integer")
     # These values are prompt guidance, but zero or non-numeric input still makes that guidance
     # useless or contradictory. Reject it here rather than passing malformed limits to a stage.
     mfc = limits.get("max_files_per_change", "15")
-    if not mfc.isdecimal() or int(mfc) < 1:
-        raise SystemExit("limits.max_files_per_change must be a positive integer")
-    lim["max_files_per_change"] = mfc
+    lim["max_files_per_change"] = _int(mfc, 1, "limits.max_files_per_change must be a positive integer")
     mlc = limits.get("max_lines_per_change", "400")
-    if not mlc.isdecimal() or int(mlc) < 1:
-        raise SystemExit("limits.max_lines_per_change must be a positive integer")
-    lim["max_lines_per_change"] = mlc
+    lim["max_lines_per_change"] = _int(mlc, 1, "limits.max_lines_per_change must be a positive integer")
     # Wall-clock spend budget for the whole night (ADR 0013). Empty = no time cap (bash applies the
     # NIGHTSHIFT_MAX_RUN_SECONDS env override first). Validate a present value as a positive integer.
     mrm = limits.get("max_run_minutes", "")
-    if mrm and (not mrm.isdecimal() or int(mrm) < 1):
-        raise SystemExit("limits.max_run_minutes must be a positive integer")
+    if mrm:
+        mrm = _int(mrm, 1, "limits.max_run_minutes must be a positive integer")
     lim["max_run_minutes"] = mrm
     # Wall-clock ceiling for ONE repo's `test_cmd` (ADR 0022). A hanging suite must not eat the
     # night, so the gate always runs under a timeout. Default 600s; a hand-set 0 would make every
     # gated run time out instantly and silently ship nothing, so require a positive integer.
     tts = limits.get("test_timeout_seconds", "600")
-    if not tts.isdecimal() or int(tts) < 1:
-        raise SystemExit("limits.test_timeout_seconds must be a positive integer")
-    lim["test_timeout_seconds"] = tts
+    lim["test_timeout_seconds"] = _int(tts, 1, "limits.test_timeout_seconds must be a positive integer")
     # Resource ceilings for the sandboxed gate (ADR 0026), applied as rlimits inside the sandbox.
     # `test_memory_mb` is RLIMIT_DATA — the heap. NOT RLIMIT_AS: a WASM runtime reserves
     # multi-GB of address space it never touches, so an address-space cap large enough for a real
     # JS suite bounds nothing at all (measured: vitest fails at 16 GiB). 0 = no cap.
     tmb = limits.get("test_memory_mb", "4096")
-    if not tmb.isdecimal():
-        raise SystemExit("limits.test_memory_mb must be a non-negative integer")
-    lim["test_memory_mb"] = tmb
+    lim["test_memory_mb"] = _int(tmb, 0, "limits.test_memory_mb must be a non-negative integer")
     # RLIMIT_NPROC. The kernel charges this to the ACCOUNT, not to the sandbox, so a value below the
     # host's idle process count makes every gate fail to fork. 0 = no process cap.
     tmp_ = limits.get("test_max_procs", "2048")
-    if not tmp_.isdecimal():
-        raise SystemExit("limits.test_max_procs must be a non-negative integer")
-    lim["test_max_procs"] = tmp_
+    lim["test_max_procs"] = _int(tmp_, 0, "limits.test_max_procs must be a non-negative integer")
     # RLIMIT_FSIZE. The worktree and the scratch HOME are on real disk, so without this a suite can
     # fill the filesystem — the one host-DoS route the tmpfs caps do not cover. 0 = no cap.
     tfs = limits.get("test_fsize_mb", "2048")
-    if not tfs.isdecimal():
-        raise SystemExit("limits.test_fsize_mb must be a non-negative integer")
-    lim["test_fsize_mb"] = tfs
+    lim["test_fsize_mb"] = _int(tfs, 0, "limits.test_fsize_mb must be a non-negative integer")
     # Findings emitted per repo per pass. Default 1 keeps a rulebook that omits the key at the
     # pre-v2 single-finding behavior; the live rulebook sets it explicitly (ADR 0011).
     # A hand-set 0 forces n_find=0 in the Runner (MAX_FINDINGS=0 → repo_findings 0 → the
@@ -301,17 +297,15 @@ def load(path: str) -> dict:
     # non-numeric value detonates later in bash integer arithmetic. Require a positive
     # integer so the misconfig fails loudly, matching every sibling limit above.
     mfp = limits.get("max_findings_per_item", "1")
-    if not mfp.isdecimal() or int(mfp) < 1:
-        raise SystemExit("limits.max_findings_per_item must be a positive integer")
-    lim["max_findings_per_item"] = mfp
+    lim["max_findings_per_item"] = _int(mfp, 1, "limits.max_findings_per_item must be a positive integer")
     # Open findings the verify phase may re-check per night — one read-only stage call each, so
     # this is the ceiling on what closing the finding loop can cost. 0 is a legitimate value
     # ("never spend a model on closure"); the free deterministic probe runs either way. A
     # non-numeric value would detonate in bash arithmetic — fail loudly like every sibling.
     mvr = limits.get("max_verifies_per_run", "5")
-    if not mvr.isdecimal():
-        raise SystemExit("limits.max_verifies_per_run must be a non-negative integer")
-    lim["max_verifies_per_run"] = mvr
+    lim["max_verifies_per_run"] = _int(
+        mvr, 0, "limits.max_verifies_per_run must be a non-negative integer"
+    )
     # Recon stage: on by default. This is a closed boolean domain: accepting YAML-ish synonyms
     # such as `no` while bash only recognises the literal `false` silently leaves Recon enabled.
     renabled = recon.get("enabled", "true")
@@ -321,9 +315,7 @@ def load(path: str) -> dict:
     # A malformed ttl_days silently became 0 in bash arithmetic → the cache was never fresh →
     # recon re-ran every pass. Require a positive integer so the misconfig fails loudly instead.
     ttl = recon.get("ttl_days", "7")
-    if not ttl.isdecimal() or int(ttl) < 1:
-        raise SystemExit("recon.ttl_days must be a positive integer")
-    out["recon"]["ttl_days"] = ttl
+    out["recon"]["ttl_days"] = _int(ttl, 1, "recon.ttl_days must be a positive integer")
     # Which MODEL a stage runs on (ADR 0020). The host declares it here because stage isolation
     # (ADR 0019) drops the CLI's `user` settings scope, so a machine-wide pin in
     # ~/.claude/settings.json no longer reaches a stage. OMITTING the key means "let the CLI resolve
@@ -392,10 +384,8 @@ def load(path: str) -> dict:
         # findings is optional: empty means "inherit max_findings_per_item".
         # dimensions is optional (comma-separated scalar): empty means "inherit the global set".
         findings = r.get("findings", "")
-        if findings and (not findings.isdecimal() or int(findings) < 1):
-            raise SystemExit(
-                f"repo {path}: findings must be a positive integer"
-            )
+        if findings:
+            findings = _int(findings, 1, f"repo {path}: findings must be a positive integer")
         # The Runner's select_order() skips any repo whose mode it does not recognise, WITHOUT a log
         # line — so `mode: brnach-fix` silently removed the repo from every night and the operator's
         # only clue was that it never appeared in a digest again. Closed key sets already protect

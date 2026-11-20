@@ -160,6 +160,11 @@ EOF2
   want repos.1.dimensions
   want repos.1.protected_paths
   [ "$RB_REPOS" -eq 2 ] || fail "RB_REPOS is $RB_REPOS, expected 2"
+  # A leading zero reaches Bash as a plain decimal, never as an octal literal.
+  printf '%s\n' limits: '  max_run_minutes: 010' repos: '  - path: /srv/x' '    mode: findings-only' \
+    > "$TMP/octal.yaml"
+  rulebook_load "$TMP/octal.yaml" && [ "${RB[limits.max_run_minutes]}" = 10 ] \
+    || fail "max_run_minutes 010 reached Bash as [${RB[limits.max_run_minutes]-}], expected 10"
   ! rulebook_load "$TMP/missing.yaml" 2>/dev/null || fail "a missing rulebook loaded"
   [ "$RB_REPOS" -eq 0 ] && [ "${#RB[@]}" -eq 0 ] || fail "a failed load kept the previous values"
 ) || exit 1

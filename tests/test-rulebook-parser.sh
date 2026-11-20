@@ -144,4 +144,38 @@ done
 jq -e '.limits.max_files_per_change == "15" and .limits.max_lines_per_change == "400"' <<<"$out" >/dev/null \
   || { echo "test-rulebook-parser: change-size limits must default to 15 / 400" >&2; exit 1; }
 
+# Integers must be ASCII digits and leave the parser in canonical form: Bash reads `１０` as no
+# number at all (so `-ge` fails and a cap silently stops capping) and `010` as octal 8.
+for key in max_open_branches max_branches_per_run; do
+  printf '%s\n' limits: "  $key: １０" repos: '  - path: /srv/x' '    mode: findings-only' \
+    > "$TMP/wide.yaml"
+  if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/wide.yaml" >/dev/null 2>"$TMP/wide.err"; then
+    echo "test-rulebook-parser: $key: fullwidth digits must be refused" >&2; exit 1
+  fi
+  grep -q "limits.$key must be a positive integer" "$TMP/wide.err" \
+    || { echo "test-rulebook-parser: $key: fullwidth digits refused for the wrong reason" >&2; exit 1; }
+done
+printf '%s\n' repos: '  - path: /srv/wide' '    mode: findings-only' '    findings: ３' > "$TMP/wide.yaml"
+if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/wide.yaml" >/dev/null 2>"$TMP/wide.err"; then
+  echo "test-rulebook-parser: findings: fullwidth digits must be refused" >&2; exit 1
+fi
+grep -q "repo /srv/wide: findings must be a positive integer" "$TMP/wide.err" \
+  || { echo "test-rulebook-parser: findings: fullwidth digits refused for the wrong reason" >&2; exit 1; }
+cat > "$TMP/octal.yaml" <<'EOF'
+limits:
+  max_open_branches: 010
+  max_run_minutes: 08
+  test_memory_mb: 00
+recon:
+  ttl_days: 007
+repos:
+  - path: /srv/x
+    mode: findings-only
+    findings: 02
+EOF
+python3 "$ROOT/lib/parse_rulebook.py" "$TMP/octal.yaml" | jq -e '
+  .limits.max_open_branches == "10" and .limits.max_run_minutes == "8"
+  and .limits.test_memory_mb == "0" and .recon.ttl_days == "7" and .repos[0].findings == "2"' >/dev/null \
+  || { echo "test-rulebook-parser: leading zeros must leave the parser as canonical decimals" >&2; exit 1; }
+
 echo "test-rulebook-parser: ok"
