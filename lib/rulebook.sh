@@ -19,6 +19,8 @@
 rulebook_load() { # file
   local _rb_i _rb_n
   local -a _rb_kv
+  declare -gA RB=()   # a failed load leaves nothing behind from an earlier one
+  RB_REPOS=0
   # Process substitution hides the parser's exit status, so it travels as one more item at the end
   # (`|| _rb_rc=$?` because the subshell inherits a caller's errexit); the leading count catches
   # output that stops early.
@@ -34,11 +36,9 @@ rulebook_load() { # file
     echo "rulebook: cannot read the parser's output for $1" >&2
     return 1
   fi
-  declare -gA RB=()
   for ((_rb_i = 1; _rb_i < ${#_rb_kv[@]}; _rb_i += 2)); do
     RB["${_rb_kv[_rb_i]}"]="${_rb_kv[_rb_i + 1]}"
   done
-  RB_REPOS=0
   while [ -n "${RB[repos.$RB_REPOS.path]+set}" ]; do RB_REPOS=$((RB_REPOS + 1)); done
 }
 

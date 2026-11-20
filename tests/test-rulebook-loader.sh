@@ -123,4 +123,45 @@ dry_run "$TMP/rulebook.yaml" || true   # the copy has no launcher; only the chec
 grep -q "live rulebook.yaml parses" "$TMP/sched.out" \
   || { cat "$TMP/sched.out" >&2; fail "schedule.sh refused a valid live rulebook"; }
 
+# Lists travel as key.0, key.1 …; rb_list must return every element in order, and none for an
+# empty list. A failed load must not leave the previous load's values behind.
+cat > "$TMP/lists.yaml" <<'EOF2'
+branch_prefix: nightshift/
+agent:
+  primary: mock
+  advisors: mock, claude
+dimensions:
+  - correctness
+  - security
+repos:
+  - path: /srv/list-target
+    mode: branch-fix
+    base: main
+    dimensions: tests, docs
+    protected_paths: hooks/, lib/sandbox.sh
+    test_cmd: true
+  - path: /srv/list-empty
+    mode: findings-only
+EOF2
+(
+  export NIGHTSHIFT_HOME="$ROOT"
+  source "$ROOT/lib/rulebook.sh"
+  rulebook_load "$TMP/lists.yaml" || fail "valid list rulebook refused"
+  want() { # key expected...
+    local -a got; local key="$1"; shift
+    rb_list got "$key"
+    [ "${#got[@]}" -eq "$#" ] && [ "${got[*]-}" = "$*" ] \
+      || fail "rb_list $key: got (${got[*]-}), expected ($*)"
+  }
+  want dimensions correctness security
+  want agent.advisors mock claude
+  want repos.0.dimensions tests docs
+  want repos.0.protected_paths hooks/ lib/sandbox.sh
+  want repos.1.dimensions
+  want repos.1.protected_paths
+  [ "$RB_REPOS" -eq 2 ] || fail "RB_REPOS is $RB_REPOS, expected 2"
+  ! rulebook_load "$TMP/missing.yaml" 2>/dev/null || fail "a missing rulebook loaded"
+  [ "$RB_REPOS" -eq 0 ] && [ "${#RB[@]}" -eq 0 ] || fail "a failed load kept the previous values"
+) || exit 1
+
 echo "test-rulebook-loader: ok"
