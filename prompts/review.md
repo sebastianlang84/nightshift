@@ -52,8 +52,9 @@ Verdict semantics:
 - "ship" + proof "verified": claim VERIFIED true against current state AND the change
   is small, safe, single-concern.
 - "ship" + proof "unproven": the change is safe and plausibly right, but the claim is
-  behavioral/dynamic and could not be statically verified. Ship the branch (it is
-  human-merged, ADR 0004) — the human will be told it is UNVERIFIED.
+  behavioral/dynamic and could not be statically verified. Ship the branch — the
+  runner only pushes it, and records `proof: unproven` in the ledger and the digest so that
+  whoever merges (a human or the operator's merge job) can hold it back until it is tested.
 - "revise": claim true but the fix is wrong-scoped or introduces risk.
 - "abandon": claim false, unfalsifiable taste, or you cannot even locate what it
   refers to (a first-contact reviewer that cannot find the thing does not ship it).

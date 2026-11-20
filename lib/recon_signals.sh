@@ -12,8 +12,6 @@
 # model judges each dimension's expected yield from signals, not guesses (ADR 0015).
 set -euo pipefail
 
-log() { echo "[recon] $*" >&2; }
-
 repo="${1:-}"
 [ -n "$repo" ] || { echo "usage: recon_signals.sh <repo_path>" >&2; exit 2; }
 

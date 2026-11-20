@@ -26,10 +26,8 @@ REPO_BASES=(develop)
   || { echo "test-base-resolution: origin HEAD was not preferred" >&2; exit 1; }
 [ "$(resolve_base "$REPO" develop)" = origin/develop ] \
   || { echo "test-base-resolution: configured remote base was not preferred" >&2; exit 1; }
-[ "$(base_for_repo "$REPO")" = origin/develop ] \
-  || { echo "test-base-resolution: rulebook lookup disagrees with resolve_base" >&2; exit 1; }
 
-# A listed repo resolves the same way through the strict lookup.
+# A listed repo resolves through the rulebook lookup the same way.
 [ "$(base_for_repo_strict "$REPO")" = origin/develop ] \
   || { echo "test-base-resolution: strict lookup disagrees for a listed repo" >&2; exit 1; }
 

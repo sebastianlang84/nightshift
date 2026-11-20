@@ -59,8 +59,9 @@ SURVIVAL_SNAPSHOT="${SURVIVAL_SNAPSHOT:-$STATE_DIR/fix-survival.json}"
 SCHEMA_VERSION=2
 BRANCH_PREFIX="nightshift/"   # overridden by the rulebook's branch_prefix; the orphan sweep needs it
 # The author identity bin/nightshift.sh commits under. It is what marks a recorded sha as OUR work
-# rather than a base commit the branch merely points at — see step 0 of reconcile().
-NIGHTSHIFT_COMMIT_EMAIL="nightshift@localhost"
+# rather than a base commit the branch merely points at — see step 1 of reconcile().
+# shellcheck source=../lib/commit_identity.sh
+source "$NIGHTSHIFT_HOME/lib/commit_identity.sh"
 
 declare -a REPO_PATHS=() REPO_BASES=()
 repo_id() { realpath -m -- "$1" 2>/dev/null || printf '%s' "${1%/}"; }

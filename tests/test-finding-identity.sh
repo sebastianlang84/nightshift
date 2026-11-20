@@ -35,8 +35,8 @@ e=$(fp '{"file":"a.py","type":"bug","symbol":"other_fn"}')
 # Lifecycle suppression + invalidation.
 : > "$TMP/state/ledger.jsonl"
 ledger_append itemX repoX "a.py:bug:parse_config" "" "" finding "a surfaced thing" "" "" "" correctness "" "SIG1"
-already_surfaced "a.py:bug:parse_config" "SIG1" || { echo "matching-sig finding not suppressed" >&2; exit 1; }
-! already_surfaced "a.py:bug:parse_config" "SIG2" || { echo "invalidation failed: stale-sig finding still suppressed" >&2; exit 1; }
+already_surfaced repoX "a.py:bug:parse_config" "SIG1" || { echo "matching-sig finding not suppressed" >&2; exit 1; }
+! already_surfaced repoX "a.py:bug:parse_config" "SIG2" || { echo "invalidation failed: stale-sig finding still suppressed" >&2; exit 1; }
 # known_work lists the still-open finding for its repo (before any clearing verdict).
 grep -q "a.py:bug:parse_config" <<<"$(known_work repoX)" || { echo "known_work omitted the open finding" >&2; exit 1; }
 
@@ -50,7 +50,7 @@ grep -q "b.py:bug:parse_config" <<<"$(known_work repoX)" \
 
 # A human wontfix is permanent — suppressed even after the code changed (new sig) — and drops from known_work.
 printf '{"outcome":"verdict","fingerprint":"a.py:bug:parse_config","verdict":"wontfix","ts":"2026-07-12T00:00:00+00:00"}\n' >> "$TMP/state/ledger.jsonl"
-already_surfaced "a.py:bug:parse_config" "SIG2" || { echo "wontfix not permanently suppressing" >&2; exit 1; }
+already_surfaced repoX "a.py:bug:parse_config" "SIG2" || { echo "wontfix not permanently suppressing" >&2; exit 1; }
 ! grep -q "a.py:bug:parse_config" <<<"$(known_work repoX)" || { echo "known_work still lists a wontfix'd finding" >&2; exit 1; }
 
 # ---- Part B: end-to-end carry-forward + clearing via the mock runner ----

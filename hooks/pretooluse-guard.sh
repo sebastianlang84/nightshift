@@ -9,8 +9,9 @@
 #      agent could edit the runner, hooks, ~/.claude, systemd units, or another repo
 #      (R8). Deny any write whose resolved target is outside the worktree root.
 #
-# NOTE: the exact PreToolUse I/O contract should be verified against the installed
-# Claude Code version before relying on this unattended (prototype artifact).
+# The PreToolUse I/O contract, its live verification against Claude Code under the Runner's flags,
+# and the tests that pin it (tests/test-fix-write-confinement.sh, tests/test-guard-malformed-input.sh)
+# are in docs/design/hook-spec.md, "Layer 2".
 set -euo pipefail
 
 input="$(cat)"

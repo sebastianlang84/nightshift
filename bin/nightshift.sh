@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# nightshift — the Brain / Runner (prototype).
+# nightshift — the Brain / Runner.
 #
 # Outer loop: select a repo -> Explore -> Fix<->Review (capped) -> Finalize
 # (push a nightshift/* branch) -> record. Enforces the nightly branch cap and the
@@ -17,9 +17,11 @@ export PATH
 NIGHTSHIFT_HOME="${NIGHTSHIFT_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 NIGHTSHIFT_AGENT="${NIGHTSHIFT_AGENT:-}"
 # After pushing a nightshift/* branch, optionally open a PR for it (1=on). OFF by default:
-# a PR is a host-API object that needs per-host API credentials (a forge API token, for example) which the SSH git transport does NOT provide — so branch-only is the credential-
-# free baseline and the pushed branch is the unit of review. Opt in with NIGHTSHIFT_OPEN_PR=1
-# once the host credential is in the run environment (GitHub-only today; see todo Luecke 1).
+# a PR is a host-API object that needs per-host API credentials (a forge API token, for example)
+# which the SSH git transport does NOT provide — so branch-only is the credential-free baseline and
+# the pushed branch is the unit of review. Opt in with NIGHTSHIFT_OPEN_PR=1 once the host credential
+# is in the run environment (GitHub-only today; see "Branch-only operation across Git hosts" in
+# docs/deployment.md).
 NIGHTSHIFT_OPEN_PR="${NIGHTSHIFT_OPEN_PR:-0}"
 RULEBOOK="${RULEBOOK:-$NIGHTSHIFT_HOME/rulebook.yaml}"
 [ -f "$RULEBOOK" ] || RULEBOOK="$NIGHTSHIFT_HOME/rulebook.example.yaml"
@@ -104,6 +106,8 @@ declare -a REPO_PATHS=() REPO_MODES=() REPO_BASES=() REPO_FINDINGS=() REPO_DIMS=
 BASE_RESOLUTION_WARN_MISSING=1
 # shellcheck source=../lib/base_resolution.sh
 source "$NIGHTSHIFT_HOME/lib/base_resolution.sh"
+# shellcheck source=../lib/commit_identity.sh
+source "$NIGHTSHIFT_HOME/lib/commit_identity.sh"
 # Rulebook-declared models (ADR 0020, ADR 0044); empty = the rulebook declares none. Kept separate
 # from the NIGHTSHIFT_*_MODEL env vars so the precedence env > rulebook > CLI default stays legible.
 RB_CLAUDE_MODEL="" RB_REVIEW_MODEL="" RB_MAX_VERIFY=""
@@ -323,21 +327,8 @@ _fp_suppressed() { # repo fingerprint code_sig outcomes_json
         and (((.code_sig // "") == "") or ((.code_sig // "") == $csig)))) as $known
     | $permanent or $known' "$LEDGER" >/dev/null 2>&1
 }
-_suppressed_for() { # outcomes_json repo fingerprint code_sig; legacy: outcomes_json fingerprint code_sig
-  local outs="$1" repo fp csig
-  shift
-  if [ "$#" -eq 3 ]; then
-    repo="$1"; fp="$2"; csig="$3"
-  else
-    fp="${1:-}"; csig="${2:-}"
-    # Keep the sourced helper's old two-argument form safe: infer a repo only when the ledger
-    # identifies exactly one owner. A colliding fingerprint is deliberately not suppressed.
-    repo=$(jq -rs --arg fp "$fp" \
-      '[.[] | select(.fingerprint==$fp and .repo!=null) | .repo] | unique
-       | if length==1 then .[0] else empty end' "$LEDGER" 2>/dev/null || true)
-    [ -n "$repo" ] || return 1
-  fi
-  _fp_suppressed "$repo" "$fp" "$csig" "$outs"
+_suppressed_for() { # outcomes_json repo fingerprint code_sig
+  _fp_suppressed "$2" "$3" "$4" "$1"
 }
 already_done()     { _suppressed_for '["finding","shipped","abandoned"]' "$@"; }  # findings-only: report once
 already_acted()    { _suppressed_for '["shipped","abandoned"]' "$@"; }             # branch-fix: acted before
@@ -1749,10 +1740,14 @@ finalize() { # repo worktree item_dir [seq] [base] [retry_ok] -> echoes branch n
   # it to the Fix stage. It is still copied to stderr, so the night's log reads as before.
   # Whether anything is staged is decided BEFORE the hooks run: a hook that unstages the change and
   # then fails has rejected a real fix, not found an empty one.
+  # The identity is set in the commit's own environment, which outranks both user.* and an
+  # exported GIT_AUTHOR_*/GIT_COMMITTER_* in the Runner's: harvest recognises our commits by it.
   local crc=0 staged=1
   git -C "$wt" diff --cached --quiet 2>/dev/null && staged=0
+  GIT_AUTHOR_NAME="$NIGHTSHIFT_COMMIT_NAME" GIT_AUTHOR_EMAIL="$NIGHTSHIFT_COMMIT_EMAIL" \
+  GIT_COMMITTER_NAME="$NIGHTSHIFT_COMMIT_NAME" GIT_COMMITTER_EMAIL="$NIGHTSHIFT_COMMIT_EMAIL" \
   git -C "$wt" ${hookargs[@]+"${hookargs[@]}"} \
-       -c user.name=nightshift -c user.email=nightshift@localhost \
+       -c user.name="$NIGHTSHIFT_COMMIT_NAME" -c user.email="$NIGHTSHIFT_COMMIT_EMAIL" \
        commit -q -m "$(commit_subject "$type" "$(jq -r '.summary' "$id/finding.json")")
 
 $(cat "$id/worknote.md")" >"$id/commit-hook.log" 2>&1 || crc=$?

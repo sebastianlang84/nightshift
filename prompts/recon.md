@@ -21,7 +21,7 @@ this repo (docs, compose, dockerfile, frontend, tests, CI, lockfiles, languages,
 FILES exist; use them to anchor `yield`, then read just enough to place the
 `hint`. Do not contradict a signal without reading the evidence that overturns it.
 
-## Dimensions (emit exactly these eleven built-in ids, every one, once)
+## Dimensions (emit exactly these built-in ids, every one, once)
 
 - correctness — bugs, wrong results, unhandled edges, contradicted comments/docs.
 - security — secrets, injection, authz gaps, unsafe defaults, exposure.

@@ -3,9 +3,11 @@ repository — up to the findings budget stated near the end of this prompt. Do 
 any files in this stage.
 
 Your output lands on an isolated `nightshift/*` branch, created in a throwaway git
-worktree — `main` is untouched until two independent reviewers on different models, who challenge each
-other's findings, agree to merge the branch and its tests pass; then it merges without a human.
-So optimize for VALUE, and give those reviewers what they need to judge. A branch is not free: the reviewer spends
+worktree. A separate review pass must accept the change and its tests must pass before the
+runner pushes the branch; the runner never touches `main`. Whether a pushed branch is then merged
+by a human or automatically depends on the operator's merge job, so do not count on a human
+catching what the review misses. So optimize for VALUE, and give the reviewer what it needs to
+judge. A branch is not free: the reviewer spends
 time on it, and every merged change can regress something that worked. Do not
 self-censor a real, provable improvement for being large or bold. There are only two
 reasons to hold a finding back: you cannot PROVE it, or it is not worth a slot in the
