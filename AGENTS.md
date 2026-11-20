@@ -29,6 +29,9 @@ contains the agent confinement hooks.
 - `lib/parse_rulebook.py` accepts a block-style YAML subset and prints one JSON object. Register
   keys in the allowed-key tuples. Bash reads it only through `lib/rulebook.sh` (`--pairs`), by name;
   Python imports `load()`.
+- `lib/ledger.py` is the ledger's only writer: rows keep the byte format `jq -nc` wrote, and each
+  append is one `write()` on an O_APPEND descriptor (there is no ledger lock). Its readers fail
+  where jq failed, so each Bash caller's fallback still decides. Do not append to `$LEDGER` directly.
 - `state/findings-probe.json` is derived from the ledger. Do not edit it by hand.
 - `.nightshift-note` reports harness problems through `state/agent-notes.md` and the digest.
   The runner removes notes before committing and never feeds collected notes into later stages.

@@ -248,22 +248,9 @@ append_run() { # stage agent start dur status item usage_json
       exit:$status}' >> "$RUNSLOG"
 }
 
+# Ledger rows are written only by lib/ledger.py (one O_APPEND write per row, jq's byte format).
 ledger_append() { # item repo fp branch sha outcome [summary] [pr_url] [proof] [verifiability] [dimension] [type] [code_sig] [scope]
-  jq -nc \
-    --arg night "$NIGHT" --arg item "$1" --arg repo "$2" --arg fp "$3" \
-    --arg branch "$4" --arg sha "$5" --arg outcome "$6" --arg summary "${7:-}" --arg pr "${8:-}" \
-    --arg proof "${9:-}" --arg verif "${10:-}" --arg dim "${11:-}" --arg type "${12:-}" --arg csig "${13:-}" --arg scope "${14:-}" --arg ts "$(date -Iseconds)" \
-    '{night:$night,item:$item,repo:$repo,fingerprint:$fp,
-      branch:($branch|if .=="" then null else . end),
-      sha:($sha|if .=="" then null else . end),
-      pr_url:($pr|if .=="" then null else . end),
-      proof:($proof|if .=="" then null else . end),
-      verifiability:($verif|if .=="" then null else . end),
-      dimension:($dim|if .=="" then null else . end),
-      type:($type|if .=="" then null else . end),
-      code_sig:($csig|if .=="" then null else . end),
-      scope:($scope|if .=="" then null else . end),
-      outcome:$outcome,summary:$summary,ts:$ts}' >> "$LEDGER"
+  python3 "$NIGHTSHIFT_HOME/lib/ledger.py" --ledger "$LEDGER" append-run "$NIGHT" "$(date -Iseconds)" "$@"
 }
 
 # Runner-canonical finding identity (ADR 0014). Computed by the Runner from NORMALIZED structured
@@ -1836,12 +1823,7 @@ $(cat "$id/worknote.md")" >"$id/commit-hook.log" 2>&1 || crc=$?
 # (ADR 0007). Anything else leaves the item open and records the negative in the probe snapshot, so
 # the same unchanged code is never paid for twice.
 append_finding_verdict() { # item repo fingerprint verdict [reason]
-  jq -nc --arg night "$NIGHT" --arg item "$1" --arg repo "$2" --arg fp "$3" \
-    --arg verdict "$4" --arg reason "${5:-}" --arg ts "$(date -Iseconds)" \
-    '{night:$night,item:$item,repo:$repo,fingerprint:$fp,branch:null,sha:null,
-      outcome:"verdict",verdict:$verdict,
-      reason:($reason|if .=="" then null else . end),
-      source:"auto-verify",ts:$ts,schema_version:2}' >> "$LEDGER"
+  python3 "$NIGHTSHIFT_HOME/lib/ledger.py" --ledger "$LEDGER" append-finding-verdict "$NIGHT" "$(date -Iseconds)" "$@"
 }
 
 repo_cfg_base() { # repo -> the rulebook's `base:` for it ("" = auto-detect)

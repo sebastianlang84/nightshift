@@ -31,7 +31,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 
-from ledger import repo_labels, verdict_item_key
+from ledger import read_rows_skipping_bad, repo_labels, verdict_item_key
 
 SCHEMA_VERSION = 2   # 2: revert detection reads git's own revert line; items carry their base
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
@@ -55,14 +55,10 @@ def resolve_base_ref(repo: str, configured: str) -> str | None:
 def merged_items(ledger: str) -> list[dict]:
     """Latest verdict per item; keep those that are `merged` and carry a sha."""
     last: dict[tuple, dict] = {}
-    with open(ledger, encoding="utf-8") as f:
-        for line in f:
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if row.get("outcome") == "verdict" and (key := verdict_item_key(row)):
-                last[key] = row
+    # Unparsable lines are skipped; a line holding a non-object still fails on .get below.
+    for row in read_rows_skipping_bad(ledger, strip=False):
+        if row.get("outcome") == "verdict" and (key := verdict_item_key(row)):
+            last[key] = row
     return [r for r in last.values() if r.get("verdict") == "merged" and r.get("sha")]
 
 

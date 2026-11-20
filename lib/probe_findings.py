@@ -35,84 +35,13 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
-from ledger import TERMINAL_VERDICTS
+from ledger import open_findings, read_rows_skipping_bad
 
 SCHEMA_VERSION = 1
 
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
-
-
-def read_ledger(path: str) -> list[dict]:
-    """Parse the append-only ledger, skipping unparsable lines (the endpoint and the digest
-    tolerate schema drift; a probe must not be the one thing that hard-fails on it)."""
-    rows: list[dict] = []
-    with open(path, encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(row, dict):
-                rows.append(row)
-    return rows
-
-
-def open_findings(rows: list[dict]) -> list[dict]:
-    """Return the newest currently-open `finding` row per identity.
-
-    The ledger is an event stream, so order matters. A terminal verdict closes the finding that
-    precedes it; a later `open` verdict or a newly emitted finding reopens the identity. The latter
-    is ADR 0014 invalidation in action: changed target code makes a resolved identity eligible again.
-    `wontfix` alone stays permanent.
-
-    A verdict matches by repo-scoped fingerprint where available, else by its exact item id for
-    legacy rows. Fingerprints are not globally unique across repos."""
-    states: dict[tuple[str, ...], dict[str, object]] = {}
-    item_keys: dict[str, tuple[str, ...]] = {}
-
-    for order, row in enumerate(rows):
-        outcome = row.get("outcome")
-        item = str(row.get("item") or "")
-        repo = str(row.get("repo") or "")
-        fingerprint = str(row.get("fingerprint") or "")
-        key: tuple[str, ...] | None = None
-        if repo and fingerprint:
-            key = ("fingerprint", repo, fingerprint)
-        elif item:
-            key = item_keys.get(item, ("item", item))
-
-        if outcome == "finding":
-            if key is None:
-                continue
-            if item:
-                item_keys[item] = key
-            state = states.setdefault(key, {"open": False, "wontfix": False})
-            if not state["wontfix"]:
-                state.update(row=row, open=True, order=order)
-            continue
-
-        if outcome != "verdict":
-            continue
-        if item and item in item_keys:
-            key = item_keys[item]
-        if key is None or key not in states:
-            continue
-        state = states[key]
-        verdict = row.get("verdict")
-        if verdict == "wontfix":
-            state.update(open=False, wontfix=True)
-        elif verdict in TERMINAL_VERDICTS:
-            state["open"] = False
-        elif verdict == "open" and not state["wontfix"]:
-            state["open"] = True
-
-    active = (state for state in states.values() if state.get("open") and state.get("row"))
-    return [state["row"] for state in sorted(active, key=lambda state: int(state["order"]))]
 
 
 def targets(fingerprint: str) -> list[str]:
@@ -227,7 +156,10 @@ def probe(ledger: str, out: str, bases: dict[str, str] | None = None) -> dict:
     items = []
     bases = bases or {}
     commits: dict[str, str | None] = {}
-    for row in open_findings(read_ledger(ledger)):
+    # Skips unparsable lines: the endpoint and the digest tolerate schema drift, and a probe must
+    # not be the one thing that hard-fails on it.
+    rows = read_rows_skipping_bad(ledger, errors="replace", dicts_only=True)
+    for row in open_findings(rows):
         repo = str(row.get("repo") or "")
         if repo not in bases:
             base_sha = None

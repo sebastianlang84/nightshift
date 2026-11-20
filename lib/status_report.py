@@ -21,7 +21,8 @@ import os
 import subprocess
 from pathlib import Path
 
-from ledger import TERMINAL_VERDICTS, latest_branch_verdicts, repo_labels, verdict_item_key
+from ledger import (TERMINAL_VERDICTS, latest_branch_verdicts, read_rows_skipping_bad, repo_labels,
+                    verdict_item_key)
 from parse_rulebook import load as load_rulebook
 
 HOME = Path(os.environ.get('NIGHTSHIFT_HOME') or Path(__file__).resolve().parent.parent)
@@ -80,19 +81,8 @@ def contains(repo, base, sha):
 
 
 def ledger():
-    rows = []
-    try:
-        with open(STATE_DIR / 'ledger.jsonl') as fh:
-            for line in fh:
-                line = line.strip()
-                if line:
-                    try:
-                        rows.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        pass
-    except FileNotFoundError:
-        pass
-    return rows
+    # Unparsable lines are skipped and a missing ledger is empty; the locale's encoding, as before.
+    return read_rows_skipping_bad(STATE_DIR / 'ledger.jsonl', encoding=None, missing_ok=True)
 
 
 def short(text, n=110):
@@ -109,7 +99,7 @@ def finding_states(rows):
     """(plain state, settled?) of every finding row, keyed by its position in the ledger.
 
     A finding's identity is (repo, fingerprint), as in the digest's 'Open findings' and
-    probe_findings.open_findings: ADR 0014 re-emits a still-open finding as a new row with a new
+    ledger.open_findings: ADR 0014 re-emits a still-open finding as a new row with a new
     item id, and verdicts land on the newest row. So only the newest row of an identity can be
     open; a verdict after it closes the identity, and wontfix closes it for good. Rows without a
     fingerprint fall back to their item id."""

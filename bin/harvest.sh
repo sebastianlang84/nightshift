@@ -56,7 +56,8 @@ RULEBOOK="${RULEBOOK:-$NIGHTSHIFT_HOME/rulebook.yaml}"
 [ -f "$RULEBOOK" ] || RULEBOOK="$NIGHTSHIFT_HOME/rulebook.example.yaml"
 PROBE_SNAPSHOT="${PROBE_SNAPSHOT:-$STATE_DIR/findings-probe.json}"
 SURVIVAL_SNAPSHOT="${SURVIVAL_SNAPSHOT:-$STATE_DIR/fix-survival.json}"
-SCHEMA_VERSION=2
+# Every ledger read and write goes through lib/ledger.py (row format, failure exits, jq semantics).
+ledger() { python3 "$NIGHTSHIFT_HOME/lib/ledger.py" --ledger "$LEDGER" "$@"; }
 BRANCH_PREFIX="nightshift/"   # overridden by the rulebook's branch_prefix; the orphan sweep needs it
 # The author identity bin/nightshift.sh commits under. It is what marks a recorded sha as OUR work
 # rather than a base commit the branch merely points at — see step 1 of reconcile().
@@ -84,27 +85,11 @@ load_rulebook() {
 # source distinguishes a human 'manual' verdict from a machine reconcile so the loop
 # can refuse to clobber a human decision.
 last_verdict_meta() { # repo branch
-  jq -L "$NIGHTSHIFT_HOME/lib" -rs --arg r "$1" --arg b "$2" \
-    'include "ledger";
-     (latest_branch_verdicts | map(select(.repo==$r and .branch==$b)) | last) as $v
-     | "\($v.verdict // "")\t\($v.source // "")"' \
-    "$LEDGER" 2>/dev/null || printf '\t\n'
+  ledger last-branch-verdict "$1" "$2" 2>/dev/null || printf '\t\n'
 }
 
 append_verdict() { # item repo fingerprint branch sha verdict reason [source]
-  jq -nc \
-    --arg item "$1" --arg repo "$2" --arg fp "$3" --arg branch "$4" --arg sha "$5" \
-    --arg verdict "$6" --arg reason "${7:-}" --arg source "${8:-}" \
-    --arg ts "$(date -Iseconds)" \
-    --arg night "$(date +%F)" --argjson sv "$SCHEMA_VERSION" \
-    '{night:$night,item:$item,repo:$repo,
-      fingerprint:($fp|if .=="" then null else . end),
-      branch:($branch|if .=="" then null else . end),
-      sha:($sha|if .=="" then null else . end),
-      outcome:"verdict",verdict:$verdict,
-      reason:($reason|if .=="" then null else . end),
-      source:($source|if .=="" then null else . end),
-      ts:$ts,schema_version:$sv}' >> "$LEDGER"
+  ledger append-verdict "$(date +%F)" "$(date -Iseconds)" "$@"
 }
 
 # reconcile one shipped branch -> echo merged|open|dropped|skip (ADR 0016).
@@ -173,15 +158,7 @@ reconcile() { # repo base branch sha [pr_url]
 # and `source` mark the row so it is never mistaken for a first-hand shipped record. Idempotent:
 # once written, the branch is in the ledger's `known` set and is never adopted twice.
 adopt_orphan() { # repo branch sha
-  jq -L "$NIGHTSHIFT_HOME/lib" -nc \
-    --arg repo "$1" --arg branch "$2" --arg sha "$3" \
-    --arg ts "$(date -Iseconds)" --arg night "$(date +%F)" --argjson sv "$SCHEMA_VERSION" \
-    'include "ledger";
-     {night:$night,repo:$repo,fingerprint:null,
-      branch:$branch,sha:($sha|if .=="" then null else . end),pr_url:null,
-      outcome:"shipped",source:"orphan-adopt",adopted:true,
-      summary:"adopted orphan branch (lost shipped row restored)",
-      ts:$ts,schema_version:$sv} | .item = adopted_item_id' >> "$LEDGER"
+  ledger adopt-orphan "$(date +%F)" "$(date -Iseconds)" "$@"
 }
 
 # Orphan sweep (ADR 0016) + adoption (ADR 0018): a <prefix>* branch on origin that the ledger has no
@@ -199,8 +176,7 @@ sweep_orphans() {
     [ -n "$known_repo" ] && [ -n "$known_branch" ] || continue
     known_repo="$(repo_id "$known_repo")"
     known["$known_repo"$'\x1f'"$known_branch"]=1
-  done < <(jq -rs '.[]|select((.repo//"")!="" and (.branch//"")!="")
-                       | [.repo,.branch]|join("\u001f")' "$LEDGER" 2>/dev/null || true)
+  done < <(ledger known-branches 2>/dev/null || true)
   for i in "${!REPO_PATHS[@]}"; do
     repo="${REPO_PATHS[$i]}"
     [ "${RECONCILE_BASE[$repo]-unfetched}" = "" ] && continue   # unreachable — don't guess (fail closed)
@@ -231,41 +207,18 @@ sweep_orphans() {
 }
 
 # ---------------------------------------------------------- manual verdict ----
-verdict_candidates() {
-  if [ "$1" = findings ]; then
-    PYTHONPATH="$NIGHTSHIFT_HOME/lib" python3 -c '
-import json
-import sys
-from probe_findings import open_findings, read_ledger
-
-for row in open_findings(read_ledger(sys.argv[1])):
-    print(json.dumps(row))
-' "$LEDGER"
-  else
-    jq -c 'select(.outcome == "shipped" or .outcome == "finding")' "$LEDGER"
-  fi
-}
-
 manual_verdict() { # scope selector verdict [reason]
-  local scope="$1" sel="$2" verdict="$3" reason="${4:-}"
-  if ! jq -L "$NIGHTSHIFT_HOME/lib" -ne --arg v "$verdict" \
-    'include "ledger"; terminal_verdicts + ["open"] | index($v) != null' >/dev/null; then
-    echo "verdict must be one of: $(jq -L "$NIGHTSHIFT_HOME/lib" -nr \
-      'include "ledger"; terminal_verdicts + ["open"] | join(" ")')" >&2
+  local scope="$1" sel="$2" verdict="$3" reason="${4:-}" verdicts v known=0
+  verdicts="$(ledger verdict-names)"
+  for v in $verdicts; do [ "$v" = "$verdict" ] && known=1; done
+  if [ "$known" -eq 0 ]; then
+    echo "verdict must be one of: $verdicts" >&2
     exit 2
   fi
+  # Open findings for `findings` (close), else every shipped/finding row; each match carries its
+  # `selector` (the adoption id of an adopted branch, else its item) and `adoption`.
   local matches
-  matches=$(verdict_candidates "$scope" | jq -L "$NIGHTSHIFT_HOME/lib" -sc \
-    --arg s "$sel" --arg scope "$scope" '
-      include "ledger";
-      [.[] | .selector = (if .outcome == "shipped" and is_adoption then adopted_item_id else .item end)
-       | if $scope == "adopted" then
-           select(.outcome == "shipped" and is_adoption and .selector == $s)
-         elif $scope == "fingerprint" then
-           select(.fingerprint == $s)
-         else
-           select(.item == $s or .branch == $s or .fingerprint == $s)
-         end]')
+  matches=$(ledger verdict-matches "$scope" "$sel")
   if [ "$matches" = "[]" ]; then
     case "$scope" in
       findings) echo "no open finding matches '$sel'" >&2 ;;
@@ -281,9 +234,7 @@ manual_verdict() { # scope selector verdict [reason]
   ndistinct=$(jq -r '[.[]|[.repo, (.branch // ""), (.fingerprint // "")]]|unique|length' <<<"$matches")
   if [ "$ndistinct" -gt 1 ]; then
     echo "ambiguous selector '$sel' matches $ndistinct repo-scoped findings/branches; use an item id, --adopted, or --fingerprint —" >&2
-    jq -L "$NIGHTSHIFT_HOME/lib" -r 'include "ledger";
-      .[] | (if .outcome == "shipped" and is_adoption
-             then "--adopted " + (.selector | @sh) else .item end) as $selector
+    jq -r '.[] | (if .adoption then "--adopted " + (.selector | @sh) else .item end) as $selector
           | "  \(.repo)  \(.branch // "(finding)")  [\($selector)]"' <<<"$matches" | sort -u >&2
     exit 2
   fi
@@ -398,9 +349,7 @@ retract_night() { # <night> [reason]
   esac
   # Only `empty` rows, and only those not already retracted — so re-running is a no-op rather than
   # a second pile of retraction rows.
-  rows=$(jq -sc --arg n "$night" \
-    '[.[]|select(.outcome=="retracted")|.item] as $done
-     | [.[]|select(.night==$n and .outcome=="empty" and (.item | IN($done[]) | not))]' "$LEDGER")
+  rows=$(ledger unretracted-empty "$night")
   if [ "$rows" = "[]" ]; then
     echo "nothing to retract for $night (no un-retracted \`empty\` rows)"; return 0
   fi
@@ -408,14 +357,7 @@ retract_night() { # <night> [reason]
     [ -n "$row" ] || continue
     item=$(jq -r '.item' <<<"$row"); repo=$(jq -r '.repo' <<<"$row")
     dim=$(jq -r '.dimension // ""' <<<"$row")
-    jq -nc --arg item "$item" --arg repo "$repo" --arg dim "$dim" --arg rn "$night" \
-           --arg reason "$reason" --arg ts "$(date -Iseconds)" \
-           --arg night "$(date +%F)" --argjson sv "$SCHEMA_VERSION" \
-      '{night:$night,item:$item,repo:$repo,fingerprint:null,branch:null,sha:null,
-        outcome:"retracted",retracts:"empty",retracted_night:$rn,
-        dimension:($dim|if .=="" then null else . end),
-        reason:($reason|if .=="" then null else . end),
-        source:"manual",ts:$ts,schema_version:$sv}' >> "$LEDGER"
+    ledger append-retraction "$(date +%F)" "$(date -Iseconds)" "$item" "$repo" "$dim" "$night" "$reason"
     n=$((n + 1))
     printf 'retracted: %s × %s [item=%s]\n' "$(basename "$repo")" "${dim:-—}" "$item"
   done < <(jq -c '.[]' <<<"$rows")
@@ -434,8 +376,7 @@ usage:
       <sel>      orphan-adopt:<ledger repo path>:<branch>
   harvest.sh verdict --fingerprint <sel> <verdict> [reason]
 EOF
-  printf '      <verdict>  %s\n' "$(jq -L "$NIGHTSHIFT_HOME/lib" -nr \
-    'include "ledger"; terminal_verdicts + ["open"] | join(" | ")')"
+  printf '      <verdict>  %s\n' "$(ledger verdict-names ' | ')"
   cat <<'EOF'
   harvest.sh todos                              list open findings with stable item ids and freshness
   harvest.sh close <item|sel> [reason]          record `resolved` for one open finding
@@ -487,11 +428,12 @@ esac
 
 load_rulebook
 [ -f "$LEDGER" ] || { echo "no ledger at $LEDGER — nothing to harvest"; exit 0; }
-# Validate the whole ledger up front. Every read below is `jq -s` (slurp); a single corrupt
-# line would abort jq inside a process substitution, invisible to `set -e`, turning harvest
-# into a silent no-op that exits 0 and quietly stops reconciling. Fail loud instead — the same
-# fail-closed contract load_rulebook already honours for a broken rulebook.
-jq -e . "$LEDGER" >/dev/null 2>&1 \
+# Validate the whole ledger up front. Every read below fails on a corrupt line; inside a process
+# substitution that failure is invisible to `set -e`, turning harvest into a silent no-op that
+# exits 0 and quietly stops reconciling. Fail loud instead — the same fail-closed contract
+# load_rulebook already honours for a broken rulebook. Like the `jq -e .` it replaces, this also
+# refuses an empty ledger and one whose last row is null or false.
+ledger validate --require-truthy-last >/dev/null 2>&1 \
   || { echo "ledger is not valid JSONL ($LEDGER) — aborting harvest" >&2; exit 1; }
 
 case "${1:-}" in
@@ -515,16 +457,14 @@ declare -A RECONCILE_BASE=()
 # slurps the whole append-only ledger on every call; calling it once per shipped branch in
 # the reconcile loop below was O(shipped_branches x ledger_rows) — quadratic as history
 # accumulates (the ledger is append-only, never pruned). Branch names are repo-local; keying this
-# central fleet map by name alone lets one repo's verdict leak into another. group_by preserves
-# input order, so .[-1] is the last-appended verdict.
+# central fleet map by name alone lets one repo's verdict leak into another. Each line is the
+# last-appended verdict of its raw (repo, branch), in jq's group_by order, so when two raw repo
+# strings share one realpath the later line wins.
 declare -A LAST_VERDICT=()
 while IFS=$'\x1f' read -r _r _b _v _s; do
   _r="$(repo_id "$_r")"
   [ -n "$_r" ] && [ -n "$_b" ] && LAST_VERDICT["$_r"$'\x1f'"$_b"]="$_v"$'\t'"$_s"
-done < <(jq -L "$NIGHTSHIFT_HOME/lib" -rs 'include "ledger";
-                 latest_branch_verdicts[]
-                 | select((.repo//"")!="" and (.branch//"")!="")
-                 | [.repo,.branch,(.verdict//""),(.source//"")]|join("\u001f")' "$LEDGER" 2>/dev/null)
+done < <(ledger branch-verdicts 2>/dev/null)
 
 printf '%-28s %-46s %-8s -> %-8s %s\n' REPO BRANCH WAS NOW ""
 changed=0
@@ -582,8 +522,7 @@ while IFS=$'\x1f' read -r item repo fp branch sha pr_url; do
     changed=$((changed + 1))
   fi
   printf '%-28s %-46s %-8s -> %-8s %s\n' "$(basename "$repo")" "$branch" "${was:-—}" "$now" "$mark"
-done < <(jq -r '.[]|[.item,.repo,.fingerprint,(.branch//""),(.sha//""),(.pr_url//"")]|join("\u001f")' \
-           <(jq -sc '[.[]|select(.outcome=="shipped" and .branch!=null and .sha!=null)]' "$LEDGER"))
+done < <(ledger reconcile-rows)
 
 echo
 if [ "$DRYRUN" -eq 1 ]; then
