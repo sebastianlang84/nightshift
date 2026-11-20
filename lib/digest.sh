@@ -5,7 +5,12 @@
 
 # Every ledger read below goes through lib/ledger.py: one command per section, printing what its
 # jq program printed and failing where it failed, so each `|| true` / `|| echo` fallback still decides.
-ledger() { python3 "$NIGHTSHIFT_HOME/lib/ledger.py" --ledger "$LEDGER" "$@"; }
+# The module is imported, not run as a file, so Python reuses its cached bytecode; -I keeps the
+# caller's cwd and PYTHON* variables out of the import path. The runner reads through this too.
+ledger() {
+  python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import ledger; sys.exit(ledger.cli(sys.argv[2:]))' \
+    "$NIGHTSHIFT_HOME/lib" --ledger "$LEDGER" "$@"
+}
 
 # An aborted night exits 3 and systemd marks the unit failed (ADR 0023) — but `systemctl status`
 # reports only the LAST run, so the next night that completes wipes the outage from the one place

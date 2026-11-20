@@ -57,7 +57,11 @@ RULEBOOK="${RULEBOOK:-$NIGHTSHIFT_HOME/rulebook.yaml}"
 PROBE_SNAPSHOT="${PROBE_SNAPSHOT:-$STATE_DIR/findings-probe.json}"
 SURVIVAL_SNAPSHOT="${SURVIVAL_SNAPSHOT:-$STATE_DIR/fix-survival.json}"
 # Every ledger read and write goes through lib/ledger.py (row format, failure exits, jq semantics).
-ledger() { python3 "$NIGHTSHIFT_HOME/lib/ledger.py" --ledger "$LEDGER" "$@"; }
+# Imported, not run as a file, so Python reuses the module's cached bytecode (as in lib/digest.sh).
+ledger() {
+  python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import ledger; sys.exit(ledger.cli(sys.argv[2:]))' \
+    "$NIGHTSHIFT_HOME/lib" --ledger "$LEDGER" "$@"
+}
 BRANCH_PREFIX="nightshift/"   # overridden by the rulebook's branch_prefix; the orphan sweep needs it
 # The author identity bin/nightshift.sh commits under. It is what marks a recorded sha as OUR work
 # rather than a base commit the branch merely points at — see step 1 of reconcile().

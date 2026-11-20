@@ -241,24 +241,81 @@ assert cli(tmp / "empty.jsonl", "validate", "--require-truthy-last")[0] == 4
 assert cli(ledger_file("lastnull.jsonl", [json.dumps(rows[0]), "null"]), "validate", "--require-truthy-last")[0] == 1
 assert cli(ledger_file("surrogate.jsonl", ['{"item":"\\ud800"}']), "validate")[0] == 5
 
-# ---- the ledger.jq definitions, while that file still exists ----
-jqlib = root / "lib/ledger.jq"
-if jqlib.exists():
-    def jq(program, data):
-        p = subprocess.run(["jq", "-L", str(root / "lib"), "-c", 'include "ledger"; ' + program],
-                           input=json.dumps(data), text=True, capture_output=True, check=True)
-        return json.loads(p.stdout)
-    mixed = [dict(r) for r in rows if r] + [
-        {"outcome": "verdict", "repo": 1, "branch": "b", "verdict": "x", "fingerprint": True},
-        {"outcome": "verdict", "repo": True, "branch": "b", "verdict": "y", "fingerprint": 1},
-        {"outcome": "verdict", "repo": "a", "branch": ["b"], "fingerprint": "f"},
-        {"outcome": "retracted", "item": None}]
-    assert L.latest_branch_verdict_list(mixed) == jq("latest_branch_verdicts", mixed)
-    assert L.latest_fingerprint_verdicts(mixed, lambda r: r.get("fingerprint")) == jq(
-        "latest_fingerprint_verdicts(.fingerprint)", mixed)
-    assert L.latest_fingerprint_verdicts(mixed, lambda r: [r.get("repo"), r.get("fingerprint")]) == jq(
-        "latest_fingerprint_verdicts([.repo,.fingerprint])", mixed)
-    assert L.unretracted_rows(mixed) == jq("[unretracted_rows]", mixed)
-    assert [L.is_adoption(r) for r in mixed] == jq("map(is_adoption)", mixed)
+# ---- the shared definitions in jq's order and equality (expectations recorded from the jq
+# definitions they replaced: null < false < true < numbers < strings < arrays < objects) ----
+mixed = [dict(r) for r in rows if r] + [
+    {"outcome": "verdict", "repo": 1, "branch": "b", "verdict": "x", "fingerprint": True},
+    {"outcome": "verdict", "repo": True, "branch": "b", "verdict": "y", "fingerprint": 1},
+    {"outcome": "verdict", "repo": "a", "branch": ["b"], "fingerprint": "f"},
+    {"outcome": "retracted", "item": None}]
+pick = lambda *ix: [mixed[i] for i in ix]  # noqa: E731
+assert L.latest_branch_verdict_list(mixed) == pick(14, 13, 8, 6, 7, 15)
+assert L.latest_fingerprint_verdicts(mixed, lambda r: r.get("fingerprint")) == pick(13, 14, 15)
+assert L.latest_fingerprint_verdicts(
+    mixed, lambda r: [r.get("repo"), r.get("fingerprint")]) == pick(14, 13, 15)
+assert L.unretracted_rows(mixed) == pick(0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12)
+assert [L.is_adoption(r) for r in mixed] == [i == 4 for i in range(len(mixed))]
+# ---- the runner's questions (expectations recorded from the jq programs they replaced) ----
+B = "/srv/b"
+run_rows = [
+    {"item": "i1", "repo": A, "fingerprint": "f1", "outcome": "finding", "code_sig": "s1", "dimension": "perf",
+     "summary": "one", "ts": "2026-03-01T01:00:00+01:00"},
+    {"item": "i1", "repo": A, "fingerprint": "f1", "outcome": "verdict", "verdict": "wontfix"},
+    {"item": "i1", "repo": A, "fingerprint": "f1", "outcome": "verdict", "verdict": "open"},
+    {"item": "i2", "repo": None, "fingerprint": "f2", "outcome": "finding", "summary": "legacy"},
+    {"item": "i3", "repo": A, "fingerprint": "f2", "outcome": "shipped", "branch": "nightshift/f2", "dimension": "docs",
+     "summary": "fixed f2", "type": "typo", "ts": "2026-03-01T00:30:00Z"},
+    {"item": "i3", "repo": None, "fingerprint": "f2", "outcome": "verdict", "verdict": "resolved"},
+    {"item": "i4", "repo": A, "fingerprint": "f3", "outcome": "abandoned", "summary": "gave up", "reason": "too big",
+     "dimension": "perf", "ts": "2026-03-02T00:00:00+00:00"},
+    {"item": "i5", "repo": A, "fingerprint": "", "outcome": "empty", "dimension": "docs", "ts": "2026-03-04T00:00:00+00:00"},
+    {"item": "i5", "repo": A, "outcome": "retracted"},
+    {"item": "i6", "repo": A, "outcome": "verdict", "branch": "nightshift/f2", "verdict": "merged"},
+    {"item": "i7", "repo": "/srv/t\tab", "fingerprint": "f4", "outcome": "shipped", "dimension": "perf",
+     "branch": "nightshift/t", "ts": "not a time"},
+    {"item": "item-9-f0", "repo": B, "fingerprint": "f5", "outcome": "finding", "dimension": "perf",
+     "ts": "2026-03-01T00:00:00+00:00"},
+    {"item": "item-9-f1", "repo": B, "fingerprint": "f6", "outcome": "finding", "dimension": "perf",
+     "ts": "2026-03-01T00:01:00+00:00"},
+    {"item": "item-10", "repo": B, "fingerprint": "f7", "outcome": "finding", "dimension": "perf",
+     "ts": "2026-03-02T00:00:00+00:00"},
+]
+rl = ledger_file("runner.jsonl", [json.dumps(r) for r in run_rows])
+# a wontfix stays permanent although an `open` follows it; a null-repo verdict counts for the sole
+# owner; a row without code_sig matches any code; the outcome set decides
+assert cli(rl, "fingerprint-suppressed", A, "f1", "zz", '["finding"]')[:2] == (0, b"true\n")
+assert cli(rl, "fingerprint-suppressed", A, "f2", "zz", '["shipped"]')[:2] == (0, b"true\n")
+assert cli(rl, "fingerprint-suppressed", A, "f3", "", '["finding"]')[:2] == (1, b"false\n")
+assert cli(rl, "fingerprint-suppressed", A, "f3", "zz", '["abandoned"]')[:2] == (0, b"true\n")
+assert cli(rl, "fingerprint-suppressed", B, "f2", "", '["finding"]')[:2] == (1, b"false\n")
+assert cli(rl, "known-work", A)[:2] == (0, b"\n")                 # wontfix, resolved after the work
+assert cli(rl, "known-work", B)[:2] == (0, "- f5 — \n- f6 — \n- f7 — \n".encode())
+assert cli(rl, "recent-decisions", A)[:2] == (0, b'{\n  "recent_decisions": [\n    {\n'
+    b'      "fingerprint": "f3",\n      "status": "abandoned",\n      "ts": "2026-03-02T00:00:00+00:00",\n'
+    b'      "summary": "gave up",\n      "reason": "too big"\n    }\n  ]\n}\n')
+assert cli(rl, "last-service-ts", A)[:2] == (0, b"2026-03-02T00:00:00+00:00\n")   # i5 is retracted
+assert cli(rl, "last-service-ts", "/none")[:2] == (0, b"")
+env_utc = dict(os.environ, TZ="UTC")
+p = subprocess.run(CLI + ["--ledger", str(rl), "dimension-epochs"], capture_output=True, env=env_utc)
+assert (p.returncode, p.stdout) == (0, b"svc\t/srv/a\tdocs\t1772325000\nsvc\t/srv/a\tperf\t1772409600\n"
+    b"svc\t/srv/b\tperf\t1772409600\nsvc\t/srv/t\\tab\tperf\t0\nship\t/srv/a\tdocs\t1772325000\n"
+    b"ship\t/srv/t\\tab\tperf\t0\n")
+assert cli(rl, "service-gaps")[:2] == (0, b"/srv/a\t3\t43200\n/srv/t\\tab\t0\t0\n/srv/b\t2\t86400\n")
+assert cli(rl, "settled-branches")[:2] == (0, b"/srv/a\tnightshift/f2\n")
+assert cli(rl, "last-shipped", A, "nightshift/f2")[:2] == (
+    0, b'{"summary":"fixed f2","fingerprint":"f2","type":"typo","dimension":"docs"}\n')
+assert cli(tmp / "absent.jsonl", "last-shipped", A, "x")[:2] == (
+    2, b'{"summary":"","fingerprint":"","type":"","dimension":""}\n')
+# failures where jq failed: a string row, a latest verdict whose fingerprint is not a string, an
+# object ts that @tsv rejects (the rows before it are still printed)
+bad = ledger_file("runner-bad.jsonl", [json.dumps(r) for r in run_rows] + ['"row"'])
+assert cli(bad, "fingerprint-suppressed", A, "f1", "", '["finding"]')[0] == 5
+numfp = ledger_file("runner-numfp.jsonl", [json.dumps(r) for r in run_rows]
+                    + [json.dumps({"repo": A, "fingerprint": 7, "outcome": "verdict", "verdict": "open"})])
+assert cli(numfp, "known-work", A)[:2] == (5, b"")
+objts = ledger_file("runner-objts.jsonl", [json.dumps(r) for r in run_rows]
+                    + [json.dumps({"repo": B, "dimension": "zz", "outcome": "shipped", "ts": {"x": 1}})])
+rc, o, _ = cli(objts, "dimension-epochs")
+assert rc == 5 and o.count(b"\n") == 3 and o.startswith(b"svc\t/srv/a\tdocs\t")
 print("ledger module: writer bytes, whole appends, queries and jq failure behaviour hold")
 PY

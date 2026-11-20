@@ -17,11 +17,14 @@ Two ways to read it:
 Ledger order is append order; nothing here orders rows by timestamp. Where a question depends on
 jq's ordering (`group_by`), `jq_key` gives jq's total order over null/bool/number/string/array/object.
 
-bin/harvest.sh and lib/digest.sh read and write only through this module; bin/nightshift.sh writes
-through it. The runner's remaining reads still use lib/ledger.jq; keep its verdict sets and
-definitions in step with the ones here until they are ported.
+The ledger is read and written only through this module: bin/nightshift.sh, bin/harvest.sh and
+lib/digest.sh call the CLI, one command per question; the probes and the status report import it.
+Questions that look alike but answer differently (several "open" definitions, raw vs realpath
+repos) are separate commands on purpose.
 
-CLI: python3 lib/ledger.py [--ledger PATH] <command> [args]; PATH defaults to $LEDGER.
+CLI: python3 lib/ledger.py [--ledger PATH] <command> [args]; PATH defaults to $LEDGER. The Bash
+`ledger` helpers import the module and call `cli` instead of running this file, so a call costs
+Python's start-up and not a recompile of the module: some reads run once per finding.
 """
 
 import json
@@ -217,6 +220,63 @@ def join(values, sep):
     return sep.join(parts)
 
 
+def dumps_pretty(value, depth=0):
+    """JSON as `jq` prints it without -c: two-space indent, `"key": value`, `[]`/`{}` when empty."""
+    pad = "  " * (depth + 1)
+    if isinstance(value, list) and value:
+        return ("[\n" + ",\n".join(pad + dumps_pretty(v, depth + 1) for v in value)
+                + "\n" + "  " * depth + "]")
+    if isinstance(value, dict) and value:
+        return ("{\n" + ",\n".join(pad + dumps(k) + ": " + dumps_pretty(v, depth + 1)
+                                   for k, v in value.items())
+                + "\n" + "  " * depth + "}")
+    return dumps(value)
+
+
+def raw_output(value):
+    """One value as `jq -r` prints it: a string as it is, anything else as pretty JSON."""
+    return value if isinstance(value, str) else dumps_pretty(value)
+
+
+def jq_max(values, key=lambda v: v):
+    """jq's `max_by(key)` (and `max`): the LAST of the maximal values in jq's order, which matters
+    for equal values that print differently (1 and 1.0); None when there are none."""
+    best, best_key, seen = None, None, False
+    for value in values:
+        k = jq_key(key(value))
+        if not seen or k >= best_key:
+            best, best_key, seen = value, k, True
+    return best
+
+
+def head_slice(value, end):
+    """jq's `.[0:end]`: strings (by code point) and arrays are cut, null stays null, others fail."""
+    if value is None:
+        return None
+    if isinstance(value, (str, list)):
+        return value[0:end]
+    raise LedgerError(f"Cannot index {jq_type(value)} with object")
+
+
+_TSV = str.maketrans({"\\": "\\\\", "\t": "\\t", "\n": "\\n", "\r": "\\r"})
+
+
+def tsv(values):
+    """jq's `@tsv` of an array: null and NaN empty, booleans and numbers printed, strings with
+    backslash, tab, newline and CR escaped; an array or object fails."""
+    parts = []
+    for value in values:
+        if value is None:
+            parts.append("")
+        elif isinstance(value, str):
+            parts.append(value.translate(_TSV))
+        elif isinstance(value, (bool, int, float)):
+            parts.append("" if value != value else dumps(value))
+        else:
+            raise LedgerError(f"{jq_type(value)} ({dumps(value)}) is not valid in a csv row")
+    return "\t".join(parts)
+
+
 # utf8_coding_length / utf8_first_codepoint of jq's src/jv_unicode.c
 _CONT = -1
 _LENGTH = [1] * 0x80 + [_CONT] * 0x40 + [0] * 2 + [2] * 30 + [3] * 16 + [4] * 5 + [0] * 11
@@ -268,6 +328,8 @@ def arg(value):
 # --------------------------------------------------------------------------- readers ----
 
 _SURROGATE = re.compile("[\ud800-\udfff]")
+# Decoded text holds no surrogates, so only a \uD800-\uDFFF escape can produce one.
+_SURROGATE_ESCAPE = re.compile(r"\\u[dD][89a-fA-F]")
 _CONSTANTS = {"NaN": float("nan"), "Infinity": sys.float_info.max,
               "-Infinity": -sys.float_info.max}
 
@@ -299,6 +361,7 @@ def iter_values(path):
     if text.startswith("﻿"):
         text = text[1:]
     decoder = json.JSONDecoder(parse_constant=_CONSTANTS.__getitem__)
+    escapes = _SURROGATE_ESCAPE.search(text) is not None
     i, end = 0, len(text)
     while True:
         while i < end and text[i] in " \t\n\r":
@@ -311,7 +374,7 @@ def iter_values(path):
             raise LedgerError(f"parse error: {e.msg} at line {e.lineno}, column {e.colno}") from None
         except (ValueError, RecursionError) as e:
             raise LedgerError(f"parse error: {e}") from None
-        if _has_lone_surrogate(value):
+        if escapes and _has_lone_surrogate(value):
             raise LedgerError("parse error: Invalid \\uXXXX\\uXXXX surrogate pair escape")
         yield value
 
@@ -761,6 +824,237 @@ def digest_open_findings(rows):
     return "\n".join(lines)
 
 
+# ------------------------------------------------------------------- runner questions ----
+# Each answers one bin/nightshift.sh read with the bytes its jq program printed; the runner keeps
+# its own guards and fallbacks (`|| true`, `|| return 0`, `date -d`, the index loops).
+
+def _with_order(rows):
+    """jq's `to_entries | map(.value + {__order: .key})`: a null row becomes {__order}, any other
+    non-object fails."""
+    return [add(r, {"__order": i}) for i, r in enumerate(rows)]
+
+
+def fingerprint_suppressed(rows, repo, fingerprint, code_sig, outcomes):
+    """Whether this repo-scoped fingerprint is suppressed (ADR 0014): ANY wontfix verdict on it,
+    or ANY row in `outcomes` whose code_sig is absent, "" or equal to `code_sig`. Order is
+    ignored (a later `open` does not lift a wontfix) and retractions are not consulted. A row
+    with repo null counts when every non-null owner of the fingerprint is this repo."""
+    owners = unique([field(r, "repo") for r in rows
+                     if field(r, "fingerprint") == fingerprint and field(r, "repo") is not None])
+    sole = [jq_key(o) for o in owners] == [jq_key(repo)]
+    mine = [r for r in rows if field(r, "fingerprint") == fingerprint
+            and (field(r, "repo") == repo or (field(r, "repo") is None and sole))]
+    permanent = any(r.get("outcome") == "verdict" and r.get("verdict") == "wontfix" for r in mine)
+    known = any(array_index(outcomes, r.get("outcome")) is not None
+                and alt(r.get("code_sig"), "") in ("", code_sig) for r in mine)
+    return permanent or known
+
+
+def known_work(rows, repo, limit=40):
+    """The Explore prompt's still-open work for this repo: the newest finding OR shipped row per
+    fingerprint (strict repo), unless a verdict in scope was ever wontfix, open when its latest
+    verdict is `open` or older than the row. Verdicts are in scope by repo or, with repo null,
+    when the fingerprint's only non-null owner is this repo. A non-string fingerprint on a latest
+    verdict or on a surviving work row fails the whole answer, as jq's object lookup did."""
+    ordered = _with_order(rows)
+    owners = {}
+    for r in ordered:
+        if r.get("repo") is not None:
+            owners.setdefault(jq_key(r.get("fingerprint")), set()).add(jq_key(r.get("repo")))
+    sole = {jq_key(repo)}
+    verdicts = [v for v in ordered if v.get("outcome") == "verdict" and v.get("fingerprint") is not None
+                and (v.get("repo") == repo
+                     or (v.get("repo") is None and owners.get(jq_key(v.get("fingerprint"))) == sole))]
+    ignored = unique([v.get("fingerprint") for v in verdicts if v.get("verdict") == "wontfix"])
+    latest = {}
+    for v in latest_fingerprint_verdicts(verdicts, lambda r: r.get("fingerprint")):
+        key = v.get("fingerprint")
+        if not isinstance(key, str):
+            raise LedgerError(f"Cannot use {jq_type(key)} ({dumps(key)}) as object key")
+        latest[key] = v
+    work = [r for r in ordered if r.get("repo") == repo
+            and r.get("outcome") in ("finding", "shipped") and r.get("fingerprint") is not None]
+    work = [g[-1] for g in group_by(work, lambda r: r.get("fingerprint"))]
+    work = [w for w in work if array_index(ignored, w.get("fingerprint")) is None]
+    still_open = []
+    for w in work:
+        fp = w.get("fingerprint")
+        if not isinstance(fp, str):
+            raise LedgerError(f"Cannot index object with {jq_type(fp)}")
+        verdict = latest.get(fp) or {}
+        if (alt(verdict.get("verdict"), "") == "open"
+                or alt(verdict.get("__order"), -1) < w["__order"]):
+            still_open.append(w)
+    return "\n".join(add("- ", w["fingerprint"], " — ", alt(w.get("summary"), ""))
+                     for w in still_open[:limit])
+
+
+def recent_decisions(rows, repo, limit=20):
+    """The last `limit` fingerprints (strict repo, "" included) whose LAST row of any outcome is
+    `abandoned` or a non-open verdict, as the search-history prompt object; not retraction-aware."""
+    ordered = [r for r in _with_order(rows)
+               if r.get("repo") == repo and r.get("fingerprint") is not None]
+    decided = []
+    for events in group_by(ordered, lambda r: r.get("fingerprint")):
+        last = events[-1]
+        if not (last.get("outcome") == "abandoned"
+                or (last.get("outcome") == "verdict" and last.get("verdict") != "open")):
+            continue
+        summaries = [s for s in (alt(e.get("summary"), None) for e in events)
+                     if s is not None and s != ""]
+        decided.append({"fingerprint": last.get("fingerprint"),
+                        "status": alt(last.get("verdict"), last.get("outcome")),
+                        "ts": last.get("ts"), "__order": last["__order"],
+                        "summary": head_slice(alt(summaries[-1] if summaries else None, ""), 300),
+                        "reason": head_slice(alt(last.get("reason"), ""), 300)})
+    decided.sort(key=lambda d: d["__order"])
+    for d in decided:
+        del d["__order"]
+    return {"recent_decisions": decided[-limit:]}
+
+
+def last_service_ts(rows, repo):
+    """The jq-greatest `ts` of this repo's unretracted rows with an outcome other than verdict,
+    excluding orphan adoptions (empty and failure outcomes count). The max compares the values
+    as jq does, so timestamp strings compare as text; None when there is none."""
+    return jq_max([field(r, "ts") for r in unretracted_rows(rows)
+                   if field(r, "repo") == repo and field(r, "outcome") is not None
+                   and field(r, "outcome") != "verdict" and field(r, "source") != "orphan-adopt"])
+
+
+_DATE_FALLBACK = {}
+
+
+def _date_fallback(ts):
+    """One memoized `date -d` per DISTINCT string Python does not parse the way date does."""
+    if ts not in _DATE_FALLBACK:
+        import subprocess
+        try:
+            out = subprocess.run(["date", "-d", ts, "+%s"], capture_output=True, text=True,
+                                 check=True).stdout.strip()
+            _DATE_FALLBACK[ts] = int(out)
+        except (OSError, ValueError, subprocess.CalledProcessError):
+            _DATE_FALLBACK[ts] = 0
+    return _DATE_FALLBACK[ts]
+
+
+def parse_epoch(ts):
+    """ISO-8601 -> epoch seconds as `date -d TS +%s` gives it; 0 for empty or unparsable.
+
+    A trailing `Z` is UTC. Anything `fromisoformat` refuses (a nanosecond fraction, a basic-format
+    stamp) falls back to `date -d`, as do naive local stamps (Python and GNU date pick different
+    sides of a DST fold) and negative epochs (`int()` truncates toward zero, `date` floors)."""
+    from datetime import datetime
+    s = ts.strip()
+    if not s:
+        return 0
+    iso = s[:-1] + "+00:00" if s[-1] in "Zz" else s
+    try:
+        parsed = datetime.fromisoformat(iso)
+        if parsed.tzinfo is None:
+            return _date_fallback(s)
+        epoch = parsed.timestamp()
+        if epoch < 0:
+            return _date_fallback(s)
+        return int(epoch)
+    except (ValueError, OverflowError, OSError):
+        return _date_fallback(s)
+
+
+def epoch_field(line, field_no):
+    """Field `field_no` (1-based) of a TSV line as an epoch; an empty field stays empty (the
+    index loop skips it) and an unparsable one scores 0 for its own row."""
+    cols = line.split("\t")
+    if field_no <= len(cols) and cols[field_no - 1].strip():
+        cols[field_no - 1] = str(parse_epoch(cols[field_no - 1]))
+    return "\t".join(cols)
+
+
+def dimension_epoch_lines(rows):
+    """The rows the epoch index is built from, as `@tsv` lines with the ts field as an epoch:
+    one `svc` row per (repo, dimension) with the jq-greatest ts over finding|shipped|abandoned
+    (text comparison of the stamps, not retraction-aware, `empty` excluded), then one `ship`
+    row per shipped row (the index takes the max over these epochs). Lazy: a value @tsv
+    rejects ends the output at that row, as jq's stream did."""
+    keyed = [r for r in rows if field(r, "repo") is not None and field(r, "dimension") is not None]
+    service = [r for r in keyed if r.get("outcome") in ("finding", "shipped", "abandoned")]
+    out = [["svc", m.get("repo"), m.get("dimension"), m.get("ts")]
+           for m in (jq_max(g, lambda r: r.get("ts"))
+                     for g in group_by(service, lambda r: [r.get("repo"), r.get("dimension")]))]
+    out += [["ship", r.get("repo"), r.get("dimension"), r.get("ts")]
+            for r in keyed if r.get("outcome") == "shipped"]
+    for values in out:
+        yield epoch_field(tsv(values), 4)
+
+
+_SIBLING = re.compile(r"^(item-[0-9]+)-f[0-9]+$")
+
+
+def median_gap_lines(lines):
+    """"repo<TAB>ts<TAB>item" lines -> one "repo<TAB>n<TAB>median" per repo, in first-seen order.
+
+    `n` counts Explore passes with a parsed timestamp: item-<epoch>-fN siblings are one pass at
+    their earliest valid epoch, other item ids stay as they are, and a row without an item counts
+    on its own. Epoch 0 is not a service; fewer than two passes give median 0. The bootstrap and
+    the floor stay in the runner, where the dimension count lives."""
+    per_repo = {}
+    for row, line in enumerate(lines):
+        cols = line.split("\t")
+        repo = cols[0]
+        if not repo:
+            continue
+        services = per_repo.setdefault(repo, {})
+        ts = cols[1] if len(cols) > 1 else ""
+        item = cols[2] if len(cols) > 2 else ""
+        e = parse_epoch(ts)
+        if e > 0:
+            service = _SIBLING.sub(r"\1", item) if item else row
+            services[service] = min(e, services.get(service, e))
+    result = []
+    for repo, services in per_repo.items():
+        eps = sorted(services.values())
+        gaps = sorted(b - a for a, b in zip(eps, eps[1:]))
+        n = len(gaps)
+        if n == 0:
+            median = 0
+        elif n % 2:
+            median = gaps[(n - 1) // 2]
+        else:
+            median = (gaps[n // 2 - 1] + gaps[n // 2]) // 2
+        result.append("%s\t%d\t%d" % (repo, len(eps), median))
+    return result
+
+
+def service_gap_lines(rows):
+    """The gap index: per repo, distinct unretracted passes (finding|shipped|abandoned|empty) and
+    the median gap between them. Raises like jq's stream, but only after printing what the old
+    converter printed for the rows before the failing one."""
+    lines = []
+    try:
+        for r in unretracted_rows(rows):
+            if field(r, "repo") is not None and field(r, "outcome") in PASS_OUTCOMES:
+                lines.append(tsv([r.get("repo"), r.get("ts"), r.get("item")]))
+    except LedgerError:
+        _lines(median_gap_lines(lines))
+        raise
+    return median_gap_lines(lines)
+
+
+def settled_branches(rows):
+    """`repo<TAB>branch` lines of the pairs whose last-appended verdict is terminal (raw repo
+    strings, an empty branch kept)."""
+    return join([add(r.get("repo"), "\t", r.get("branch")) for r in latest_branch_verdict_list(rows)
+                 if array_index(list(TERMINAL_VERDICT_ORDER), r.get("verdict")) is not None], "\n")
+
+
+def last_shipped_context(rows, repo, branch):
+    """The branch advisor's context from the LAST shipped row for this raw (repo, branch)."""
+    hits = [r for r in rows if field(r, "outcome") == "shipped"
+            and field(r, "repo") == repo and field(r, "branch") == branch]
+    row = hits[-1] if hits else {}
+    return {k: alt(row.get(k), "") for k in ("summary", "fingerprint", "type", "dimension")}
+
+
 # --------------------------------------------------------------------------- writers ----
 
 def _null(value):
@@ -854,6 +1148,16 @@ digest sections (markdown lines; nothing when the section is empty):
   empty-rate                         passes and empty passes per dimension
   merge-rate                         merge-rate by dimension, verifiability, proof, finding type
   open-findings-digest               open findings of all nights (an empty line when none)
+runner questions:
+  fingerprint-suppressed REPO FP CODE_SIG OUTCOMES_JSON
+                                     prints true/false; exit 0 when suppressed, 1 when not
+  known-work REPO                    "- fp — summary" lines of still-open work (at most 40)
+  recent-decisions REPO              {"recent_decisions": [...]} pretty-printed, the last 20
+  last-service-ts REPO               the greatest ts of the repo's service rows (nothing if none)
+  dimension-epochs                   svc|ship<TAB>repo<TAB>dimension<TAB>epoch rows for the epoch index
+  service-gaps                       repo<TAB>passes<TAB>median gap rows for the gap index
+  settled-branches                   repo<TAB>branch of every pair whose latest verdict is terminal
+  last-shipped REPO BRANCH           {summary,fingerprint,type,dimension} of the last shipped row
 """
 
 _WRITERS = {
@@ -946,6 +1250,20 @@ def main(argv):
             _out(f"{tostring(alt(row.get('verdict'), ''))}\t{tostring(alt(row.get('source'), ''))}\n")
         _slurp_command(path, run)
         return 0
+    if command == "fingerprint-suppressed":
+        repo, fingerprint, code_sig, outcomes = (args + ["", "", "", "[]"])[:4]
+        try:
+            outcomes = json.loads(outcomes)
+        except ValueError:
+            sys.stderr.write("ledger.py: OUTCOMES_JSON is not JSON\n")
+            return 2
+        answer = []
+
+        def run(rows):
+            answer.append(fingerprint_suppressed(rows, repo, fingerprint, code_sig, outcomes))
+            _out(dumps(answer[-1]) + "\n")
+        _slurp_command(path, run)
+        return 0 if answer[-1] else 1
     slurped = {
         "branch-verdicts": lambda rows: _lines(branch_verdict_lines(rows)),
         "known-branches": lambda rows: _lines(known_branch_lines(rows)),
@@ -959,6 +1277,16 @@ def main(argv):
         "empty-rate": lambda rows: _lines(filter(None, [empty_rate(rows)])),
         "merge-rate": lambda rows: _lines(merge_rate_sections(rows)),
         "open-findings-digest": lambda rows: _out(digest_open_findings(rows) + "\n"),
+        "known-work": lambda rows: _out(known_work(rows, (args + [""])[0]) + "\n"),
+        "recent-decisions": lambda rows: _out(
+            dumps_pretty(recent_decisions(rows, (args + [""])[0])) + "\n"),
+        "last-service-ts": lambda rows: _lines(
+            raw_output(ts) for ts in [last_service_ts(rows, (args + [""])[0])] if truthy(ts)),
+        "dimension-epochs": lambda rows: _lines(dimension_epoch_lines(rows)),
+        "service-gaps": lambda rows: _lines(service_gap_lines(rows)),
+        "settled-branches": lambda rows: _out(settled_branches(rows) + "\n"),
+        "last-shipped": lambda rows: _out(
+            dumps(last_shipped_context(rows, *(args + ["", ""])[:2])) + "\n"),
     }
     if command in slurped:
         _slurp_command(path, slurped[command])
@@ -967,10 +1295,15 @@ def main(argv):
     return 2
 
 
-if __name__ == "__main__":
+def cli(argv):
+    """`main` with a failed read turned into jq's exit status and a message on stderr."""
     try:
-        sys.exit(main(sys.argv[1:]))
+        return main(argv)
     except LedgerError as e:
         sys.stdout.flush()
         sys.stderr.write(f"ledger.py: {e}\n")
-        sys.exit(e.code)
+        return e.code
+
+
+if __name__ == "__main__":
+    sys.exit(cli(sys.argv[1:]))

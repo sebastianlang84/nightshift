@@ -3,7 +3,7 @@ set -euo pipefail
 unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this way; fixtures push main
 
 # The two ledger aggregates that used to fork `date -d` once per row now convert their whole batch
-# in one lib/ledger_epochs.py pass, and median_gap reads a cached per-repo index instead of
+# in one lib/ledger.py pass, and median_gap reads a cached per-repo index instead of
 # re-slurping the never-pruned ledger on every lens selection. Pin timestamp parsing, the median,
 # bootstrap floors, retraction exclusion (ADR 0023), and cache invalidation. Cadence counts parent
 # Explore passes, so sibling findings must not shorten it or advance the bootstrap service count.
@@ -13,7 +13,15 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
-LIB="$ROOT/lib/ledger_epochs.py"
+# The conversions the index commands apply to their @tsv rows, fed TSV directly.
+tsv_epochs() { # stdin TSV -> the same TSV with field 4 as an epoch
+  python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import ledger
+for line in sys.stdin: sys.stdout.write(ledger.epoch_field(line.rstrip("\n"), 4) + "\n")' "$ROOT/lib"
+}
+median_gaps() { # stdin "repo<TAB>ts<TAB>item" -> "repo<TAB>n<TAB>median" per repo
+  python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import ledger
+sys.stdout.write("".join(l + "\n" for l in ledger.median_gap_lines([l.rstrip("\n") for l in sys.stdin])))' "$ROOT/lib"
+}
 
 # --- tsv-epochs: field N converted in place, every other field and the row ALIGNMENT untouched ----
 # The index loop reads `kind repo dim epoch` positionally and skips a row whose ts is empty while
@@ -21,7 +29,7 @@ LIB="$ROOT/lib/ledger_epochs.py"
 # rows after it.
 iso="2026-08-28T01:02:03+00:00"; want="$(date -d "$iso" +%s)"
 out="$(printf 'svc\t/r\tperf\t%s\nsvc\t/r\tdocs\t\nship\t/r\tcraft\tnot-a-timestamp\n' "$iso" \
-        | python3 "$LIB" tsv-epochs --field 4)"
+        | tsv_epochs)"
 [ "$(sed -n 1p <<<"$out")" = "$(printf 'svc\t/r\tperf\t%s' "$want")" ] \
   || fail "a parsed ts should convert to the same epoch \`date -d\` gave (got $(sed -n 1p <<<"$out"))"
 [ "$(sed -n 2p <<<"$out")" = "$(printf 'svc\t/r\tdocs\t')" ] \
@@ -35,7 +43,7 @@ out="$(printf 'svc\t/r\tperf\t%s\nsvc\t/r\tdocs\t\nship\t/r\tcraft\tnot-a-timest
 dst="2026-10-25T02:30:00"
 dst_want="$(TZ=Europe/Vienna date -d "$dst" +%s)"
 dst_got="$(printf 'svc\t/r\tperf\t%s\n' "$dst" \
-            | TZ=Europe/Vienna python3 "$LIB" tsv-epochs --field 4 | cut -f4)"
+            | TZ=Europe/Vienna tsv_epochs | cut -f4)"
 [ "$dst_got" = "$dst_want" ] \
   || fail "a naive DST-fold timestamp must match \`date -d\` (want $dst_want, got $dst_got)"
 
@@ -44,7 +52,7 @@ dst_got="$(printf 'svc\t/r\tperf\t%s\n' "$dst" \
 pre="1969-12-31T23:59:59.500000+00:00"
 pre_want="$(date -d "$pre" +%s)"
 pre_got="$(printf 'svc\t/r\tperf\t%s\n' "$pre" \
-            | python3 "$LIB" tsv-epochs --field 4 | cut -f4)"
+            | tsv_epochs | cut -f4)"
 [ "$pre_got" = "$pre_want" ] \
   || fail "a pre-epoch timestamp must match \`date -d\` (want $pre_want, got $pre_got)"
 
@@ -52,7 +60,7 @@ pre_got="$(printf 'svc\t/r\tperf\t%s\n' "$pre" \
 base=1700000000
 gapin() { for e in "$@"; do printf '/r\t%s\n' "$(date -Iseconds -d "@$e")"; done; }
 mg="$( { gapin $((base)) $((base+100)) $((base+300)) $((base+400)); \
-         printf '/r\t\n/r\tnot-a-timestamp\n'; } | python3 "$LIB" median-gaps )"
+         printf '/r\t\n/r\tnot-a-timestamp\n'; } | median_gaps )"
 # gaps 100,200,100 -> sorted 100,100,200 -> median 100; the two unusable rows are not services.
 [ "$mg" = "$(printf '/r\t4\t100')" ] || fail "median-gaps should report 4 services and median 100 (got $mg)"
 
@@ -66,7 +74,7 @@ mg="$(printf '%s\n' \
   $'/r\t2026-08-28T01:10:00+00:00\titem-200' \
   $'/r\t2026-08-28T01:11:00+00:00\titem-200-f0' \
   $'/s\t2026-08-28T01:05:00+00:00\titem-100-f0' \
-  $'/s\t2026-08-28T01:06:00+00:00\titem-100-f1' | python3 "$LIB" median-gaps)"
+  $'/s\t2026-08-28T01:06:00+00:00\titem-100-f1' | median_gaps)"
 [ "$mg" = "$(printf '/r\t2\t600\n/s\t1\t0')" ] \
   || fail "siblings must share the earliest parsed epoch within each repo (got $mg)"
 
@@ -74,7 +82,7 @@ mg="$(printf '%s\n' \
 # rows without IDs must not all merge into a fictitious common parent.
 mg="$(for item in item-100-f0 item-200-f0 legacy-f0 legacy-f1 f0 f1 '' ''; do
   printf '/r\t%s\t%s\n' "$iso" "$item"
-done | python3 "$LIB" median-gaps)"
+done | median_gaps)"
 [ "$mg" = "$(printf '/r\t8\t0')" ] \
   || fail "distinct passes and unidentified rows at the same second must remain separate (got $mg)"
 

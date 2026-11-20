@@ -31,8 +31,8 @@ ledgers diverge silently: duplicate branches, broken caps and rotation). See
    |--------|----------|---------|
    | `claude` | every stage that thinks | every stage fails; nothing ships |
    | `git` | worktrees, commits, branch pushes | run aborts |
-   | `jq` | telemetry and JSON handling, the ledger reads not yet in `lib/ledger.py` | run aborts |
-   | `python3` (stdlib only — nothing to install) | ledger writes, harvest's and the digest's ledger reads, rulebook parsing, JSON extraction, finding probes | run aborts |
+   | `jq` | telemetry and JSON handling | run aborts |
+   | `python3` (stdlib only — nothing to install) | every ledger read and write, rulebook parsing, JSON extraction, finding probes | run aborts |
    | `bwrap` (`apt install bubblewrap`; on Debian 11 from bullseye-backports, because 0.4.1 lacks `--clearenv` and `--size`) | sandboxing the ship gate (ADR 0026) | every `branch-fix` repo refuses to ship |
    | `gh` | opening PRs when `NIGHTSHIFT_OPEN_PR=1` | branch still pushed, no PR |
 

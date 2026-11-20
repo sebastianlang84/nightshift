@@ -39,7 +39,7 @@ PROBE_SNAPSHOT="$STATE_DIR/findings-probe.json"
 SURVIVAL_SNAPSHOT="$STATE_DIR/fix-survival.json"   # derived by harvest (lib/probe_survival.py), read by the digest
 # Derived, disposable index of the per-(repo,dimension) ledger aggregates the selection loop needs:
 # the last service epoch (last_dim_epoch) and the last SHIPPED epoch (evidence_override). One
-# aggregating jq pass over the append-only ledger, memoized on the ledger's mtime, so their nested
+# aggregating ledger.py pass over the append-only ledger, memoized on the ledger's mtime, so their nested
 # repo×dimension callers stop re-slurping the whole ledger on every cell (see last_dim_epoch).
 LEDGER_EPOCH_INDEX="$STATE_DIR/.ledger-epoch.idx"
 # Format marker, written as the index's FIRST line. An index left by an older nightshift has no
@@ -248,9 +248,10 @@ append_run() { # stage agent start dur status item usage_json
       exit:$status}' >> "$RUNSLOG"
 }
 
-# Ledger rows are written only by lib/ledger.py (one O_APPEND write per row, jq's byte format).
+# The ledger is read and written only through lib/ledger.py (one O_APPEND write per row, jq's byte
+# format); the reads go through `ledger`, defined in lib/digest.sh.
 ledger_append() { # item repo fp branch sha outcome [summary] [pr_url] [proof] [verifiability] [dimension] [type] [code_sig] [scope]
-  python3 "$NIGHTSHIFT_HOME/lib/ledger.py" --ledger "$LEDGER" append-run "$NIGHT" "$(date -Iseconds)" "$@"
+  ledger append-run "$NIGHT" "$(date -Iseconds)" "$@"
 }
 
 # Runner-canonical finding identity (ADR 0014). Computed by the Runner from NORMALIZED structured
@@ -296,21 +297,13 @@ code_sig() { # repo finding.json [ref] -> 12-char signature or ""
 # (a human `wontfix` verdict) OR it has a prior row in the given outcome set whose stored content
 # signature still MATCHES the current code (code_sig equal, or absent on older rows). If the code
 # under the finding has changed since (code_sig differs), it is NOT suppressed — the identity is
-# eligible again. jq match (not a grep regex): fingerprints contain '.'/'/'/':' metacharacters; a
-# slurped any() keeps the verdict order-independent.
+# eligible again. An exact string match (not a grep regex): fingerprints contain '.'/'/'/':'
+# metacharacters. The answer ignores ledger order, and a ledger that cannot be read counts as
+# "not suppressed" (fail open).
 _fp_suppressed() { # repo fingerprint code_sig outcomes_json
   [ -n "$2" ] && [ "$2" != null ] || return 1   # never dedup on an unusable key
   [ -f "$LEDGER" ] || return 1
-  jq -se --arg repo "$1" --arg fp "$2" --arg csig "$3" --argjson outs "$4" '
-    . as $all
-    | ([$all[] | select(.fingerprint==$fp and .repo!=null) | .repo] | unique) as $owners
-    | [$all[] | select(.fingerprint==$fp and
-        (.repo==$repo or (.repo==null and $owners==[$repo])))] as $rows
-    | ($rows | any(.outcome=="verdict" and .verdict=="wontfix")) as $permanent
-    | ($rows | any(
-        ((.outcome as $o | $outs | index($o)) != null)
-        and (((.code_sig // "") == "") or ((.code_sig // "") == $csig)))) as $known
-    | $permanent or $known' "$LEDGER" >/dev/null 2>&1
+  ledger fingerprint-suppressed "$1" "$2" "$3" "$4" >/dev/null 2>&1
 }
 _suppressed_for() { # outcomes_json repo fingerprint code_sig
   _fp_suppressed "$2" "$3" "$4" "$1"
@@ -324,25 +317,9 @@ known_work() { # repo -> compact "fingerprint — summary" list of STILL-OPEN it
   [ -f "$LEDGER" ] || return 0
   # The ledger is an event stream: a terminal verdict closes prior work, while a later `open` or a
   # newly emitted invalidated finding reopens it. `wontfix` alone is permanent (ADR 0014). Attach the
-  # append index instead of sorting timestamps: DST offsets and copied legacy rows need not sort in
-  # event order. Cap the final prompt block so it stays bounded.
-  jq -L "$NIGHTSHIFT_HOME/lib" -rs --arg r "$repo" '
-    include "ledger";
-    to_entries | map(.value + {__order:.key}) as $rows
-    | ([ $rows[] | select(.outcome=="verdict" and .fingerprint!=null)
-         | . as $verdict
-         | ([ $rows[] | select(.fingerprint==$verdict.fingerprint and .repo!=null) | .repo] | unique) as $owners
-         | select(.repo==$r or (.repo==null and $owners==[$r])) ]) as $verdicts
-    | ($verdicts | map(select(.verdict=="wontfix") | .fingerprint) | unique) as $ignored
-    | ($verdicts | latest_fingerprint_verdicts(.fingerprint)
-       | map({key:.fingerprint, value:.}) | from_entries) as $v
-    | [$rows[] | select(.repo==$r and (.outcome=="finding" or .outcome=="shipped") and .fingerprint!=null)]
-    | group_by(.fingerprint) | map(max_by(.__order))
-    | map(. as $work | select(($ignored | index($work.fingerprint)) == null))
-    | map(. as $work | select(($v[$work.fingerprint].verdict // "") == "open"
-                             or (($v[$work.fingerprint].__order // -1) < $work.__order)))
-    | .[0:40] | map("- " + .fingerprint + " — " + (.summary // "")) | join("\n")' \
-    "$LEDGER" 2>/dev/null || true
+  # append order instead of sorting timestamps: DST offsets and copied legacy rows need not sort in
+  # event order. The block is capped at 40 lines so the prompt stays bounded.
+  ledger known-work "$repo" 2>/dev/null || true
 }
 
 search_history_path() { # repo -> bounded, derived search receipt history
@@ -369,26 +346,14 @@ search_history() { # repo -> prior receipts and latest terminal decisions, never
     jq -c '{recent_scans:.}' "$file" 2>/dev/null || true
   fi
   [ -f "$LEDGER" ] || return 0
-  jq -rs --arg repo "$1" '
-    to_entries | map(.value + {__order:.key})
-    | map(select(.repo==$repo and .fingerprint!=null))
-    | group_by(.fingerprint)
-    | map(. as $events | last | select(.outcome=="abandoned" or
-         (.outcome=="verdict" and .verdict!="open"))
-      | {fingerprint, status:(.verdict // .outcome), ts, __order,
-         summary:([$events[] | .summary // empty | select(.!="")] | last // "" | .[0:300]),
-         reason:(.reason // "" | .[0:300])})
-    | sort_by(.__order) | .[-20:] | map(del(.__order)) | {recent_decisions:.}
-  ' "$LEDGER" 2>/dev/null || true
+  ledger recent-decisions "$1" 2>/dev/null || true
 }
 
 last_serviced_epoch() { # repo -> epoch of the last recorded service (0 if never)
   local repo="$1" iso
   [ -f "$LEDGER" ] || { echo 0; return; }
-  iso=$(jq -L "$NIGHTSHIFT_HOME/lib" -rs --arg r "$repo" '
-     include "ledger";
-     [unretracted_rows | select(.repo==$r and .outcome!=null and .outcome!="verdict" and .source!="orphan-adopt") | .ts]
-     | max // empty' "$LEDGER" 2>/dev/null || true)
+  # The greatest ts compares the stamps as text, then `date -d` converts it.
+  iso=$(ledger last-service-ts "$repo" 2>/dev/null || true)
   [ -n "$iso" ] || { echo 0; return; }
   date -d "$iso" +%s 2>/dev/null || echo 0
 }
@@ -1007,19 +972,18 @@ refresh_ledger_epoch_index() { # rebuild LEDGER_EPOCH_INDEX (repo\tdim\tservice_
   # — select_dimension's dimension loop and write_digest's repo×dimension coverage matrix — so a
   # per-call `jq -rs` slurp re-parses the whole append-only, never-pruned ledger O(R*D) times a
   # night, each slurp forking a `date` per matching row. Instead derive BOTH per-key aggregates in
-  # ONE jq pass and cache them, invalidated on the ledger's mtime (the file is command-substitution-
+  # ONE ledger.py pass and cache them, invalidated on the ledger's mtime (the file is command-substitution-
   # safe state, since callers may run in a subshell). Each column is exactly what its old per-call
   # query returned, so neither the staleness ranking nor the evidence override changes:
   #   col 3  max service ts over finding|shipped|abandoned   (last_dim_epoch)
   #   col 4  max epoch over shipped rows                     (evidence_override: ∃ts>gen ⟺ max>gen)
   # Col 4 reduces over PARSED epochs, not over raw strings: an unparsable ts scores 0, exactly as the
   # old per-row `date -d ... || echo 0` scored it, and a lexical max would let one such row mask a
-  # real shipped finding behind it. That is also why the `ship` rows arrive UNGROUPED — jq cannot
-  # take a max over epochs it has not parsed — so the conversion, not the row count, is what has to
-  # be cheap: lib/ledger_epochs.py converts the whole batch in ONE fork (it used to be one `date`
-  # fork per shipped row ever recorded, re-paid on every ledger append, since the mtime invalidates
-  # this index nightly). It rewrites col 4 in place, so the loop below still reads aligned rows and
-  # an empty ts stays empty (skipped) while an unparsable one still scores 0 for its row alone.
+  # real shipped finding behind it. That is why the `ship` rows arrive UNGROUPED and the max is
+  # taken below: `ledger.py dimension-epochs` converts the whole batch in ONE process (it used to be
+  # one `date` fork per shipped row ever recorded, re-paid on every ledger append, since the mtime
+  # invalidates this index nightly). An empty ts stays empty (skipped) while an unparsable one
+  # still scores 0 for its row alone.
   if [ ! -f "$LEDGER" ]; then rm -f "$LEDGER_EPOCH_INDEX" 2>/dev/null || true; return 0; fi
   # Fresh index (exists, current format, ledger not newer) → reuse; nested cells cost a lookup, not
   # a scan. `read` is a builtin, so the version check costs no fork on that hot path.
@@ -1030,16 +994,10 @@ refresh_ledger_epoch_index() { # rebuild LEDGER_EPOCH_INDEX (repo\tdim\tservice_
   fi
   local raw tmp kind repo dim e key
   local -A svc=() ship=()
-  # On a jq/converter failure keep any existing index and retry next call — never cache an empty
-  # index over a good one (matches the old per-call `|| true`, which fell back to epoch 0 only for
-  # that one call). `pipefail` is what makes a jq failure reach this `||` through the pipe.
-  raw=$(jq -rs '
-    [.[]|select(.repo!=null and .dimension!=null)] as $rows
-    | ( $rows | map(select(.outcome=="finding" or .outcome=="shipped" or .outcome=="abandoned"))
-              | group_by([.repo,.dimension]) | map(max_by(.ts) | ["svc",.repo,.dimension,.ts]) )
-    + ( $rows | map(select(.outcome=="shipped") | ["ship",.repo,.dimension,.ts]) )
-    | .[] | @tsv' "$LEDGER" 2>/dev/null \
-        | python3 "$NIGHTSHIFT_HOME/lib/ledger_epochs.py" tsv-epochs --field 4 2>/dev/null) || return 0
+  # On a read failure keep any existing index and retry next call — never cache an empty index
+  # over a good one (matches the old per-call `|| true`, which fell back to epoch 0 only for that
+  # one call).
+  raw=$(ledger dimension-epochs 2>/dev/null) || return 0
   while IFS=$'\t' read -r kind repo dim e; do
     [ -n "$e" ] || continue        # a null/absent ts parses to nothing, as it scored 0 before
     key="$repo"$'\t'"$dim"
@@ -1127,7 +1085,7 @@ refresh_ledger_gap_index() { # rebuild LEDGER_GAP_INDEX (repo\tservices\tmedian_
   # median_gap runs once per repo per pass (dim_ceiling, from select_dimension) and used to re-slurp
   # the whole never-pruned ledger and fork a `date` per matching row to do it — the same unbounded
   # per-row cost the epoch index above exists to remove, on the one aggregate that was left out of
-  # it. Derive every repo's cadence in ONE jq pass plus ONE converter fork, cached on the ledger's
+  # it. Derive every repo's cadence in ONE ledger.py pass, cached on the ledger's
   # mtime and stored in a file (callers run inside command substitutions, so an in-memory
   # associative array would not survive to the next cell).
   if [ ! -f "$LEDGER" ]; then rm -f "$LEDGER_GAP_INDEX" 2>/dev/null || true; return 0; fi
@@ -1137,21 +1095,15 @@ refresh_ledger_gap_index() { # rebuild LEDGER_GAP_INDEX (repo\tservices\tmedian_
     [ "$first" = "$LEDGER_GAP_INDEX_VERSION" ] && return 0
   fi
   local rows tmp
-  # `-s` (slurp) rather than the streaming form: a retracted row is identified by an entry that
-  # appears LATER in the append-only ledger, so the whole file has to be in hand before any row can
-  # be judged. A retracted `empty` never counted as a service — it is the record of a night that
-  # claimed to have reviewed something without doing so (ADR 0023), and letting it shorten the
-  # measured cadence would make every lens look more overdue than it is.
-  # Keep item identity for the converter: item-<epoch>-fN siblings are ONE Explore service.
-  # Filter retractions first so a withdrawn row cannot supply that pass's timestamp.
-  # On a jq/converter failure keep any existing index and retry next call, as above.
-  rows=$(jq -L "$NIGHTSHIFT_HOME/lib" -rs '
-            include "ledger";
-            unretracted_rows | select(.repo!=null
-                         and (.outcome=="finding" or .outcome=="shipped" or .outcome=="abandoned" or .outcome=="empty"))
-            | [.repo,.ts,.item] | @tsv' \
-          "$LEDGER" 2>/dev/null \
-            | python3 "$NIGHTSHIFT_HOME/lib/ledger_epochs.py" median-gaps 2>/dev/null) || return 0
+  # The whole ledger is read before any row is judged: a retracted row is identified by an entry
+  # that appears LATER in the append-only ledger. A retracted `empty` never counted as a service —
+  # it is the record of a night that claimed to have reviewed something without doing so
+  # (ADR 0023), and letting it shorten the measured cadence would make every lens look more
+  # overdue than it is.
+  # item-<epoch>-fN siblings are ONE Explore service; retractions are filtered first so a
+  # withdrawn row cannot supply that pass's timestamp.
+  # On a read failure keep any existing index and retry next call, as above.
+  rows=$(ledger service-gaps 2>/dev/null) || return 0
   tmp="$(mktemp "$STATE_DIR/.ledger-gap.idx.XXXXXX")"
   # A repo with no service rows simply gets no row; the lookup then reads 0 services and bootstraps,
   # exactly as an empty epoch list did. A ledger with no service rows at all writes the marker alone
@@ -1285,14 +1237,9 @@ refresh_settled_branches() { # cache the branches whose latest ledger verdict is
   SETTLED_BRANCHES=""
   [ -f "$LEDGER" ] || return 0
   # The shared terminal verdicts all mean "decided" (ADR 0025).
-  # "Latest" is the row appended last: the ledger is append-only and jq's group_by keeps input
-  # order within a group. Sorting on `ts` does not — its local-offset stamps sort out of order in
-  # the hour the clocks fall back.
-  SETTLED_BRANCHES=$(jq -L "$NIGHTSHIFT_HOME/lib" -rs '
-    include "ledger";
-    latest_branch_verdicts
-    | map(select(.verdict as $v | terminal_verdicts | index($v)))
-    | map(.repo + "\t" + .branch) | join("\n")' "$LEDGER" 2>/dev/null) || SETTLED_BRANCHES=""
+  # "Latest" is the row appended last, never the greatest `ts`: local-offset stamps sort out of
+  # order in the hour the clocks fall back.
+  SETTLED_BRANCHES=$(ledger settled-branches 2>/dev/null) || SETTLED_BRANCHES=""
 }
 
 branch_is_settled() { # repo branch -> 0 when the ledger's latest verdict for it is terminal
@@ -1823,7 +1770,7 @@ $(cat "$id/worknote.md")" >"$id/commit-hook.log" 2>&1 || crc=$?
 # (ADR 0007). Anything else leaves the item open and records the negative in the probe snapshot, so
 # the same unchanged code is never paid for twice.
 append_finding_verdict() { # item repo fingerprint verdict [reason]
-  python3 "$NIGHTSHIFT_HOME/lib/ledger.py" --ledger "$LEDGER" append-finding-verdict "$NIGHT" "$(date -Iseconds)" "$@"
+  ledger append-finding-verdict "$NIGHT" "$(date -Iseconds)" "$@"
 }
 
 repo_cfg_base() { # repo -> the rulebook's `base:` for it ("" = auto-detect)
@@ -2021,9 +1968,7 @@ advise_branches() {
       tip="$(git -C "$path" rev-parse --verify -q "$ref^{commit}" 2>/dev/null)" || continue
       stem="$RUNS_DIR/advise-$(date +%s%N)"
       # Best-effort finding context from the ledger's shipped row for this repo and branch.
-      finding=$(jq -sc --arg r "$path" --arg b "$name" '([.[]|select(.outcome=="shipped" and .repo==$r and .branch==$b)]|last) // {}
-        | {summary:(.summary//""),fingerprint:(.fingerprint//""),type:(.type//""),dimension:(.dimension//"")}' \
-        "$LEDGER" 2>/dev/null) || finding='{}'
+      finding=$(ledger last-shipped "$path" "$name" 2>/dev/null) || finding='{}'
       wt=""; cells=""; fixes=""; what=""; benefit=""; n_missing=0; n_merge=0; n_reject=0
       # Reject failed Claude control checks before checking out the branch for any advisor.
       if ctl="$(branch_control_files_changed "$path" "$base_sha" "$tip")"; then
@@ -2150,15 +2095,15 @@ guard_state_remote_incoherence() { # hard-stop (override NIGHTSHIFT_ALLOW_SPLIT_
 }
 
 # --------------------------------------------------------------- ledger guard ----
-# Every ledger reader in this file slurps it (`jq -s … 2>/dev/null`), and a slurp fails on ONE bad
+# Every ledger read in this file reads the whole file (`ledger … 2>/dev/null`) and fails on ONE bad
 # line. The suppression checks then read as "never seen", so a truncated append (full disk, a kill
 # mid-write) would silently re-surface, re-fix and re-push decided work every night while the digest
 # looked like a quiet night. harvest.sh already refuses such a ledger; the night must too, before it
 # spends anything. The launcher records the abort in the digest.
 guard_ledger_valid() {
   [ -f "$LEDGER" ] || return 0
-  jq empty "$LEDGER" >/dev/null 2>&1 && return 0
-  log "ABORT: ledger $LEDGER is not valid JSON lines (first bad line: $(jq -c . "$LEDGER" 2>&1 >/dev/null | head -n1)). Repair it by hand; nothing ran."
+  ledger validate >/dev/null 2>&1 && return 0
+  log "ABORT: ledger $LEDGER is not valid JSON lines (first bad line: $(ledger validate 2>&1 >/dev/null | head -n1)). Repair it by hand; nothing ran."
   exit 1
 }
 

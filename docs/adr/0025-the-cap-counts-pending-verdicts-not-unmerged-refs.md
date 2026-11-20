@@ -40,7 +40,7 @@ human verdict (ADR 0007). The cap ignored all of it and asked git a weaker quest
 **The cap counts branches whose latest ledger verdict is not terminal.** A `nightshift/*` ref on
 origin occupies a slot only while the ledger has no `merged` / `dropped` / `resolved` / `wontfix`
 verdict for it. The terminal and merge-rate sets and the last-appended branch-verdict rule live
-in `lib/ledger.jq`, with Python counterparts in `lib/ledger.py`; readers import those rules.
+in `lib/ledger.py` (first in lib/ledger.jq with Python counterparts, since folded into the module).
 Finding lifecycle readers retain their own identity and permanent-`wontfix` handling (ADR 0014).
 
 - `refresh_settled_branches` builds the settled set once per pass, alongside the existing ref
