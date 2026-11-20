@@ -124,6 +124,99 @@ m = json.loads(cli(lg, "verdict-matches", "findings", "fp9")[1])
 assert [r["item"] for r in m] == ["f9"]
 assert cli(lg, "verdict-names", " | ")[1] == b"merged | dropped | resolved | wontfix | open\n"
 
+# ---- digest sections ----
+B, N1, N2 = "/srv/b", "2026-03-01", "2026-03-02"
+drows = [
+    {"night": N1, "item": "p1-f1", "repo": A, "fingerprint": "f1", "outcome": "finding",
+     "summary": "one", "dimension": "docs"},
+    {"night": N1, "item": "p1-f2", "repo": A, "fingerprint": None, "outcome": "finding",
+     "summary": None, "dimension": "docs"},
+    {"night": N1, "item": "p2-f1", "repo": A, "fingerprint": "f2", "branch": "nightshift/a",
+     "outcome": "shipped", "summary": "fix", "proof": "unproven", "pr_url": "u", "dimension": "docs",
+     "type": "typo"},
+    {"night": N1, "item": "p3-f1", "repo": A, "fingerprint": "f3", "branch": "nightshift/a",
+     "outcome": "shipped", "summary": None, "dimension": "tests", "pr_url": False},
+    {"night": N1, "item": "p4", "repo": B, "fingerprint": "f4", "outcome": "tests-failed", "summary": None},
+    None,
+    *[{"night": N1, "item": f"e{i}", "repo": B, "fingerprint": "", "outcome": "empty",
+       "dimension": "perf", "scope": "out_of_scope"} for i in (1, 2, 3)],
+    *[{"night": N2, "item": f"e{i}", "repo": A, "fingerprint": "", "outcome": "empty",
+       "dimension": "perf", "scope": "out_of_scope"} for i in (4, 5, 6)],
+    {"night": N2, "item": "e5", "outcome": "retracted"},
+    {"night": N2, "item": "v1", "repo": A, "branch": "nightshift/a", "outcome": "verdict", "verdict": "merged"},
+    {"night": N2, "item": "v2", "repo": A, "fingerprint": "f1", "outcome": "verdict", "verdict": "resolved"},
+    {"night": N2, "item": "v3", "repo": B, "fingerprint": "f9", "outcome": "verdict", "verdict": "wontfix"},
+    {"night": N2, "item": "p5-f1", "repo": B, "fingerprint": "f9", "outcome": "finding", "summary": "never"},
+]
+dl = ledger_file("digest.jsonl", [json.dumps(r) for r in drows])
+
+
+def out_of(*args, path=dl):
+    rc, o, _ = cli(path, *args)
+    return rc, o.decode()
+
+
+assert out_of("night-count", N1, "finding") == (0, "2\n")
+assert out_of("night-count", N2, "finding") == (0, "1\n")
+assert out_of("night-section", "shipped", N1) == (0, "- **[unverified]** /srv/a → `nightshift/a` — fix  "
+                                                  "([open PR](u))\n- /srv/a → `nightshift/a` — f3\n")
+# A null fingerprint adds nothing to the line (jq's `+`), it does not end the section.
+assert out_of("night-section", "findings", N1) == (0, "- /srv/a — one  (f1)\n- /srv/a —   ()\n")
+assert out_of("night-section", "considered", N1) == (0, "- /srv/b — tests-failed: f4\n")
+assert out_of("interrupted-summary", N1) == (0, (
+    "## Shipped\n- /srv/a → `nightshift/a` — fix\n- /srv/a → `nightshift/a` — f3\n\n"
+    "## Findings (surfaced — reported, not touched)\n- /srv/a — one\n- /srv/a — \n\n"
+    "## Considered but not shipped\n- /srv/b — tests-failed: f4\n"))
+# One unique branch, merged: the second shipped row of it does not count twice.
+assert out_of("harvest-scoreboard") == (
+    0, "- harvest (all-time): shipped 1 · merged 1 · dropped 0 · open 0 · merge-rate 100%\n")
+# /srv/a's retracted e5 leaves it two out-of-scope passes, not three.
+assert out_of("exclusion-suggestions") == (0, (
+    "\n## Suggested rulebook exclusions (ADR 0015)\n- `/srv/b` × `perf` — 3 consecutive out-of-scope "
+    "passes; consider dropping this lens for this repo in rulebook.yaml `dimensions:`\n"))
+# p1-f1 and p1-f2 are one pass of docs; p2-f1 another.
+assert out_of("empty-rate") == (0, (
+    "\n## Nothing found, by dimension (all-time)\n- docs: passes 2 · nothing found 0 (0%)\n"
+    "- perf: passes 5 · nothing found 5 (100%)\n- tests: passes 1 · nothing found 0 (0%)\n"))
+# Grouped by each shipped row's own value; jq orders "—" after ASCII names.
+assert out_of("merge-rate") == (0, (
+    "\n## Merge-rate by dimension (all-time)\n- docs: shipped 1 · merged 1 · dropped 0 · rate 100%\n"
+    "- tests: shipped 1 · merged 1 · dropped 0 · rate 100%\n"
+    "\n## Merge-rate by verifiability (all-time)\n- —: shipped 1 · merged 1 · dropped 0 · rate 100%\n"
+    "\n## Merge-rate by proof (all-time)\n- unproven: shipped 1 · merged 1 · dropped 0 · rate 100%\n"
+    "- —: shipped 1 · merged 1 · dropped 0 · rate 100%\n"
+    "\n## Merge-rate by finding type (all-time)\n- typo: shipped 1 · merged 1 · dropped 0 · rate 100%\n"
+    "- —: shipped 1 · merged 1 · dropped 0 · rate 100%\n"))
+# f1 resolved after its finding: closed; f9 wontfixed (even before its finding): ignored.
+assert out_of("open-findings-digest") == (0, "\n")
+reopened = ledger_file("reopen.jsonl", [json.dumps(r) for r in drows] + [json.dumps(
+    {"night": N2, "item": "p6-f1", "repo": A, "fingerprint": "f1", "outcome": "finding", "summary": "again"})])
+assert out_of("open-findings-digest", path=reopened) == (0, "- /srv/a — again  (f1, since 2026-03-02)\n")
+
+# Failures as jq had them. Streamed sections skip a row `+` rejects and go on; slurped ones print
+# nothing, except the interrupted summary, which keeps the lines it printed before the bad one.
+odd = ledger_file("dodd.jsonl", [json.dumps(r) for r in drows[:2]] + [json.dumps(
+    {"night": N1, "item": "z-f1", "repo": A, "fingerprint": 7, "outcome": "finding"})]
+    + [json.dumps(r) for r in drows[2:]])
+assert out_of("night-section", "findings", N1, path=odd) == (0, "- /srv/a — one  (f1)\n- /srv/a —   ()\n")
+assert out_of("interrupted-summary", N1, path=odd)[0] == 5
+assert out_of("interrupted-summary", N1, path=odd)[1] == (
+    "## Shipped\n- /srv/a → `nightshift/a` — fix\n- /srv/a → `nightshift/a` — f3\n\n"
+    "## Findings (surfaced — reported, not touched)\n- /srv/a — one\n- /srv/a — \n")
+assert out_of("open-findings-digest", path=odd) == (5, "")
+assert out_of("empty-rate", path=ledger_file("numitem.jsonl", [json.dumps(
+    {"item": 5, "dimension": "d", "outcome": "empty"})])) == (5, "")
+dnum = ledger_file("dnum.jsonl", [json.dumps(drows[2]), "5", json.dumps(drows[3])])
+for args in (["night-count", N1, "finding"], ["harvest-scoreboard"], ["exclusion-suggestions"],
+             ["empty-rate"], ["merge-rate"], ["open-findings-digest"], ["interrupted-summary", N1]):
+    assert out_of(*args, path=dnum) == (5, ""), args
+# The bad row is not the last, so the streamed section succeeds with both shipped lines.
+assert out_of("night-section", "shipped", N1, path=dnum) == (
+    0, "- **[unverified]** /srv/a → `nightshift/a` — fix  ([open PR](u))\n- /srv/a → `nightshift/a` — f3\n")
+rc, o = out_of("night-section", "shipped", N1, path=ledger_file("dbad.jsonl", [json.dumps(drows[2]), '{"x":']))
+assert rc == 5 and o.startswith("- **[unverified]**")             # a parse error ends the stream there
+assert out_of("interrupted-summary", N1, path=tmp / "dmissing.jsonl")[0] == 2
+
 # ---- failures: as jq ----
 missing = tmp / "missing.jsonl"
 assert cli(missing, "known-branches")[0] == 2

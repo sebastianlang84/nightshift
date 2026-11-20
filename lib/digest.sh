@@ -3,6 +3,10 @@
 
 # ------------------------------------------------------------------- digest ----
 
+# Every ledger read below goes through lib/ledger.py: one command per section, printing what its
+# jq program printed and failing where it failed, so each `|| true` / `|| echo` fallback still decides.
+ledger() { python3 "$NIGHTSHIFT_HOME/lib/ledger.py" --ledger "$LEDGER" "$@"; }
+
 # An aborted night exits 3 and systemd marks the unit failed (ADR 0023) — but `systemctl status`
 # reports only the LAST run, so the next night that completes wipes the outage from the one place
 # an operator would notice it without reading anything. Observed 2026-08-08..11: four consecutive
@@ -38,7 +42,7 @@ write_digest() { # made open status [advice]
     echo "# nightshift digest — $NIGHT"
     echo
     local fcount=0
-    [ -f "$LEDGER" ] && fcount=$(jq -s --arg n "$NIGHT" '[.[]|select(.night==$n and .outcome=="finding")]|length' "$LEDGER" 2>/dev/null || echo 0)
+    [ -f "$LEDGER" ] && fcount=$(ledger night-count "$NIGHT" finding 2>/dev/null || echo 0)
     echo "- agent: \`$NIGHTSHIFT_AGENT\` · shipped this run: ${made} · surfaced (findings): ${fcount} · open (awaiting a merge decision): ${open}/${MAX_OPEN} (cap)"
     # A repo whose suite is red on its unchanged base was skipped before Explore (base_precheck). It
     # stays blocked until someone repairs the suite, so it leads the digest.
@@ -105,26 +109,9 @@ write_digest() { # made open status [advice]
     ' "$SURVIVAL_SNAPSHOT" 2>/dev/null || true
     # Harvest scoreboard (all-time, from bin/harvest verdict events): the human
     # feedback loop made visible. A branch with no terminal verdict counts as open. The terminal
-    # set comes from lib/ledger.jq (ADR 0025): resolved/wontfix are decided too, so they are
+    # set comes from lib/ledger.py (ADR 0025): resolved/wontfix are decided too, so they are
     # counted on their own instead of as open; the merge-rate stays merged/(merged+dropped).
-    [ -f "$LEDGER" ] && jq -L "$NIGHTSHIFT_HOME/lib" -rs '
-      include "ledger";
-      (latest_branch_verdicts
-        | map(select(.verdict as $v | terminal_verdicts | index($v)))
-        | INDEX([.repo,.branch] | tojson)) as $v
-      | [.[]|select(.outcome=="shipped" and .repo!=null and .branch!=null)|{repo:.repo,branch:.branch}] | unique as $ship
-      | ($ship|map(select($v[([.repo,.branch] | tojson)].verdict=="merged"))|length) as $m
-      | ($ship|map(select($v[([.repo,.branch] | tojson)].verdict=="dropped"))|length) as $d
-      | ($ship|map(select($v[([.repo,.branch] | tojson)].verdict as $x
-                          | $x=="resolved" or $x=="wontfix"))|length) as $s
-      | ($ship|length) as $n
-      | ($n-$m-$d-$s) as $open
-      | if $n==0 then empty else
-          "- harvest (all-time): shipped \($n) · merged \($m) · dropped \($d)"
-          + (if $s>0 then " · resolved/wontfix \($s)" else "" end)
-          + " · open \($open)"
-          + (if ($m+$d)>0 then " · merge-rate \((100*$m/($m+$d))|floor)%" else "" end)
-        end' "$LEDGER" 2>/dev/null || true
+    [ -f "$LEDGER" ] && ledger harvest-scoreboard 2>/dev/null || true
     # Coverage matrix (ADR 0010): days since nightshift last serviced each (repo × dimension).
     # Makes the rotation observable — a large number or — flags a long-overdue lens.
     if [ "${#DIMENSIONS[@]}" -gt 0 ] && [ "${#REPO_PATHS[@]}" -gt 0 ]; then
@@ -147,32 +134,12 @@ write_digest() { # made open status [advice]
     # recon's low verdict is right. Recon can't exclude (it only reprioritizes); the human owns the
     # rulebook, so surface a suggestion rather than acting. Driven by Explore's own conclusion, not by
     # recon repeating itself (which would be a circular doom loop).
-    [ -f "$LEDGER" ] && jq -rs '
-      [.[]|select(.outcome=="retracted")|.item] as $void
-      | [.[] | select(.dimension!=null and (.item | IN($void[]) | not)
-                      and (.outcome=="empty" or .outcome=="finding" or .outcome=="shipped" or .outcome=="abandoned"))]
-      | group_by([.repo,.dimension])
-      | map(.[-3:])
-      | map(select(length==3 and all(.[]; .outcome=="empty" and .scope=="out_of_scope")))
-      | if length==0 then empty else
-          "\n## Suggested rulebook exclusions (ADR 0015)\n"
-          + (map("- `\(.[0].repo)` × `\(.[0].dimension)` — 3 consecutive out-of-scope passes; consider dropping this lens for this repo in rulebook.yaml `dimensions:`") | join("\n"))
-        end' "$LEDGER" 2>/dev/null || true
+    [ -f "$LEDGER" ] && ledger exclusion-suggestions 2>/dev/null || true
     # ADR 0039: "nothing found" is a result, not a failure. Show how often each lens reports it, so a
     # lens that never comes back empty is visible as one that may be manufacturing findings. A pass is
     # one explore item; its finding rows carry the item id plus an -fN suffix. `harvest.sh retract`
     # names only `empty` rows by their exact item, so the retraction filter never meets an -fN id.
-    [ -f "$LEDGER" ] && jq -rs '
-      [.[]|select(.outcome=="retracted")|.item] as $void
-      | [.[] | select(.dimension!=null and .item!=null and (.item | IN($void[]) | not)
-                      and (.outcome=="empty" or .outcome=="finding" or .outcome=="shipped" or .outcome=="abandoned"))
-             | {d:.dimension, p:(.item|sub("-f[0-9]+$";"")), e:(.outcome=="empty")}]
-      | group_by(.d)
-      | map({d:.[0].d, n:(map(.p)|unique|length), e:(map(select(.e)|.p)|unique|length)})
-      | if length==0 then empty else
-          "\n## Nothing found, by dimension (all-time)\n"
-          + (map("- \(.d): passes \(.n) · nothing found \(.e) (\((100*.e/.n)|floor)%)") | join("\n"))
-        end' "$LEDGER" 2>/dev/null || true
+    [ -f "$LEDGER" ] && ledger empty-rate 2>/dev/null || true
     # ADR 0015: rulebook/recon contradictions. A lens the human narrowed OUT of a repo's configured
     # set that recon still sees signal for — a hand-exclusion never re-evaluates on its own, so flag it.
     if [ "${#REPO_PATHS[@]}" -gt 0 ]; then
@@ -192,25 +159,7 @@ write_digest() { # made open status [advice]
     # of change humans actually merge. Join the latest verdict per repo+branch back to the shipped row and
     # slice it by dimension, verifiability, proof, and finding type. Empty slices are omitted.
     # One parameterised `rate` for all four slices, so the four cannot drift apart.
-    [ -f "$LEDGER" ] && jq -L "$NIGHTSHIFT_HOME/lib" -rs '
-      include "ledger";
-      def rate($key; $name):
-        (latest_branch_verdicts
-          | map(select(.verdict as $v | merge_rate_verdicts | index($v))) | INDEX([.repo,.branch] | tojson)) as $v
-        | [.[]|select(.outcome=="shipped" and .repo!=null and .branch!=null)]
-        | group_by(.[$key] // "—")
-        | map({g:(.[0][$key] // "—"), br:(map({repo:.repo,branch:.branch})|unique)})
-        | map({g:.g, n:(.br|length),
-               m:(.br|map(select($v[([.repo,.branch] | tojson)].verdict=="merged"))|length),
-               d:(.br|map(select($v[([.repo,.branch] | tojson)].verdict=="dropped"))|length)})
-        | if length==0 then empty else
-            "\n## Merge-rate by \($name) (all-time)\n"
-            + (map("- \(.g): shipped \(.n) · merged \(.m) · dropped \(.d)"
-                   + (if (.m+.d)>0 then " · rate \((100*.m/(.m+.d))|floor)%" else "" end)) | join("\n"))
-          end ;
-      [ rate("dimension";"dimension"), rate("verifiability";"verifiability"),
-        rate("proof";"proof"), rate("type";"finding type") ] | .[]
-      ' "$LEDGER" 2>/dev/null || true
+    [ -f "$LEDGER" ] && ledger merge-rate 2>/dev/null || true
     echo
     # Backpressure ADDS a banner; it never REPLACES the body. Hitting the open-branch cap is the
     # normal end of a productive night (default cap 2, and the cap is only reached BY shipping), so
@@ -223,19 +172,13 @@ write_digest() { # made open status [advice]
       echo
     fi
     echo "## Shipped"
-    [ -f "$LEDGER" ] && jq -r --arg n "$NIGHT" \
-      'select(.night==$n and .outcome=="shipped") | "- " + (if .proof=="unproven" then "**[unverified]** " else "" end) + .repo + " → `" + (.branch // "") + "` — " + (.summary // .fingerprint) + (if .pr_url then "  ([open PR](" + .pr_url + "))" else "" end)' \
-      "$LEDGER" 2>/dev/null || true
+    [ -f "$LEDGER" ] && ledger night-section shipped "$NIGHT" 2>/dev/null || true
     echo
     echo "## Findings (surfaced — reported, not touched)"
-    [ -f "$LEDGER" ] && jq -r --arg n "$NIGHT" \
-      'select(.night==$n and .outcome=="finding") | "- " + .repo + " — " + (.summary // .fingerprint) + "  (" + .fingerprint + ")"' \
-      "$LEDGER" 2>/dev/null || true
+    [ -f "$LEDGER" ] && ledger night-section findings "$NIGHT" 2>/dev/null || true
     echo
     echo "## Considered but not shipped"
-    [ -f "$LEDGER" ] && jq -r --arg n "$NIGHT" \
-      'select(.night==$n and (.outcome=="abandoned" or .outcome=="push-failed" or .outcome=="commit-failed" or .outcome=="tests-failed" or .outcome=="gate-blocked" or .outcome=="worktree-tampered" or .outcome=="stage-failed")) | "- " + .repo + " — " + .outcome + ": " + (.summary // .fingerprint)' \
-      "$LEDGER" 2>/dev/null || true
+    [ -f "$LEDGER" ] && ledger night-section considered "$NIGHT" 2>/dev/null || true
     echo
     # What the agents said about the HARNESS rather than about the code (collect_agent_note). Only
     # tonight's notes; the file keeps every one. Shown to the human and to nobody else — these are
@@ -255,20 +198,7 @@ write_digest() { # made open status [advice]
     # Carry-forward (ADR 0014): every surfaced finding whose latest lifecycle event leaves it open.
     # A new finding after resolved/dropped/merged is a reopened identity; wontfix remains permanent.
     echo "## Open findings (all nights — awaiting a human)"
-    [ -f "$LEDGER" ] && jq -L "$NIGHTSHIFT_HOME/lib" -rs '
-      include "ledger";
-      to_entries | map(.value + {__order:.key}) as $rows
-      | ([$rows[]|select(.outcome=="verdict" and .repo!=null and .fingerprint!=null)]) as $verdicts
-      | ($verdicts | map(select(.verdict=="wontfix") | [.repo,.fingerprint] | tojson) | unique) as $ignored
-      | ($verdicts | latest_fingerprint_verdicts([.repo,.fingerprint])
-         | map({key:([.repo,.fingerprint] | tojson), value:.}) | from_entries) as $v
-      | [$rows[]|select(.outcome=="finding" and .repo!=null and .fingerprint!=null)]
-      | group_by([.repo, .fingerprint]) | map(max_by(.__order))
-      | map(. as $work | ([.repo,.fingerprint] | tojson) as $key
-          | select(($ignored | index($key)) == null)
-          | select(($v[$key].verdict // "") == "open" or (($v[$key].__order // -1) < $work.__order)))
-      | map("- " + .repo + " — " + (.summary // .fingerprint) + "  (" + .fingerprint + ", since " + .night + ")")
-      | join("\n")' "$LEDGER" 2>/dev/null || true
+    [ -f "$LEDGER" ] && ledger open-findings-digest 2>/dev/null || true
     [ -n "$advice" ] && printf '%s\n' "$advice"
   } > "$f"
   log "digest -> $f"
@@ -292,18 +222,8 @@ interrupted_digest() { # signal exit-code; main's counters are dynamically scope
     echo "- The in-flight operation has no final verdict. Only persisted results are listed; worktrees are retained for inspection."
     echo
     if [ -f "$LEDGER" ]; then
-      timeout --kill-after=1s 5s jq -rs --arg n "$NIGHT" '
-        [.[] | select(.night==$n)] as $rows
-        | "## Shipped", ($rows[] | select(.outcome=="shipped")
-            | "- " + .repo + " → `" + (.branch // "") + "` — " + (.summary // .fingerprint // "")),
-          "", "## Findings (surfaced — reported, not touched)",
-          ($rows[] | select(.outcome=="finding")
-            | "- " + .repo + " — " + (.summary // .fingerprint // "")),
-          "", "## Considered but not shipped",
-          ($rows[] | select(.outcome=="abandoned" or .outcome=="push-failed" or .outcome=="commit-failed"
-              or .outcome=="tests-failed" or .outcome=="gate-blocked" or .outcome=="worktree-tampered" or .outcome=="stage-failed")
-            | "- " + .repo + " — " + .outcome + ": " + (.summary // .fingerprint // ""))
-      ' "$LEDGER" || echo "Ledger summary unavailable or interrupted; inspect the persisted ledger and run artifacts."
+      timeout --kill-after=1s 5s python3 "$NIGHTSHIFT_HOME/lib/ledger.py" --ledger "$LEDGER" \
+        interrupted-summary "$NIGHT" || echo "Ledger summary unavailable or interrupted; inspect the persisted ledger and run artifacts."
     fi
   } > "$tmp"
   mv -f "$tmp" "$DIGEST_DIR/$NIGHT.md"

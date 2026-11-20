@@ -17,14 +17,15 @@ Two ways to read it:
 Ledger order is append order; nothing here orders rows by timestamp. Where a question depends on
 jq's ordering (`group_by`), `jq_key` gives jq's total order over null/bool/number/string/array/object.
 
-bin/harvest.sh reads and writes only through this module; bin/nightshift.sh writes through it.
-The runner's and the digest's remaining reads still use lib/ledger.jq; keep its verdict sets and
+bin/harvest.sh and lib/digest.sh read and write only through this module; bin/nightshift.sh writes
+through it. The runner's remaining reads still use lib/ledger.jq; keep its verdict sets and
 definitions in step with the ones here until they are ported.
 
 CLI: python3 lib/ledger.py [--ledger PATH] <command> [args]; PATH defaults to $LEDGER.
 """
 
 import json
+import math
 import os
 import re
 import sys
@@ -33,7 +34,13 @@ from os.path import basename
 
 TERMINAL_VERDICT_ORDER = ("merged", "dropped", "resolved", "wontfix")
 TERMINAL_VERDICTS = frozenset(TERMINAL_VERDICT_ORDER)
-MERGE_RATE_VERDICTS = frozenset({"merged", "dropped"})
+MERGE_RATE_VERDICT_ORDER = ("merged", "dropped")
+MERGE_RATE_VERDICTS = frozenset(MERGE_RATE_VERDICT_ORDER)
+# What the digest lists under "Considered but not shipped".
+CONSIDERED_OUTCOMES = ("abandoned", "push-failed", "commit-failed", "tests-failed",
+                       "gate-blocked", "worktree-tampered", "stage-failed")
+# The outcomes that count as one pass of a lens (ADR 0015, ADR 0039).
+PASS_OUTCOMES = ("empty", "finding", "shipped", "abandoned")
 # What `harvest.sh verdict` accepts, in the order its usage text lists them.
 MANUAL_VERDICTS = TERMINAL_VERDICT_ORDER + ("open",)
 SCHEMA_VERSION = 2
@@ -126,6 +133,68 @@ def dumps(value):
     if isinstance(value, list):
         return "[" + ",".join(dumps(v) for v in value) + "]"
     return "{" + ",".join(dumps(k) + ":" + dumps(v) for k, v in value.items()) + "}"
+
+
+def truthy(value):
+    """jq's truth: everything but null and false."""
+    return value is not None and value is not False
+
+
+def _is_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def add(*values):
+    """jq's left-associative `a + b + ...`: null is the identity; strings, arrays and objects
+    join, numbers sum, any other pairing fails."""
+    result = values[0]
+    for value in values[1:]:
+        if value is None:
+            continue
+        if result is None:
+            result = value
+        elif isinstance(result, str) and isinstance(value, str):
+            result += value
+        elif _is_number(result) and _is_number(value):
+            result += value
+        elif isinstance(result, list) and isinstance(value, list):
+            result = result + value
+        elif isinstance(result, dict) and isinstance(value, dict):
+            result = {**result, **value}
+        else:
+            raise LedgerError(f"{jq_type(result)} ({dumps(result)}) and {jq_type(value)} "
+                              f"({dumps(value)}) cannot be added")
+    return result
+
+
+def array_index(haystack, needle):
+    """jq's `haystack | index(needle)` on an array: the first position where `needle` starts (an
+    array needle as a contiguous run, anything else as one element), or None."""
+    run = needle if isinstance(needle, list) else [needle]
+    if not run:
+        return None
+    want = [jq_key(v) for v in run]
+    for i in range(len(haystack) - len(run) + 1):
+        if [jq_key(v) for v in haystack[i:i + len(run)]] == want:
+            return i
+    return None
+
+
+def group_by(values, key):
+    """jq's `group_by(key)`: groups in jq's order of the key, each in input order."""
+    groups = {}
+    for value in values:
+        groups.setdefault(jq_key(key(value)), []).append(value)
+    return [groups[k] for k in sorted(groups)]
+
+
+def unique(values):
+    """jq's `unique`: jq order, keeping the first of equal values (an object keeps the key order
+    it was first seen with, which `tojson` then shows)."""
+    first = {}
+    for value in values:
+        first.setdefault(jq_key(value), value)
+    return [first[k] for k in sorted(first)]
 
 
 def tostring(value):
@@ -476,23 +545,220 @@ def verdict_matches(candidates, scope, selector):
     return matches
 
 
-def work_rows(path):
-    """Shipped and finding rows in append order, as the streaming `jq -c 'select(...)'` gave them,
-    and whether the run failed. That jq reported a row it cannot index (a number, string, array or
-    boolean), went on with the next row, and failed only if the LAST row was such a row; a parse
-    error fails the whole read (LedgerError)."""
-    rows, failed = [], False
+def stream_values(path, each):
+    """Run `each` on every ledger value as a streaming `jq` (no -s) runs its program, and return
+    whether the run failed. That jq reports a value its program fails on (a row it cannot index,
+    a string it cannot add), goes on with the next value, and fails only if the LAST value failed;
+    a parse error ends the stream there (LedgerError). `each` must not output before it can fail."""
+    failed = False
     for value in iter_values(path):
         try:
-            outcome = field(value, "outcome")
+            each(value)
         except LedgerError as e:
             sys.stderr.write(f"ledger.py: {e}\n")
             failed = True
             continue
         failed = False
-        if outcome in ("shipped", "finding"):
+    return failed
+
+
+def work_rows(path):
+    """Shipped and finding rows in append order, as the streaming `jq -c 'select(...)'` gave them,
+    and whether the run failed (see `stream_values`)."""
+    rows = []
+
+    def each(value):
+        if field(value, "outcome") in ("shipped", "finding"):
             rows.append(value)
-    return rows, failed
+    return rows, stream_values(path, each)
+
+
+# ------------------------------------------------------------------- digest questions ----
+# Each answers one lib/digest.sh section with the bytes its jq program printed. The digest drops
+# stderr and keeps its `|| true` / `|| echo` fallbacks, so what matters is whether jq failed and,
+# for the programs that print several values, what it printed before failing.
+
+def night_count(rows, night, outcome):
+    """How many rows of this night have this outcome (slurped)."""
+    return sum(1 for r in rows if field(r, "night") == night and field(r, "outcome") == outcome)
+
+
+def night_line(row, section, night):
+    """One line of tonight's Shipped / Findings / Considered section as the streaming jq printed
+    it, or None for a row outside the section. A value `+` rejects (a number, boolean, array or
+    object where a string is concatenated; null adds nothing) fails the row; see `stream_values`."""
+    if field(row, "night") != night:
+        return None
+    outcome = field(row, "outcome")
+    if section == "shipped" and outcome == "shipped":
+        pr_url = row.get("pr_url")
+        return add("- ", "**[unverified]** " if row.get("proof") == "unproven" else "",
+                   row.get("repo"), " → `", alt(row.get("branch"), ""), "` — ",
+                   alt(row.get("summary"), row.get("fingerprint")),
+                   add("  ([open PR](", pr_url, "))") if truthy(pr_url) else "")
+    if section == "findings" and outcome == "finding":
+        return add("- ", row.get("repo"), " — ", alt(row.get("summary"), row.get("fingerprint")),
+                   "  (", row.get("fingerprint"), ")")
+    if section == "considered" and outcome in CONSIDERED_OUTCOMES:
+        return add("- ", row.get("repo"), " — ", outcome, ": ",
+                   alt(row.get("summary"), row.get("fingerprint")))
+    return None
+
+
+def interrupted_lines(rows, night):
+    """The interrupted digest's three sections over this night's rows, lazily: a slurped jq
+    program that prints value by value, so a line it cannot build ends the output there. Unlike
+    `night_line`: `.summary // .fingerprint // ""`, no [unverified] marker and no PR link."""
+    tonight = [r for r in rows if field(r, "night") == night]
+
+    def text(r):
+        return alt(r.get("summary"), alt(r.get("fingerprint"), ""))
+    yield "## Shipped"
+    for r in tonight:
+        if r.get("outcome") == "shipped":
+            yield add("- ", r.get("repo"), " → `", alt(r.get("branch"), ""), "` — ", text(r))
+    yield ""
+    yield "## Findings (surfaced — reported, not touched)"
+    for r in tonight:
+        if r.get("outcome") == "finding":
+            yield add("- ", r.get("repo"), " — ", text(r))
+    yield ""
+    yield "## Considered but not shipped"
+    for r in tonight:
+        if r.get("outcome") in CONSIDERED_OUTCOMES:
+            yield add("- ", r.get("repo"), " — ", r.get("outcome"), ": ", text(r))
+
+
+def _percent(part, whole):
+    return math.floor(100 * part / whole)
+
+
+def _verdict_index(rows, verdicts):
+    """jq's `latest_branch_verdicts | map(select(.verdict as $v | VERDICTS | index($v)))
+    | INDEX([.repo,.branch] | tojson)`: keyed by the tojson TEXT, so an object repo matches only
+    with the same key order, while the grouping before it uses jq equality."""
+    return {dumps([r.get("repo"), r.get("branch")]): r for r in latest_branch_verdict_list(rows)
+            if array_index(verdicts, r.get("verdict")) is not None}
+
+
+def _verdict_of(index, repo, branch):
+    return field(index.get(dumps([repo, branch])), "verdict")
+
+
+def _shipped_branch_rows(rows):
+    return [r for r in rows if field(r, "outcome") == "shipped"
+            and field(r, "repo") is not None and field(r, "branch") is not None]
+
+
+def harvest_scoreboard(rows):
+    """The all-time harvest line over unique shipped (repo, branch), raw repo strings; None when
+    nothing shipped."""
+    v = _verdict_index(rows, TERMINAL_VERDICT_ORDER)
+    ship = unique([{"repo": r.get("repo"), "branch": r.get("branch")}
+                   for r in _shipped_branch_rows(rows)])
+    verdicts = [_verdict_of(v, b["repo"], b["branch"]) for b in ship]
+    m, d = verdicts.count("merged"), verdicts.count("dropped")
+    s = sum(1 for x in verdicts if x in ("resolved", "wontfix"))
+    n = len(ship)
+    if n == 0:
+        return None
+    return (f"- harvest (all-time): shipped {n} · merged {m} · dropped {d}"
+            + (f" · resolved/wontfix {s}" if s > 0 else "")
+            + f" · open {n - m - d - s}"
+            + (f" · merge-rate {_percent(m, m + d)}%" if m + d > 0 else ""))
+
+
+def exclusion_suggestions(rows, window=3):
+    """(repo, dimension) whose last `window` unretracted passes were all out-of-scope empties."""
+    passes = [r for r in unretracted_rows(rows)
+              if field(r, "dimension") is not None and field(r, "outcome") in PASS_OUTCOMES]
+    hits = [g[-window:] for g in group_by(passes, lambda r: [r.get("repo"), r.get("dimension")])]
+    hits = [g for g in hits if len(g) == window and all(
+        r.get("outcome") == "empty" and r.get("scope") == "out_of_scope" for r in g)]
+    if not hits:
+        return None
+    return "\n## Suggested rulebook exclusions (ADR 0015)\n" + "\n".join(
+        f"- `{tostring(g[0].get('repo'))}` × `{tostring(g[0].get('dimension'))}` — {window} "
+        "consecutive out-of-scope passes; consider dropping this lens for this repo in "
+        "rulebook.yaml `dimensions:`" for g in hits)
+
+
+_FINDING_SUFFIX = re.compile("-f[0-9]+$")
+
+
+def pass_id(item):
+    """jq's `.item | sub("-f[0-9]+$"; "")`: a finding row's explore item. `$` also matches before
+    a final newline, as in Oniguruma's Perl syntax; a non-string item fails."""
+    if not isinstance(item, str):
+        raise LedgerError(f"{jq_type(item)} ({dumps(item)}) cannot be matched, as it is not a string")
+    return _FINDING_SUFFIX.sub("", item, count=1)
+
+
+def empty_rate(rows):
+    """Per dimension: distinct unretracted passes and how many of them were empty."""
+    passes = [{"d": r.get("dimension"), "p": pass_id(r.get("item")), "e": r.get("outcome") == "empty"}
+              for r in unretracted_rows(rows)
+              if field(r, "dimension") is not None and field(r, "item") is not None
+              and field(r, "outcome") in PASS_OUTCOMES]
+    groups = group_by(passes, lambda p: p["d"])
+    if not groups:
+        return None
+    lines = []
+    for g in groups:
+        n = len({p["p"] for p in g})
+        e = len({p["p"] for p in g if p["e"]})
+        lines.append(f"- {tostring(g[0]['d'])}: passes {n} · nothing found {e} ({_percent(e, n)}%)")
+    return "\n## Nothing found, by dimension (all-time)\n" + "\n".join(lines)
+
+
+MERGE_RATE_SLICES = (("dimension", "dimension"), ("verifiability", "verifiability"),
+                     ("proof", "proof"), ("type", "finding type"))
+
+
+def merge_rate_sections(rows):
+    """One section per slice of shipped rows: unique branches per value of the SHIPPED row's field
+    (a branch shipped twice with different values counts in both) and their latest merged/dropped
+    verdict. jq built all four before printing any, so this is all or nothing too."""
+    v = _verdict_index(rows, MERGE_RATE_VERDICT_ORDER)
+    shipped = _shipped_branch_rows(rows)
+    sections = []
+    for key, name in MERGE_RATE_SLICES:
+        lines = []
+        for g in group_by(shipped, lambda r: alt(r.get(key), "—")):
+            br = unique([{"repo": r.get("repo"), "branch": r.get("branch")} for r in g])
+            verdicts = [_verdict_of(v, b["repo"], b["branch"]) for b in br]
+            m, d = verdicts.count("merged"), verdicts.count("dropped")
+            lines.append(f"- {tostring(alt(g[0].get(key), '—'))}: shipped {len(br)} · merged {m}"
+                         f" · dropped {d}" + (f" · rate {_percent(m, m + d)}%" if m + d > 0 else ""))
+        if lines:
+            sections.append(f"\n## Merge-rate by {name} (all-time)\n" + "\n".join(lines))
+    return sections
+
+
+def digest_open_findings(rows):
+    """The digest's carry-forward list, unlike `open_findings`: the newest `finding` per
+    (repo, fingerprint) with both non-null (no item fallback, shipped rows not counted), dropped
+    if any verdict on that pair was wontfix, else open when its latest verdict is `open` or older
+    than the finding. Verdicts are matched by tojson text, findings come out in group order."""
+    ordered = [add(r, {"__order": i}) for i, r in enumerate(rows)]
+    verdicts = [r for r in ordered if r.get("outcome") == "verdict"
+                and r.get("repo") is not None and r.get("fingerprint") is not None]
+    identity = lambda r: [r.get("repo"), r.get("fingerprint")]  # noqa: E731
+    ignored = {dumps(identity(r)) for r in verdicts if r.get("verdict") == "wontfix"}
+    latest = {dumps(identity(r)): r for r in latest_fingerprint_verdicts(verdicts, identity)}
+    findings = [r for r in ordered if r.get("outcome") == "finding"
+                and r.get("repo") is not None and r.get("fingerprint") is not None]
+    lines = []
+    for work in (g[-1] for g in group_by(findings, identity)):
+        key = dumps(identity(work))
+        if key in ignored:
+            continue
+        verdict = latest.get(key) or {}
+        if alt(verdict.get("verdict"), "") == "open" or alt(verdict.get("__order"), -1) < work["__order"]:
+            lines.append(add("- ", work.get("repo"), " — ",
+                             alt(work.get("summary"), work.get("fingerprint")), "  (",
+                             work.get("fingerprint"), ", since ", work.get("night"), ")"))
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------- writers ----
@@ -579,6 +845,15 @@ readers:
   reconcile-rows                     item␟repo␟fp␟branch␟sha␟pr_url of every shipped row with branch+sha
   unretracted-empty NIGHT            JSON array of that night's empty rows not yet retracted
   verdict-matches SCOPE SELECTOR     JSON array of rows `harvest.sh verdict` may target
+digest sections (markdown lines; nothing when the section is empty):
+  night-count NIGHT OUTCOME          number of that night's rows with that outcome
+  night-section SECTION NIGHT        streamed lines of that night: shipped | findings | considered
+  interrupted-summary NIGHT          the interrupted digest's Shipped/Findings/Considered sections
+  harvest-scoreboard                 the all-time shipped/merged/dropped/open line
+  exclusion-suggestions              (repo, dimension) with 3 consecutive out-of-scope passes
+  empty-rate                         passes and empty passes per dimension
+  merge-rate                         merge-rate by dimension, verifiability, proof, finding type
+  open-findings-digest               open findings of all nights (an empty line when none)
 """
 
 _WRITERS = {
@@ -654,6 +929,14 @@ def main(argv):
             candidates, failed = work_rows(path)
         _out(dumps(verdict_matches(candidates, scope, selector)) + "\n")
         return 5 if failed else 0
+    if command == "night-section":
+        section, night = (args + ["", ""])[:2]
+
+        def each(value):
+            line = night_line(value, section, night)
+            if line is not None:
+                _out(line + "\n")
+        return 5 if stream_values(path, each) else 0
 
     if command == "last-branch-verdict":
         repo, branch = (args + ["", ""])[:2]
@@ -669,6 +952,13 @@ def main(argv):
         "reconcile-rows": lambda rows: _lines(reconcile_lines(rows)),
         "unretracted-empty": lambda rows: _out(
             dumps(unretracted_empty_rows(rows, (args + [""])[0])) + "\n"),
+        "night-count": lambda rows: _out(f"{night_count(rows, *(args + ['', ''])[:2])}\n"),
+        "interrupted-summary": lambda rows: _lines(interrupted_lines(rows, (args + [""])[0])),
+        "harvest-scoreboard": lambda rows: _lines(filter(None, [harvest_scoreboard(rows)])),
+        "exclusion-suggestions": lambda rows: _lines(filter(None, [exclusion_suggestions(rows)])),
+        "empty-rate": lambda rows: _lines(filter(None, [empty_rate(rows)])),
+        "merge-rate": lambda rows: _lines(merge_rate_sections(rows)),
+        "open-findings-digest": lambda rows: _out(digest_open_findings(rows) + "\n"),
     }
     if command in slurped:
         _slurp_command(path, slurped[command])

@@ -21,8 +21,8 @@ The core is written in Bash and Python with file-based handoffs between fresh ag
 [`lib/adapters.sh`](lib/adapters.sh), [`lib/sandbox.sh`](lib/sandbox.sh), and
 [`lib/digest.sh`](lib/digest.sh). The rulebook parser uses a restricted block-style YAML subset;
 [`lib/rulebook.sh`](lib/rulebook.sh) gives the parsed values to the Bash entry points by key name.
-[`lib/ledger.py`](lib/ledger.py) writes every ledger row and answers harvest's ledger questions;
-the runner's and the digest's remaining reads still use jq with [`lib/ledger.jq`](lib/ledger.jq).
+[`lib/ledger.py`](lib/ledger.py) writes every ledger row and answers the ledger questions of
+harvest and the digest; the runner's remaining reads still use jq with [`lib/ledger.jq`](lib/ledger.jq).
 The system needs no server or database service.
 
 ## Pipeline
