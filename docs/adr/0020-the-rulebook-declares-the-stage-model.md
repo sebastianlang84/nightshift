@@ -75,9 +75,8 @@ actually ran is `runs.jsonl` `model_id`, and only afterwards.
 - The environment variable keeps working and still wins, so a one-off cheap night stays a one-liner —
   and `NIGHTSHIFT_CLAUDE_MODEL=` (empty) remains the way to fall back to the CLI default from a
   configured host.
-- The parser gained an `agent:` section. It rejects a tab in the value, which would corrupt the TSV
-  transport to bash; model ID *syntax* is deliberately not validated, since it belongs to the CLI
-  vendor and any check here would go stale.
+- The parser gained an `agent:` section. Model ID *syntax* is deliberately not validated, since it
+  belongs to the CLI vendor and any check here would go stale.
 - The announcement is the safety net that makes this auditable **before** a night rather than after.
   `runs.jsonl` (`model_id`, `context_window`) remains the after-the-fact record; ADR 0019's note that
   the effective model is "auditable, but only after the fact" no longer holds.

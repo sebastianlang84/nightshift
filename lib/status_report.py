@@ -19,10 +19,10 @@ import datetime as dt
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 from ledger import TERMINAL_VERDICTS, latest_branch_verdicts, repo_labels, verdict_item_key
+from parse_rulebook import load as load_rulebook
 
 HOME = Path(os.environ.get('NIGHTSHIFT_HOME') or Path(__file__).resolve().parent.parent)
 STATE_DIR = Path(os.environ.get('NIGHTSHIFT_STATE_DIR') or HOME / 'state')
@@ -49,17 +49,8 @@ def rulebook():
     path = Path(os.environ.get('RULEBOOK') or HOME / 'rulebook.yaml')
     if not path.exists():
         path = HOME / 'rulebook.example.yaml'
-    out = subprocess.run([sys.executable, str(HOME / 'lib/parse_rulebook.py'), str(path)],
-                         capture_output=True, text=True, check=True).stdout
-    prefix, repos = 'nightshift/', []
-    for line in out.splitlines():
-        f = line.split('\t')
-        if f[0] == 'prefix' and len(f) > 1 and f[1]:
-            prefix = f[1]
-        elif f[0] == 'repo':
-            kv = dict(x.split('=', 1) for x in f[1:] if '=' in x)
-            repos.append((os.path.realpath(kv['path']), kv.get('base', '')))
-    return prefix, repos
+    rb = load_rulebook(str(path))
+    return rb['branch_prefix'], [(os.path.realpath(r['path']), r['base']) for r in rb['repos']]
 
 
 ORIGIN_REFS = 'refs/remotes/origin/'

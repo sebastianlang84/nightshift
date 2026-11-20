@@ -107,7 +107,8 @@ case "$cmd" in
     # Isolating the run takes the live rulebook out of the picture, and that file is the first thing
     # a real night reads — a malformed one aborts it. Check it the one way that writes nothing.
     if [ -f "$NIGHTSHIFT_HOME/rulebook.yaml" ]; then
-      python3 "$NIGHTSHIFT_HOME/lib/parse_rulebook.py" "$NIGHTSHIFT_HOME/rulebook.yaml" >/dev/null \
+      # shellcheck source=../lib/rulebook.sh
+      ( source "$NIGHTSHIFT_HOME/lib/rulebook.sh" && rulebook_load "$NIGHTSHIFT_HOME/rulebook.yaml" ) \
         || { echo "FAIL: the live rulebook.yaml does not parse — a real night would abort here" >&2; exit 1; }
       echo "live rulebook.yaml parses (read-only check; the run below uses the sandbox's)"
     else

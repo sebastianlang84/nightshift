@@ -16,7 +16,7 @@ same kind, such as credential handling or deployment.
 
 1. A repository entry may declare `protected_paths`: comma-separated paths relative to the repo
    root; an entry that ends in `/` covers a directory. The parser rejects absolute paths and `..`.
-2. The parser emits the list on the repository row. The Runner does not act on it; a merge job
+2. The parser emits the list with the repository entry. The Runner does not act on it; a merge job
    that merges automatically leaves any branch that touches a protected path for a human.
 3. The rule is the same for every repository; nightshift's own entry is only the first to use it.
 

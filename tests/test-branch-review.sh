@@ -156,7 +156,7 @@ printf '%s' "$out" | grep -qF '| **?** | **fix (1 advisor missing)** |' || fail 
 
 # The rulebook key alone turns the review on, and is validated like `primary`.
 sed 's/^recon:/agent:\n  advisors: mock\nrecon:/' "$TMP/rulebook.yaml" > "$TMP/rulebook-adv.yaml"
-python3 "$ROOT/lib/parse_rulebook.py" "$TMP/rulebook-adv.yaml" | grep -qx "$(printf 'advisors\tmock')" || fail "advisors not emitted"
+python3 "$ROOT/lib/parse_rulebook.py" "$TMP/rulebook-adv.yaml" | jq -e '.agent.advisors == ["mock"]' >/dev/null || fail "advisors not emitted"
 rm -rf "$TMP/state/advice"
 ( export NIGHTSHIFT_SOURCED=1 RULEBOOK="$TMP/rulebook-adv.yaml" NIGHTSHIFT_AGENT=mock NIGHTSHIFT_STATE_DIR="$TMP/state" \
     NIGHTSHIFT_RUNS_DIR="$TMP/runs" NIGHTSHIFT_DIGEST_DIR="$TMP/digests" NIGHTSHIFT_WORKTREES="$TMP/worktrees"
@@ -172,7 +172,7 @@ reject_adv claude,gemini "agent.advisors: unknown adapter 'gemini'"
 reject_adv claude,claude "agent.advisors: an adapter is listed twice"
 reject_adv claude,codex "agent.advisors: unknown adapter 'codex'"
 printf 'agent:\n  advisors: claude, mock\nrepos:\n  - path: /srv/x\n    mode: findings-only\n' > "$TMP/ok.yaml"
-python3 "$ROOT/lib/parse_rulebook.py" "$TMP/ok.yaml" | grep -qx "$(printf 'advisors\tclaude,mock')" || fail "advisors: claude, mock not normalised"
+python3 "$ROOT/lib/parse_rulebook.py" "$TMP/ok.yaml" | jq -e '.agent.advisors == ["claude", "mock"]' >/dev/null || fail "advisors: claude, mock not normalised"
 # An env typo is refused before the night spends anything.
 run 5 NIGHTSHIFT_ADVISORS=mock,gemini && fail "NIGHTSHIFT_ADVISORS=mock,gemini was accepted"
 grep -q "invalid branch advisor 'gemini'" "$TMP/err.5" || fail "env advisor typo not reported" "$TMP/err.5"

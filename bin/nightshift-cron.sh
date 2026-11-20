@@ -24,8 +24,12 @@ export NIGHTSHIFT_HOME
 if [ -z "${NIGHTSHIFT_AGENT:-}" ]; then
   _rb="${RULEBOOK:-$NIGHTSHIFT_HOME/rulebook.yaml}"
   [ -f "$_rb" ] || _rb="$NIGHTSHIFT_HOME/rulebook.example.yaml"
-  _primary="$(python3 "$NIGHTSHIFT_HOME/lib/parse_rulebook.py" "$_rb" 2>/dev/null \
-              | awk -F'\t' '$1 == "primary_agent" { print $2 }')" || _primary=""
+  _primary=""
+  # Sourced only here: a run with NIGHTSHIFT_AGENT set never reads the rulebook in the launcher.
+  # shellcheck source=../lib/rulebook.sh
+  if source "$NIGHTSHIFT_HOME/lib/rulebook.sh" 2>/dev/null && rulebook_load "$_rb" 2>/dev/null; then
+    _primary="${RB[agent.primary]}"
+  fi
   [ -n "$_primary" ] || export NIGHTSHIFT_AGENT=claude
   unset _rb _primary
 fi

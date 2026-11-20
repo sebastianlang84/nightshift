@@ -108,6 +108,8 @@ BASE_RESOLUTION_WARN_MISSING=1
 source "$NIGHTSHIFT_HOME/lib/base_resolution.sh"
 # shellcheck source=../lib/commit_identity.sh
 source "$NIGHTSHIFT_HOME/lib/commit_identity.sh"
+# shellcheck source=../lib/rulebook.sh
+source "$NIGHTSHIFT_HOME/lib/rulebook.sh"
 # Rulebook-declared models (ADR 0020, ADR 0044); empty = the rulebook declares none. Kept separate
 # from the NIGHTSHIFT_*_MODEL env vars so the precedence env > rulebook > CLI default stays legible.
 RB_CLAUDE_MODEL="" RB_REVIEW_MODEL="" RB_MAX_VERIFY=""
@@ -138,62 +140,58 @@ log_model_selection() { # label env_var_name rulebook_value rulebook_key [fallba
 repo_id() { realpath -m -- "$1" 2>/dev/null || printf '%s' "${1%/}"; }
 
 load_rulebook() {
-  local tag a b c d e f g h i rb_run_branches="" parsed path raw_path checkout_id
+  local i path raw_path checkout_id rb_run_branches
+  local -a list
   local -A seen_paths=() seen_checkouts=()
-  # Capture the parser's output AND its exit status. Reading it directly via
-  # `done < <(python3 …)` hides a nonzero exit from `set -euo pipefail`, so a
-  # mid-stream parse error (e.g. a bad `findings:` on repo #2) silently truncated
-  # the repo set — the bad repo AND every valid repo after it were dropped and the
-  # run proceeded on a partial fleet. Fail closed instead: abort the whole run.
-  parsed="$(python3 "$NIGHTSHIFT_HOME/lib/parse_rulebook.py" "$RULEBOOK")" \
-    || { log "rulebook parse failed ($RULEBOOK) — aborting run"; exit 1; }
-  while IFS=$'\t' read -r tag a b c d e f g _protected i; do
-    case "$tag" in
-      prefix)                BRANCH_PREFIX="$a" ;;
-      max_open)              MAX_OPEN="$a" ;;
-      max_findings_per_item) MAX_FINDINGS="$a" ;;
-      max_verifies_per_run)  RB_MAX_VERIFY="$a" ;;
-      recon_enabled)         RECON_ENABLED="$a" ;;
-      recon_ttl_days)        RECON_TTL_DAYS="$a" ;;
-      max_branches_per_run)  rb_run_branches="$a" ;;
-      max_fix_iterations)    MAX_FIX_ITER="$a" ;;
-      max_run_minutes)       RB_MAX_RUN_MINUTES="$a" ;;
-      test_timeout_seconds)  TEST_TIMEOUT="$a" ;;
-      test_memory_mb)        TEST_MEMORY_MB="$a" ;;
-      test_max_procs)        TEST_MAX_PROCS="$a" ;;
-      test_fsize_mb)         TEST_FSIZE_MB="$a" ;;
-      max_files)             MAX_FILES="$a" ;;
-      max_lines)             MAX_LINES="$a" ;;
-      claude_model)          RB_CLAUDE_MODEL="$a" ;;
-      review_model)          RB_REVIEW_MODEL="$a" ;;
-      advisors)              RB_ADVISORS="$a" ;;
-      primary_agent)         RB_PRIMARY_AGENT="$a" ;;
-      dimension)             DIMENSIONS+=("$a") ;;
-      repo)
-        raw_path="${a#path=}"
-        path="$(repo_id "$raw_path")"
-        # Selection reads individual rows, while ship-gate settings are looked up by canonical path.
-        if [ -n "${seen_paths[$path]+set}" ]; then
-          log "rulebook ($RULEBOOK): duplicate repo path '$raw_path' and '${seen_paths[$path]}' resolve to '$path' — keep one entry per checkout; aborting run"
-          exit 1
-        fi
-        seen_paths[$path]="$raw_path"
-        # Bind mounts can expose the same directory under distinct canonical paths.
-        if [ -d "$path" ]; then
-          checkout_id="$(stat -Lc '%d:%i' -- "$path")" \
-            || { log "rulebook ($RULEBOOK): cannot identify checkout '$raw_path' — aborting run"; exit 1; }
-          if [ -n "${seen_checkouts[$checkout_id]+set}" ]; then
-            log "rulebook ($RULEBOOK): duplicate repo path '$raw_path' and '${seen_checkouts[$checkout_id]}' identify the same checkout — keep one entry per checkout; aborting run"
-            exit 1
-          fi
-          seen_checkouts[$checkout_id]="$raw_path"
-        fi
-        REPO_PATHS+=("$path"); REPO_MODES+=("${b#mode=}"); REPO_BASES+=("${c#base=}")
-        REPO_FINDINGS+=("${d#findings=}"); REPO_DIMS+=("${e#dimensions=}")
-        REPO_TEST_NETS+=("${f#test_net=}"); REPO_TEST_ROBINDS+=("${g#test_robind=}")
-        REPO_TEST_CMDS+=("${i#test_cmd=}") ;;
-    esac
-  done <<< "$parsed"
+  # Fail closed on a parse error: the whole run aborts rather than proceed on a partial fleet.
+  rulebook_load "$RULEBOOK" || { log "rulebook parse failed ($RULEBOOK) — aborting run"; exit 1; }
+  BRANCH_PREFIX="${RB[branch_prefix]}"
+  MAX_OPEN="${RB[limits.max_open_branches]}"
+  MAX_FINDINGS="${RB[limits.max_findings_per_item]}"
+  RB_MAX_VERIFY="${RB[limits.max_verifies_per_run]}"
+  MAX_FIX_ITER="${RB[limits.max_fix_iterations]}"
+  rb_run_branches="${RB[limits.max_branches_per_run]}"
+  RB_MAX_RUN_MINUTES="${RB[limits.max_run_minutes]}"
+  TEST_TIMEOUT="${RB[limits.test_timeout_seconds]}"
+  TEST_MEMORY_MB="${RB[limits.test_memory_mb]}"
+  TEST_MAX_PROCS="${RB[limits.test_max_procs]}"
+  TEST_FSIZE_MB="${RB[limits.test_fsize_mb]}"
+  MAX_FILES="${RB[limits.max_files_per_change]}"
+  MAX_LINES="${RB[limits.max_lines_per_change]}"
+  RECON_ENABLED="${RB[recon.enabled]}"
+  RECON_TTL_DAYS="${RB[recon.ttl_days]}"
+  RB_CLAUDE_MODEL="${RB[agent.claude_model]}"
+  RB_REVIEW_MODEL="${RB[agent.review_model]}"
+  RB_PRIMARY_AGENT="${RB[agent.primary]}"
+  rb_list list agent.advisors
+  RB_ADVISORS="$(IFS=,; printf '%s' "${list[*]}")"
+  rb_list list dimensions
+  DIMENSIONS+=("${list[@]}")
+  for ((i = 0; i < RB_REPOS; i++)); do
+    raw_path="${RB[repos.$i.path]}"
+    path="$(repo_id "$raw_path")"
+    # Selection reads individual rows, while ship-gate settings are looked up by canonical path.
+    if [ -n "${seen_paths[$path]+set}" ]; then
+      log "rulebook ($RULEBOOK): duplicate repo path '$raw_path' and '${seen_paths[$path]}' resolve to '$path' — keep one entry per checkout; aborting run"
+      exit 1
+    fi
+    seen_paths[$path]="$raw_path"
+    # Bind mounts can expose the same directory under distinct canonical paths.
+    if [ -d "$path" ]; then
+      checkout_id="$(stat -Lc '%d:%i' -- "$path")" \
+        || { log "rulebook ($RULEBOOK): cannot identify checkout '$raw_path' — aborting run"; exit 1; }
+      if [ -n "${seen_checkouts[$checkout_id]+set}" ]; then
+        log "rulebook ($RULEBOOK): duplicate repo path '$raw_path' and '${seen_checkouts[$checkout_id]}' identify the same checkout — keep one entry per checkout; aborting run"
+        exit 1
+      fi
+      seen_checkouts[$checkout_id]="$raw_path"
+    fi
+    rb_list list "repos.$i.dimensions"
+    REPO_PATHS+=("$path"); REPO_MODES+=("${RB[repos.$i.mode]}"); REPO_BASES+=("${RB[repos.$i.base]}")
+    REPO_FINDINGS+=("${RB[repos.$i.findings]}"); REPO_DIMS+=("$(IFS=,; printf '%s' "${list[*]}")")
+    REPO_TEST_NETS+=("${RB[repos.$i.test_net]}"); REPO_TEST_ROBINDS+=("${RB[repos.$i.test_robind]}")
+    REPO_TEST_CMDS+=("${RB[repos.$i.test_cmd]}")
+  done
   MAX_FINDINGS="${MAX_FINDINGS:-1}"
   RECON_ENABLED="${RECON_ENABLED:-true}"; RECON_TTL_DAYS="${RECON_TTL_DAYS:-7}"
   # Ship gate ceiling (ADR 0022). Env override for a one-off, else the rulebook (which the

@@ -1,14 +1,33 @@
 #!/usr/bin/env python3
-"""Minimal YAML-subset parser for the nightshift rulebook — emits tagged TSV for bash.
+"""Minimal YAML-subset parser for the nightshift rulebook.
 
-Handles exactly the shape we control: top-level `branch_prefix`, a `limits:` map,
-and a `repos:` list of `{path, mode}`. Not a general YAML parser on purpose (no deps)."""
+Handles exactly the shape we control: top-level `branch_prefix`, the `limits:`, `recon:` and `agent:`
+maps, and the `dimensions:` and `repos:` lists. Not a general YAML parser on purpose (no deps).
+
+`load(path)` validates the file and returns it as a dict with every default applied; run as a script
+it prints that dict as one JSON object. `--pairs` is the form `lib/rulebook.sh` reads for Bash
+instead (see pairs()). Every scalar is a string, an optional value that is absent is "", and lists
+are JSON arrays:
+
+    {"branch_prefix": "nightshift/",
+     "limits": {"max_open_branches": "2", "max_branches_per_run": "", ...},
+     "recon": {"enabled": "true", "ttl_days": "7"},
+     "agent": {"primary": "", "claude_model": "", "review_model": "", "advisors": ["claude"]},
+     "dimensions": ["correctness", ...],
+     "repos": [{"path": "/srv/x", "mode": "branch-fix", "base": "", "findings": "",
+                "dimensions": ["docs"], "test_net": "false", "test_robind": "",
+                "protected_paths": ["hooks/"], "test_cmd": "make test"}]}
+
+An invalid rulebook raises SystemExit with the reason, so the script exits 1 and prints nothing on
+stdout.
+
+Usage: parse_rulebook.py [--pairs] RULEBOOK"""
+import json
 import posixpath
-import re
 import sys
 from pathlib import Path
 
-# Every mapping section's key set is CLOSED: the emitters at the bottom of main() read exactly
+# Every mapping section's key set is CLOSED: load() reads exactly
 # these keys and nothing else, so a key outside the set can only be a typo — and tolerating one is
 # silent, which is the worst way for governance to fail. `max_open_branchs: 12` leaves the ONLY
 # throughput cap at its default 2; `test-cmd:` on a repo leaves `test_cmd` empty, so that repo ships
@@ -39,10 +58,9 @@ AGENT_KEYS = (
 # anything else — a removed adapter included — is a typo, and tolerating it would run the night on
 # something the host never asked for.
 ADAPTERS = ("claude", "mock")
-# The emitter below reads only these top-level sections. A typo here would otherwise be ignored and
+# load() reads only these top-level sections. A typo here would otherwise be ignored and
 # every setting beneath it would silently revert to its default.
 TOP_LEVEL_KEYS = ("branch_prefix", "limits", "recon", "agent", "dimensions", "repos")
-# `test_cmd` MUST stay last — see the emitter at the bottom of main(). A new field goes before it.
 REPO_KEYS = ("path", "mode", "base", "findings", "dimensions", "test_net", "test_robind", "protected_paths", "test_cmd")
 # The modes the Runner actually implements. A repo whose mode is not in here is a typo, not a
 # feature request — see the validation below for why that must abort rather than be skipped.
@@ -108,7 +126,8 @@ def put(
     target[key] = read(v)
 
 
-def main(path: str) -> None:
+def load(path: str) -> dict:
+    """Validate the rulebook at `path` and return it with defaults applied (shape: module docstring)."""
     prefix = "nightshift/"
     limits: dict[str, str] = {}
     recon: dict[str, str] = {}
@@ -193,7 +212,8 @@ def main(path: str) -> None:
 
     # The pre-push hook appends `*` to this value. Without a trailing slash, a
     # prefix such as `m` also authorizes `main`; require a distinct branch
-    # namespace and reject whitespace that would corrupt the TSV transport.
+    # namespace. Whitespace is refused too: git forbids it in a ref name, so a prefix holding it could
+    # never name a branch, and the hook's `prefix*` pattern would no longer be one word.
     if (
         not prefix.endswith("/")
         or prefix.startswith("/")
@@ -204,12 +224,14 @@ def main(path: str) -> None:
             "branch_prefix must name a dedicated namespace ending in '/'"
         )
 
-    print(f"prefix\t{prefix}")
+    out: dict = {"branch_prefix": prefix}
+    lim: dict[str, str] = {}
+    out["limits"] = lim
     max_open = limits.get("max_open_branches", "2")
     if not max_open.isdecimal() or int(max_open) < 1:
         raise SystemExit("limits.max_open_branches must be a positive integer")
-    print(f"max_open\t{max_open}")
-    # Emitted empty when absent so bash can apply the env override before its default
+    lim["max_open_branches"] = max_open
+    # Kept empty when absent so bash can apply the env override before its default
     # (precedence: rulebook -> NIGHTSHIFT_MAX_RUN_BRANCHES -> default). The others have
     # no env counterpart, so the parser owns their defaults directly.
     max_run_branches = limits.get("max_branches_per_run", "")
@@ -217,37 +239,37 @@ def main(path: str) -> None:
         not max_run_branches.isdecimal() or int(max_run_branches) < 1
     ):
         raise SystemExit("limits.max_branches_per_run must be a positive integer")
-    print(f"max_branches_per_run\t{max_run_branches}")
+    lim["max_branches_per_run"] = max_run_branches
     # A hand-set 0 would make the fix<->review loop never run — every finding then
     # abandons silently. Require >= 1 so the misconfig fails loudly (with the runner's
     # fail-closed parse handling) instead of doing nothing.
     mfi = limits.get("max_fix_iterations", "3")
     if not mfi.isdecimal() or int(mfi) < 1:
         raise SystemExit("limits.max_fix_iterations must be a positive integer")
-    print(f"max_fix_iterations\t{mfi}")
+    lim["max_fix_iterations"] = mfi
     # These values are prompt guidance, but zero or non-numeric input still makes that guidance
     # useless or contradictory. Reject it here rather than passing malformed limits to a stage.
     mfc = limits.get("max_files_per_change", "15")
     if not mfc.isdecimal() or int(mfc) < 1:
         raise SystemExit("limits.max_files_per_change must be a positive integer")
-    print(f"max_files\t{mfc}")
+    lim["max_files_per_change"] = mfc
     mlc = limits.get("max_lines_per_change", "400")
     if not mlc.isdecimal() or int(mlc) < 1:
         raise SystemExit("limits.max_lines_per_change must be a positive integer")
-    print(f"max_lines\t{mlc}")
+    lim["max_lines_per_change"] = mlc
     # Wall-clock spend budget for the whole night (ADR 0013). Empty = no time cap (bash applies the
     # NIGHTSHIFT_MAX_RUN_SECONDS env override first). Validate a present value as a positive integer.
     mrm = limits.get("max_run_minutes", "")
     if mrm and (not mrm.isdecimal() or int(mrm) < 1):
         raise SystemExit("limits.max_run_minutes must be a positive integer")
-    print(f"max_run_minutes\t{mrm}")
+    lim["max_run_minutes"] = mrm
     # Wall-clock ceiling for ONE repo's `test_cmd` (ADR 0022). A hanging suite must not eat the
     # night, so the gate always runs under a timeout. Default 600s; a hand-set 0 would make every
     # gated run time out instantly and silently ship nothing, so require a positive integer.
     tts = limits.get("test_timeout_seconds", "600")
     if not tts.isdecimal() or int(tts) < 1:
         raise SystemExit("limits.test_timeout_seconds must be a positive integer")
-    print(f"test_timeout_seconds\t{tts}")
+    lim["test_timeout_seconds"] = tts
     # Resource ceilings for the sandboxed gate (ADR 0026), applied as rlimits inside the sandbox.
     # `test_memory_mb` is RLIMIT_DATA — the heap. NOT RLIMIT_AS: a WASM runtime reserves
     # multi-GB of address space it never touches, so an address-space cap large enough for a real
@@ -255,19 +277,19 @@ def main(path: str) -> None:
     tmb = limits.get("test_memory_mb", "4096")
     if not tmb.isdecimal():
         raise SystemExit("limits.test_memory_mb must be a non-negative integer")
-    print(f"test_memory_mb\t{tmb}")
+    lim["test_memory_mb"] = tmb
     # RLIMIT_NPROC. The kernel charges this to the ACCOUNT, not to the sandbox, so a value below the
     # host's idle process count makes every gate fail to fork. 0 = no process cap.
     tmp_ = limits.get("test_max_procs", "2048")
     if not tmp_.isdecimal():
         raise SystemExit("limits.test_max_procs must be a non-negative integer")
-    print(f"test_max_procs\t{tmp_}")
+    lim["test_max_procs"] = tmp_
     # RLIMIT_FSIZE. The worktree and the scratch HOME are on real disk, so without this a suite can
     # fill the filesystem — the one host-DoS route the tmpfs caps do not cover. 0 = no cap.
     tfs = limits.get("test_fsize_mb", "2048")
     if not tfs.isdecimal():
         raise SystemExit("limits.test_fsize_mb must be a non-negative integer")
-    print(f"test_fsize_mb\t{tfs}")
+    lim["test_fsize_mb"] = tfs
     # Findings emitted per repo per pass. Default 1 keeps a rulebook that omits the key at the
     # pre-v2 single-finding behavior; the live rulebook sets it explicitly (ADR 0011).
     # A hand-set 0 forces n_find=0 in the Runner (MAX_FINDINGS=0 → repo_findings 0 → the
@@ -277,7 +299,7 @@ def main(path: str) -> None:
     mfp = limits.get("max_findings_per_item", "1")
     if not mfp.isdecimal() or int(mfp) < 1:
         raise SystemExit("limits.max_findings_per_item must be a positive integer")
-    print(f"max_findings_per_item\t{mfp}")
+    lim["max_findings_per_item"] = mfp
     # Open findings the verify phase may re-check per night — one read-only stage call each, so
     # this is the ceiling on what closing the finding loop can cost. 0 is a legitimate value
     # ("never spend a model on closure"); the free deterministic probe runs either way. A
@@ -285,37 +307,36 @@ def main(path: str) -> None:
     mvr = limits.get("max_verifies_per_run", "5")
     if not mvr.isdecimal():
         raise SystemExit("limits.max_verifies_per_run must be a non-negative integer")
-    print(f"max_verifies_per_run\t{mvr}")
+    lim["max_verifies_per_run"] = mvr
     # Recon stage: on by default. This is a closed boolean domain: accepting YAML-ish synonyms
     # such as `no` while bash only recognises the literal `false` silently leaves Recon enabled.
     renabled = recon.get("enabled", "true")
     if renabled not in ("true", "false"):
         raise SystemExit("recon.enabled must be true or false")
-    print(f"recon_enabled\t{renabled}")
+    out["recon"] = {"enabled": renabled}
     # A malformed ttl_days silently became 0 in bash arithmetic → the cache was never fresh →
     # recon re-ran every pass. Require a positive integer so the misconfig fails loudly instead.
     ttl = recon.get("ttl_days", "7")
     if not ttl.isdecimal() or int(ttl) < 1:
         raise SystemExit("recon.ttl_days must be a positive integer")
-    print(f"recon_ttl_days\t{ttl}")
+    out["recon"]["ttl_days"] = ttl
     # Which MODEL a stage runs on (ADR 0020). The host declares it here because stage isolation
     # (ADR 0019) drops the CLI's `user` settings scope, so a machine-wide pin in
     # ~/.claude/settings.json no longer reaches a stage. OMITTING the key means "let the CLI resolve
     # its own default"; writing the key with no value is a half-finished edit, and treating that as
     # "no model" would silently run the night on something else. Model ID *syntax* stays
-    # unvalidated — it belongs to the CLI vendor and any pattern here would go stale — but a tab
-    # would corrupt the TSV transport to bash.
+    # unvalidated — it belongs to the CLI vendor and any pattern here would go stale.
     # `review_model` is the model the Review stage and the branch advice request instead (ADR 0044);
     # omitted, they run on `claude_model` like every other stage.
+    agent_out: dict = {}
+    out["agent"] = agent_out
     for key in ("claude_model", "review_model"):
         model = agent.get(key, "")
         if key in agent and not model:
             raise SystemExit(
                 f"agent.{key} is empty — give it a value, or omit the key entirely"
             )
-        if "\t" in model:
-            raise SystemExit(f"agent.{key} must not contain a tab")
-        print(f"{key}\t{model}")
+        agent_out[key] = model
     # Which adapter runs the night. Omitted = whatever $NIGHTSHIFT_AGENT says, which is the
     # pre-existing behaviour; the env var still wins when explicitly set, so a one-off hand run needs
     # no rulebook edit. Declared here for the same reason the models are (ADR 0020): the host owns
@@ -328,7 +349,7 @@ def main(path: str) -> None:
             f"agent.primary: unknown adapter {primary!r} - "
             f"expected one of {', '.join(sorted(ADAPTERS))}"
         )
-    print(f"primary_agent\t{primary}")
+    agent_out["primary"] = primary
     # Which adapters give every open branch its nightly merge/fix/reject recommendation (ADR 0038).
     # A comma-separated scalar (block-style only, like a repo's `dimensions`). Omitted = no branch
     # review. Each entry names an ADAPTER and is validated like `primary`; a duplicate would ask
@@ -347,7 +368,7 @@ def main(path: str) -> None:
     real = [a for a in advisors if a != "mock"]
     if len(set(real)) != len(real):
         raise SystemExit("agent.advisors: an adapter is listed twice")
-    print(f"advisors\t{','.join(advisors)}")
+    agent_out["advisors"] = advisors
     # Global review-dimension set; ORDER is the cold-start / tie priority in the Runner.
     for d in dims:
         if d not in LENSES:
@@ -355,7 +376,8 @@ def main(path: str) -> None:
                 f"dimensions: unknown lens {d!r} — "
                 f"expected a lens file in {LENS_DIR}: {', '.join(LENSES)}"
             )
-        print(f"dimension\t{d}")
+    out["dimensions"] = dims
+    out["repos"] = []
     for r in repos:
         path = r.get("path", "")
         if not path or not path.startswith("/"):
@@ -365,8 +387,6 @@ def main(path: str) -> None:
         # base is optional: empty means "auto-detect" (base_ref) in the Runner.
         # findings is optional: empty means "inherit max_findings_per_item".
         # dimensions is optional (comma-separated scalar): empty means "inherit the global set".
-        # Bash treats tab as IFS whitespace and collapses adjacent delimiters. Prefixing each
-        # optional value with its key keeps every field non-empty (`base=`) and position-stable.
         findings = r.get("findings", "")
         if findings and (not findings.isdecimal() or int(findings) < 1):
             raise SystemExit(
@@ -383,20 +403,14 @@ def main(path: str) -> None:
                 f"repo {r.get('path', '')}: unknown mode {mode!r} — "
                 f"expected one of {', '.join(sorted(REPO_MODES))}"
             )
-        repo_dimensions = r.get("dimensions", "")
-        for dimension in (d.strip() for d in repo_dimensions.split(",") if d.strip()):
+        repo_dimensions = [d.strip() for d in r.get("dimensions", "").split(",") if d.strip()]
+        for dimension in repo_dimensions:
             if dimension not in LENSES:
                 raise SystemExit(
                     f"repo {r.get('path', '')}: unknown lens {dimension!r} — "
                     f"expected a lens file in {LENS_DIR}: {', '.join(LENSES)}"
                 )
-        # test_cmd MUST stay last on the row — a command legitimately contains spaces, and bash's
-        # `read` soaks the remainder into the final variable. A tab would split it in two.
         test_cmd = r.get("test_cmd", "")
-        if "\t" in test_cmd:
-            raise SystemExit(
-                f"repo {r.get('path', '')}: test_cmd must not contain a tab"
-            )
         # ADR 0026 closes the ungated ship path that ADR 0022 §4 left open. A `branch-fix` repo
         # pushes machine-written code that a human is invited to merge, and the Review stage only
         # ever proves the FINDING is fixed — never that nothing else broke. Shipping with no suite
@@ -427,13 +441,16 @@ def main(path: str) -> None:
                 raise SystemExit(
                     f"repo {r.get('path', '')}: test_robind entries must be absolute paths, got {p!r}"
                 )
+        # A tab is never part of a real path, and one typed for the separator would merge two
+        # entries into a single path that binds nothing.
         if "\t" in test_robind:
             raise SystemExit(
                 f"repo {r.get('path', '')}: test_robind must not contain a tab"
             )
         # Paths a merge must not take without a human (ADR 0042): comma-separated, relative to the
         # repo root; an entry ending in `/` covers a directory. The Runner does not read it; an
-        # external merge job does (ADR 0040). Relative and tab-free, so a typo cannot reach outside.
+        # external merge job does (ADR 0040). Relative, normalised and tab-free, so a typo cannot reach
+        # outside, and a tab typed for the comma cannot merge two entries into one that matches nothing.
         protected = []
         for raw in (x.strip() for x in r.get("protected_paths", "").split(",") if x.strip()):
             # One canonical spelling for consumers that compare against `git diff --name-only`.
@@ -444,20 +461,49 @@ def main(path: str) -> None:
                     f"not its root, got {raw!r}"
                 )
             protected.append(norm + ("/" if raw.endswith("/") else ""))
-        protected = ",".join(protected)
-        print(
-            "repo"
-            f"\tpath={r.get('path', '')}"
-            f"\tmode={r.get('mode', 'findings-only')}"
-            f"\tbase={r.get('base', '')}"
-            f"\tfindings={findings}"
-            f"\tdimensions={r.get('dimensions', '')}"
-            f"\ttest_net={test_net}"
-            f"\ttest_robind={test_robind}"
-            f"\tprotected_paths={protected}"
-            f"\ttest_cmd={test_cmd}"
-        )
+        out["repos"].append({
+            "path": path,
+            "mode": mode,
+            "base": r.get("base", ""),
+            "findings": findings,
+            "dimensions": repo_dimensions,
+            "test_net": test_net,
+            "test_robind": test_robind,
+            "protected_paths": protected,
+            "test_cmd": test_cmd,
+        })
+    return out
+
+
+def pairs(rulebook: dict) -> bytes:
+    """The loaded rulebook as NUL-terminated items for Bash's `readarray -d ''`: first the number of
+    pairs, then each string's dotted path and value (`limits.max_open_branches`, `repos.0.test_cmd`,
+    `dimensions.2`, ...). NUL is the one byte a Bash string cannot hold, so it is the one delimiter
+    no value can contain; a value that does hold one is refused rather than split."""
+    items: list[str] = []
+
+    def walk(prefix: str, node) -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                walk(f"{prefix}{k}.", v)
+        elif isinstance(node, list):
+            for i, v in enumerate(node):
+                walk(f"{prefix}{i}.", v)
+        else:
+            if "\0" in node:
+                raise SystemExit(f"{prefix[:-1]}: a value must not contain a NUL byte")
+            items.extend((prefix[:-1], node))
+
+    walk("", rulebook)
+    return "".join(f"{x}\0" for x in [str(len(items) // 2), *items]).encode()
 
 
 if __name__ == "__main__":
-    main(sys.argv[1])
+    args = sys.argv[1:]
+    if len(args) == 2 and args[0] == "--pairs":
+        sys.stdout.buffer.write(pairs(load(args[1])))
+    elif len(args) == 1 and not args[0].startswith("--"):
+        json.dump(load(args[0]), sys.stdout)
+        sys.stdout.write("\n")
+    else:
+        raise SystemExit("usage: parse_rulebook.py [--pairs] RULEBOOK")

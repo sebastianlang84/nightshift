@@ -14,7 +14,7 @@ builtins=(correctness security infra docs tests perf ui-ux deps bloat knowledge 
 defaults=(correctness security infra docs tests perf ui-ux deps bloat craft)
 mapfile -t configured < <(
   python3 "$ROOT/lib/parse_rulebook.py" "$ROOT/rulebook.example.yaml" |
-    awk -F '\t' '$1=="dimension" {print $2}'
+    jq -r '.dimensions[]'
 )
 [ "${configured[*]}" = "${defaults[*]}" ] || {
   echo "dimension template drift: got '${configured[*]}'" >&2; exit 1;
@@ -55,8 +55,9 @@ printf '%s\n' 'dimensions:' '  - my-lens' 'repos:' '  - path: /srv/example' '   
 out="$(python3 "$TMP/home/lib/parse_rulebook.py" "$TMP/custom-dimensions.yaml")" || {
   echo "parser rejected a custom lens backed by a prompt file" >&2; exit 1;
 }
-grep -qx $'dimension\tmy-lens' <<<"$out" || { echo "custom global lens not emitted" >&2; exit 1; }
-grep -q 'dimensions=docs,my-lens' <<<"$out" || { echo "custom per-repo lens not emitted: $out" >&2; exit 1; }
+jq -e '.dimensions == ["my-lens"]' <<<"$out" >/dev/null || { echo "custom global lens not emitted" >&2; exit 1; }
+jq -e '.repos[0].dimensions == ["docs", "my-lens"]' <<<"$out" >/dev/null \
+  || { echo "custom per-repo lens not emitted: $out" >&2; exit 1; }
 # A directory named like a lens is no lens file: the Runner would append nothing for it.
 mkdir "$TMP/home/prompts/dimensions/audit.md"
 printf '%s\n' 'dimensions:' '  - audit' 'repos:' '  - path: /srv/example' '    mode: findings-only' \

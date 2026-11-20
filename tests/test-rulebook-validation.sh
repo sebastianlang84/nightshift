@@ -147,8 +147,8 @@ reject "a section with an inline value" 'limits: 5'  "section 'limits' must be a
 printf 'branch_prefix : custom/\nlimits :\n  max_open_branches: 7\nrepos:\n  - path: /srv/example\n    mode: findings-only\n' \
   > "$TMP/spaced.yaml"
 python3 "$ROOT/lib/parse_rulebook.py" "$TMP/spaced.yaml" > "$TMP/stdout"
-grep -qx "$(printf 'prefix\tcustom/')" "$TMP/stdout" || { echo "a spaced branch_prefix was ignored" >&2; exit 1; }
-grep -qx "$(printf 'max_open\t7')" "$TMP/stdout" || { echo "a spaced limits header dropped its entries" >&2; exit 1; }
+jq -e '.branch_prefix == "custom/"' "$TMP/stdout" >/dev/null || { echo "a spaced branch_prefix was ignored" >&2; exit 1; }
+jq -e '.limits.max_open_branches == "7"' "$TMP/stdout" >/dev/null || { echo "a spaced limits header dropped its entries" >&2; exit 1; }
 
 # Top-level settings are governance too: accepting a repeated scalar would use the later value,
 # while accepting a repeated section would merge or overwrite state from two declarations.
@@ -217,23 +217,23 @@ repos:
     mode: findings-only
 EOF
 python3 "$ROOT/lib/parse_rulebook.py" "$TMP/agent-ok.yaml" > "$TMP/stdout"
-grep -qx "$(printf 'claude_model\tclaude-opus-5')" "$TMP/stdout" || {
-  echo "quoted claude_model not unquoted: $(grep claude_model "$TMP/stdout")" >&2
+jq -e '.agent.claude_model == "claude-opus-5"' "$TMP/stdout" >/dev/null || {
+  echo "quoted claude_model not unquoted: $(jq -c .agent "$TMP/stdout")" >&2
   exit 1
 }
-grep -qx "$(printf 'review_model\tclaude-fable #2')" "$TMP/stdout" || {
-  echo "quoted review_model with '#' mangled: $(grep review_model "$TMP/stdout")" >&2
+jq -e '.agent.review_model == "claude-fable #2"' "$TMP/stdout" >/dev/null || {
+  echo "quoted review_model with '#' mangled: $(jq -c .agent "$TMP/stdout")" >&2
   exit 1
 }
-grep -qx "$(printf 'primary_agent\tmock')" "$TMP/stdout" || {
-  echo "primary_agent not emitted: $(grep primary_agent "$TMP/stdout")" >&2
+jq -e '.agent.primary == "mock"' "$TMP/stdout" >/dev/null || {
+  echo "agent.primary not emitted: $(jq -c .agent "$TMP/stdout")" >&2
   exit 1
 }
 printf 'repos:\n  - path: /srv/example\n    mode: findings-only\n' > "$TMP/no-agent.yaml"
 python3 "$ROOT/lib/parse_rulebook.py" "$TMP/no-agent.yaml" > "$TMP/stdout-no-agent"
 # Omitted, the review model is emitted EMPTY, which the Runner reads as "review on claude_model".
-grep -qx "$(printf 'review_model\t')" "$TMP/stdout-no-agent" || {
-  echo "an omitted review_model was not emitted empty: $(grep review_model "$TMP/stdout-no-agent")" >&2
+jq -e '.agent.review_model == ""' "$TMP/stdout-no-agent" >/dev/null || {
+  echo "an omitted review_model was not emitted empty: $(jq -c .agent "$TMP/stdout-no-agent")" >&2
   exit 1
 }
 
@@ -270,9 +270,10 @@ repos:
   test_cmd: "printf ok"
 EOF
 python3 "$ROOT/lib/parse_rulebook.py" "$TMP/same-indent.yaml" > "$TMP/stdout"
-grep -qx "$(printf 'dimension\tcorrectness')" "$TMP/stdout"
-grep -q "path=/srv/quoted repo.*mode=branch-fix.*test_cmd=printf ok" "$TMP/stdout" || {
-  echo "same-indent or quoted repo scalars were lost: $(grep '^repo' "$TMP/stdout")" >&2
+jq -e '.dimensions == ["correctness"]' "$TMP/stdout" >/dev/null
+jq -e '.repos[0] | .path == "/srv/quoted repo" and .mode == "branch-fix" and .test_cmd == "printf ok"' \
+    "$TMP/stdout" >/dev/null || {
+  echo "same-indent or quoted repo scalars were lost: $(jq -c .repos "$TMP/stdout")" >&2
   exit 1
 }
 
@@ -281,14 +282,14 @@ grep -q "path=/srv/quoted repo.*mode=branch-fix.*test_cmd=printf ok" "$TMP/stdou
 # which always passes. Only a `# comment` may follow the quote; anything else is refused.
 printf 'repos:\n  - path: /x\n    mode: branch-fix\n    test_cmd: "cd" services/api && make test\n' > "$TMP/trailing.yaml"
 if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/trailing.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
-  echo "parser accepted text after a closing quote: $(grep '^repo' "$TMP/stdout")" >&2
+  echo "parser accepted text after a closing quote: $(cat "$TMP/stdout")" >&2
   exit 1
 fi
 grep -q 'unexpected text after closing quote' "$TMP/stderr"
 # A `#` right behind the quote is text, not a comment: a comment needs whitespace before it.
 printf 'repos:\n  - path: /x\n    mode: branch-fix\n    test_cmd: "true"#suffix && false\n' > "$TMP/adjacent-hash.yaml"
 if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/adjacent-hash.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
-  echo "parser took an adjacent # for a comment: $(grep '^repo' "$TMP/stdout")" >&2
+  echo "parser took an adjacent # for a comment: $(cat "$TMP/stdout")" >&2
   exit 1
 fi
 grep -q 'unexpected text after closing quote' "$TMP/stderr"
@@ -296,14 +297,14 @@ grep -q 'unexpected text after closing quote' "$TMP/stderr"
 # command at the escape (`"true \" # x\" && false"` used to become `true \`, which passes).
 printf 'repos:\n  - path: /x\n    mode: branch-fix\n    test_cmd: "true \\" # literal quote\\" && false"\n' > "$TMP/escaped.yaml"
 if python3 "$ROOT/lib/parse_rulebook.py" "$TMP/escaped.yaml" >"$TMP/stdout" 2>"$TMP/stderr"; then
-  echo "parser cut a quoted value at an escaped quote: $(grep '^repo' "$TMP/stdout")" >&2
+  echo "parser cut a quoted value at an escaped quote: $(cat "$TMP/stdout")" >&2
   exit 1
 fi
 grep -q 'escape sequences in double-quoted values are not supported' "$TMP/stderr"
 printf 'repos:\n  - path: /x\n    mode: branch-fix\n    test_cmd: "make test #2" # the gate\n' > "$TMP/trailing-comment.yaml"
 python3 "$ROOT/lib/parse_rulebook.py" "$TMP/trailing-comment.yaml" > "$TMP/stdout"
-grep -q 'test_cmd=make test #2$' "$TMP/stdout" || {
-  echo "a comment after a quoted value was not dropped: $(grep '^repo' "$TMP/stdout")" >&2
+jq -e '.repos[0].test_cmd == "make test #2"' "$TMP/stdout" >/dev/null || {
+  echo "a comment after a quoted value was not dropped: $(jq -c .repos "$TMP/stdout")" >&2
   exit 1
 }
 
@@ -394,6 +395,6 @@ repos:
   - path: /srv/c
 YAML
 python3 "$ROOT/lib/parse_rulebook.py" "$TMP/rulebook-mode-ok.yaml" >"$TMP/stdout" 2>"$TMP/stderr"
-[ "$(grep -c '^repo' "$TMP/stdout")" = 3 ] || { echo "valid modes rejected" >&2; exit 1; }
+[ "$(jq '.repos | length' "$TMP/stdout")" = 3 ] || { echo "valid modes rejected" >&2; exit 1; }
 # The default for an omitted mode is findings-only and must stay valid.
-grep -q "path=/srv/c	mode=findings-only" "$TMP/stdout"
+jq -e '.repos[2] | .path == "/srv/c" and .mode == "findings-only"' "$TMP/stdout" >/dev/null

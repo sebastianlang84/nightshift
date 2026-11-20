@@ -26,8 +26,9 @@ contains the agent confinement hooks.
 
 ## Parser and state contracts
 
-- `lib/parse_rulebook.py` accepts a block-style YAML subset. Register keys in the allowed-key
-  tuples; keep `test_cmd` last in each emitted repository TSV row.
+- `lib/parse_rulebook.py` accepts a block-style YAML subset and prints one JSON object. Register
+  keys in the allowed-key tuples. Bash reads it only through `lib/rulebook.sh` (`--pairs`), by name;
+  Python imports `load()`.
 - `state/findings-probe.json` is derived from the ledger. Do not edit it by hand.
 - `.nightshift-note` reports harness problems through `state/agent-notes.md` and the digest.
   The runner removes notes before committing and never feeds collected notes into later stages.

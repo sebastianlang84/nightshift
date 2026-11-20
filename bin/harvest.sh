@@ -67,19 +67,17 @@ declare -a REPO_PATHS=() REPO_BASES=()
 repo_id() { realpath -m -- "$1" 2>/dev/null || printf '%s' "${1%/}"; }
 # shellcheck source=../lib/base_resolution.sh
 source "$NIGHTSHIFT_HOME/lib/base_resolution.sh"
+# shellcheck source=../lib/rulebook.sh
+source "$NIGHTSHIFT_HOME/lib/rulebook.sh"
 
 load_rulebook() {
-  local tag a b c d e parsed path
-  # Capture output + exit status; a parse error via process substitution is invisible
-  # to `set -euo pipefail` and would reconcile on a truncated repo set. Fail closed.
-  parsed="$(python3 "$NIGHTSHIFT_HOME/lib/parse_rulebook.py" "$RULEBOOK")" \
-    || { echo "rulebook parse failed ($RULEBOOK) — aborting harvest" >&2; exit 1; }
-  while IFS=$'\t' read -r tag a b c d e; do
-    case "$tag" in
-      repo)   path="$(repo_id "${a#path=}")"; REPO_PATHS+=("$path"); REPO_BASES+=("${c#base=}") ;;
-      prefix) [ -n "$a" ] && BRANCH_PREFIX="$a" ;;
-    esac
-  done <<< "$parsed"
+  local i
+  # Fail closed: reconciling on a partial repo set would misjudge the rest.
+  rulebook_load "$RULEBOOK" || { echo "rulebook parse failed ($RULEBOOK) — aborting harvest" >&2; exit 1; }
+  [ -n "${RB[branch_prefix]}" ] && BRANCH_PREFIX="${RB[branch_prefix]}"
+  for ((i = 0; i < RB_REPOS; i++)); do
+    REPO_PATHS+=("$(repo_id "${RB[repos.$i.path]}")"); REPO_BASES+=("${RB[repos.$i.base]}")
+  done
 }
 
 # last recorded verdict for a repo+branch as "verdict<TAB>source" (empty fields if none).
