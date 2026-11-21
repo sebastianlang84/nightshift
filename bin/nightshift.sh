@@ -298,12 +298,18 @@ code_sig() { # repo finding.json [ref] -> 12-char signature or ""
 # signature still MATCHES the current code (code_sig equal, or absent on older rows). If the code
 # under the finding has changed since (code_sig differs), it is NOT suppressed — the identity is
 # eligible again. An exact string match (not a grep regex): fingerprints contain '.'/'/'/':'
-# metacharacters. The answer ignores ledger order, and a ledger that cannot be read counts as
-# "not suppressed" (fail open).
+# metacharacters. The answer ignores ledger order. Only the module's explicit `false` (exit 1)
+# means "not suppressed"; a ledger that cannot be read counts as suppressed (fail closed), so a
+# mid-night read error skips findings for one night instead of re-fixing decided work.
 _fp_suppressed() { # repo fingerprint code_sig outcomes_json
   [ -n "$2" ] && [ "$2" != null ] || return 1   # never dedup on an unusable key
   [ -f "$LEDGER" ] || return 1
-  ledger fingerprint-suppressed "$1" "$2" "$3" "$4" >/dev/null 2>&1
+  local out rc=0
+  out=$(ledger fingerprint-suppressed "$1" "$2" "$3" "$4" 2>/dev/null) || rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  [ "$rc" -eq 1 ] && [ "$out" = false ] && return 1
+  log "  ledger unreadable (exit $rc) — treating $2 as suppressed"
+  return 0
 }
 _suppressed_for() { # outcomes_json repo fingerprint code_sig
   _fp_suppressed "$2" "$3" "$4" "$1"
@@ -319,7 +325,8 @@ known_work() { # repo -> compact "fingerprint — summary" list of STILL-OPEN it
   # newly emitted invalidated finding reopens it. `wontfix` alone is permanent (ADR 0014). Attach the
   # append order instead of sorting timestamps: DST offsets and copied legacy rows need not sort in
   # event order. The block is capped at 40 lines so the prompt stays bounded.
-  ledger known-work "$repo" 2>/dev/null || true
+  # A read error leaves the block empty; suppression (_fp_suppressed) still fails closed.
+  ledger known-work "$repo" 2>/dev/null || log "  ledger unreadable — Explore gets no known work"
 }
 
 search_history_path() { # repo -> bounded, derived search receipt history
