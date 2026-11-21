@@ -231,9 +231,13 @@ def load(path: str) -> dict:
     if not max_open.isdecimal() or int(max_open) < 1:
         raise SystemExit("limits.max_open_branches must be a positive integer")
     lim["max_open_branches"] = max_open
-    # Kept empty when absent so bash can apply the env override before its default
-    # (precedence: rulebook -> NIGHTSHIFT_MAX_RUN_BRANCHES -> default). The others have
-    # no env counterpart, so the parser owns their defaults directly.
+    # Kept empty when absent: here the rulebook beats the env (precedence: rulebook ->
+    # NIGHTSHIFT_MAX_RUN_BRANCHES -> default), and bin/nightshift.sh only reaches the env
+    # once the rulebook value is empty, so a parser default would silently disable the
+    # override. Precedence order, not whether an env override exists, decides this: limits
+    # whose env override wins over the rulebook (test_timeout_seconds, test_memory_mb,
+    # test_max_procs, test_fsize_mb, max_verifies_per_run) keep a parser default safely.
+    # max_run_minutes is also left empty, for its own reason (see its comment below).
     max_run_branches = limits.get("max_branches_per_run", "")
     if max_run_branches and (
         not max_run_branches.isdecimal() or int(max_run_branches) < 1
