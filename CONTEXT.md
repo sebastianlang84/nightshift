@@ -45,7 +45,9 @@ PR creation is optional, disabled by default, and requires separate API credenti
 ## Boundaries
 
 The runner owns branch creation, commit, and push. The Claude adapter enforces its tool and write
-boundary through per-stage tool profiles and a `PreToolUse` guard. The ship gate executes candidate content and uses bubblewrap without host credentials,
+boundary through per-stage tool profiles and a `PreToolUse` guard. The Codex adapter runs commands
+in a read-only sandbox, granting workspace writes only to Fix. The host rulebook selects the adapter,
+model and effort. The ship gate executes candidate content and uses bubblewrap without host credentials,
 with network disabled unless public egress is explicitly enabled through a vetting proxy.
 These boundaries do not prevent all secret reads by agents or all prompt injection; see the
 [threat model](docs/design/risk-analysis.md).

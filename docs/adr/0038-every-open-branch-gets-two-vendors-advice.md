@@ -1,6 +1,6 @@
 # ADR 0038 — every open branch gets advice from two vendors every night
 
-- Status: accepted; **the two-vendor mix superseded by [ADR 0044](0044-claude-only-opus-works-a-review-model-reviews.md)** — with Codex removed on 2026-11-19 there is one real advisor (`claude`), and it advises on the review model
+- Status: accepted; **the two-vendor mix superseded by [ADR 0044](0044-claude-only-opus-works-a-review-model-reviews.md)** — the host now selects its advisors under [ADR 0045](0045-the-host-rulebook-selects-the-agent.md)
 - Date: 2026-10-15
 - Extends: [ADR 0031](0031-the-reviewer-may-be-another-vendor.md) (a reviewer from another vendor does not share the author's blind spot)
 - Touches: [ADR 0020](0020-the-rulebook-declares-the-stage-model.md) (the rulebook declares the model) · [ADR 0034](0034-an-empty-answer-is-not-a-verdict.md) (an empty answer is not a verdict)

@@ -44,28 +44,26 @@ limits:
                                  # fork-bomb bound. The kernel charges it to the ACCOUNT, not to the
                                  # sandbox, so keep it well above the host's idle count. 0 = no cap.
 
-# Which MODEL the stages run on (ADR 0020, ADR 0044). Declare it here, not in the CLI's own config:
-# stage isolation (ADR 0019) drops the CLI's `user` settings scope, so a machine-wide pin in
-# ~/.claude/settings.json never reaches a stage. This file is host-owned and untracked, so setting a
-# model here is a host decision — nightshift still ships no model of its own.
-# Precedence: NIGHTSHIFT_CLAUDE_MODEL / NIGHTSHIFT_REVIEW_MODEL if set > these keys > whatever the
-# CLI resolves by itself. An explicitly EMPTY NIGHTSHIFT_CLAUDE_MODEL means "pass no --model"; an
-# explicitly empty NIGHTSHIFT_REVIEW_MODEL means "review on the claude model". Omit the block to let
-# the CLI decide; the run announces the effective models and their source either way, and
-# `state/runs.jsonl` records the model that actually served each stage.
+# Uncomment one agent block in the host's untracked rulebook.yaml.
+# primary selects the harness for Recon, Explore, Fix, Review and Verify.
+# advisors enables branch advice. Omit it to skip advice, or list both as claude,codex.
+#
 # agent:
-#   claude_model: claude-opus-5-5
-#   # The model the Review stage and the branch advice run on. Omitted, they run on claude_model.
-#   # A different model than the author's is the point: it does not share every blind spot.
-#   review_model: claude-fable-5-2
-#   # Which adapter runs the WHOLE night (claude | mock). Omitted, $NIGHTSHIFT_AGENT decides, as
-#   # before; an explicitly set env var still outranks this key, so a one-off hand run needs no edit
-#   # here.
+#   primary: codex
+#   codex_model: gpt-6.2-astra
+#   codex_effort: high
+#   advisors: codex
+#
+# agent:
 #   primary: claude
-#   # Which adapters advise on every open branch each night (ADR 0038): claude, or mock slots in
-#   # tests. Each gives merge / fix / reject on the review model; the digest shows them as one table.
-#   # Omitted, no branch review runs.
+#   claude_model: claude-opus-5-5
+#   claude_effort: medium
 #   advisors: claude
+#   review_model: claude-fable-5-2
+#
+# review_model applies to Review and advice on the primary adapter. Omit it to use
+# that adapter's work model for every stage. A different advisor uses its own model.
+# Model and effort default to the CLI's choice. See docs/deployment.md for env overrides.
 
 recon:                           # reconnaissance stage (ADR 0010): surveys each repo (docs/, compose,
   enabled: true                  # frontend, tests, CI …) and labels each dimension high/normal/low

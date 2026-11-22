@@ -24,8 +24,8 @@ An append-only ledger tracks finding identity, branch outcomes, and coverage acr
 The runner never merges. You control merges; an optional external merge job requires separate
 operator authorization and is not included in this repository.
 
-The agent is Claude Code; a deterministic mock adapter serves tests and dry runs. Review and the
-optional advisory branch reviews can run on a separate review model.
+Each host selects Claude Code or Codex in its rulebook. Review and branch advice on that
+adapter can use a separate model. A deterministic mock serves tests and dry runs.
 
 ## Install
 
@@ -66,12 +66,12 @@ Inspect `sandbox/digests/` and the branches in `sandbox/remote.git`.
 
 ```bash
 cp rulebook.example.yaml rulebook.yaml
-# Edit rulebook.yaml before running against your own repositories.
-NIGHTSHIFT_AGENT=claude bash bin/nightshift.sh
+# Uncomment one agent block and configure your repositories in rulebook.yaml.
+bash bin/nightshift.sh
 ```
 
-The example has its repository entries commented out. Add absolute paths to repositories you
-own or are authorized to modify. Configure an existing base branch and working Git push transport.
+Replace the example repository path with an absolute path to a repository you own or are
+authorized to modify. Configure an existing base branch and working Git push transport.
 A minimal repository entry is:
 
 ```yaml
@@ -93,8 +93,8 @@ Common settings include:
 
 | Setting | Purpose |
 | --- | --- |
-| `NIGHTSHIFT_AGENT` | `claude` or `mock`. Manual runs require this setting or `agent.primary` in the rulebook. The scheduler falls back to `claude`. |
-| `agent.review_model` | Separate model for Review and branch advice (default: `agent.claude_model`) |
+| `NIGHTSHIFT_AGENT` | `claude`, `codex`, or `mock`. Manual runs require this setting or `agent.primary` in the rulebook. The scheduler falls back to `claude`. |
+| `agent.review_model` | Model for Review and advice on the primary adapter (defaults to its work model) |
 | `limits.max_open_branches` | Maximum branches awaiting a verdict across repositories |
 | `limits.max_run_minutes` | Optional run budget; an in-flight stage may finish |
 | `NIGHTSHIFT_STATE_DIR` | Ledger and derived state location |
@@ -116,7 +116,7 @@ The review/fix pipeline, mock adapter, ledger, scheduler, and sandboxed gate are
 Models can miss defects or introduce regressions. Review the branch and its evidence before merging.
 
 The gate sandbox executes candidate code without the host home or credentials and fails closed
-when bubblewrap is unavailable. Claude reads with host-account access. Branch confinement does not
+when bubblewrap is unavailable. Agent reads can reach files accessible to the host account. Branch confinement does not
 scan pushed content for secrets. Use a dedicated unprivileged account and read the
 [threat model](docs/design/risk-analysis.md) before unattended operation.
 

@@ -1,6 +1,6 @@
 # ADR 0044 — Claude only: Opus works, a review model reviews
 
-- Status: accepted
+- Status: amended by [ADR 0045](0045-the-host-rulebook-selects-the-agent.md) for per-host adapter selection
 - Date: 2026-11-19
 - Supersedes: [ADR 0031](0031-the-reviewer-may-be-another-vendor.md) (the reviewer on another adapter) · [ADR 0038](0038-every-open-branch-gets-two-vendors-advice.md) in its vendor mix · [ADR 0037](0037-the-fix-stage-starts-from-a-provisioned-worktree.md) in its Codex toolchain, pnpm-store and `setup_cmd` parts · [ADR 0023](0023-an-unusable-agent-aborts-the-night.md) in its quota fallback
 - Touches: [ADR 0019](0019-stage-context-excludes-operator-config.md) (only the Claude half of stage isolation remains) · [ADR 0020](0020-the-rulebook-declares-the-stage-model.md) (a second rulebook model key)

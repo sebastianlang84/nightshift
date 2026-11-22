@@ -18,9 +18,8 @@ ledgers diverge silently: duplicate branches, broken caps and rotation). See
 
 1. **Clone** the Nightshift repo somewhere stable — this path becomes `NIGHTSHIFT_HOME`, and the
    installed systemd unit hard-codes it. Moving the checkout later requires re-running `install`.
-2. **Provide the binaries a run shells out to.** Nightly runs use the `claude` adapter
-   (`NIGHTSHIFT_AGENT=claude`); the only other adapter is the deterministic `mock`
-   ([ADR 0044](adr/0044-claude-only-opus-works-a-review-model-reviews.md)). The launcher looks for
+2. **Provide the binaries a run shells out to.** Install and authenticate the CLI selected by the host's
+   rulebook. The launcher looks for
    these binaries on its `PATH`, which is
    `/usr/local/bin:/usr/bin:/bin:~/.local/bin` — systemd user services start with a minimal env, so
    the launcher sets that list explicitly (system dirs first, deliberately: see
@@ -29,7 +28,7 @@ ledgers diverge silently: duplicate branches, broken caps and rotation). See
 
    | Binary | Used for | Missing |
    |--------|----------|---------|
-   | `claude` | every stage that thinks | every stage fails; nothing ships |
+   | `claude` or `codex` | stages assigned to that adapter | those stages fail |
    | `git` | worktrees, commits, branch pushes | run aborts |
    | `jq` | telemetry and JSON handling | run aborts |
    | `python3` (stdlib only — nothing to install) | every ledger read and write, rulebook parsing, JSON extraction, finding probes | run aborts |
@@ -102,24 +101,29 @@ ledgers diverge silently: duplicate branches, broken caps and rotation). See
 
 ### Model and flags (optional, per host)
 
-Nightshift **commits no model of its own**. A host declares the model it wants in its own
-`rulebook.yaml` (untracked) under `agent:` — see below; the variables here override that per run,
-e.g. a smaller/cheaper model for one night.
+In the host's untracked `rulebook.yaml`, uncomment one of the two agent blocks in the
+[example rulebook](../rulebook.example.yaml). For an all-Codex night, use:
 
 ```yaml
 agent:
-  claude_model: claude-opus-5-5
-  review_model: claude-fable-5-2
+  primary: codex
+  codex_model: gpt-6.2-astra
+  codex_effort: high
+  advisors: codex
 ```
 
-`review_model` is the model the Review stage and the branch advice run on; every other stage runs on
-`claude_model`. Omitted, they all run on `claude_model`
-([ADR 0044](adr/0044-claude-only-opus-works-a-review-model-reviews.md)).
+Review and branch advice on the primary adapter use its work model unless
+`review_model` is set. A different advisor uses its own work model. Each adapter
+uses its configured effort for every stage. An explicitly empty model or effort
+environment override selects the CLI default. An empty review override selects the work model.
 
 | Variable | Adapter | Effect when unset |
 |----------|---------|-------------------|
 | `NIGHTSHIFT_CLAUDE_MODEL` | claude | the rulebook's `agent.claude_model`, else no `--model` |
-| `NIGHTSHIFT_REVIEW_MODEL` | claude | the rulebook's `agent.review_model`, else the claude model; set empty to review on the claude model for one run |
+| `NIGHTSHIFT_CLAUDE_EFFORT` | claude | `agent.claude_effort`, else the CLI default |
+| `NIGHTSHIFT_CODEX_MODEL` | codex | `agent.codex_model`, else the CLI default |
+| `NIGHTSHIFT_CODEX_REASONING_EFFORT` | codex | `agent.codex_effort`, else the CLI default |
+| `NIGHTSHIFT_REVIEW_MODEL` | primary | `agent.review_model`, else the adapter's work model |
 | `NIGHTSHIFT_CLAUDE_FLAGS` | claude | `--dangerously-skip-permissions --max-turns 60` |
 | `NIGHTSHIFT_CLAUDE_SETTING_SOURCES` | claude | `--setting-sources local` keeps the repo's `CLAUDE.md` and skips project hooks. Supply a comma-separated list of `user`, `project`, and `local`, or an exactly empty value to omit the flag and load all scopes. See the [validation rules](design/hook-spec.md#stage-isolation--the-operators-personal-config-is-not-stage-context). |
 | `NIGHTSHIFT_EMPTY_ANSWER_RETRIES` | all | `1` — a stage whose model returned nothing is retried once (ADR 0034); `0` disables it |
@@ -133,12 +137,12 @@ agent:
 | `NIGHTSHIFT_TEST_FSIZE_MB` | all | the rulebook's `limits.test_fsize_mb`, else 2048 (`RLIMIT_FSIZE`) |
 | `NIGHTSHIFT_TEST_MAX_PROCS` | all | the rulebook's `limits.test_max_procs`, else 2048 (`RLIMIT_NPROC`) |
 | `NIGHTSHIFT_BLOCKED_BASE_CMD` | all | unset; a shell command run once per red spell with the repo, base commit, `red` or `unavailable` and the log path as `$1`..`$4`, to tell the repo's owner (ADR 0041) |
-| `NIGHTSHIFT_QUOTA_CMD` | launcher | unset = every night starts; a shell command `bin/nightshift-cron.sh` runs once before the night (stdin closed, `NIGHTSHIFT_QUOTA_TIMEOUT` seconds, default 60). Exit 75 = pause: the night does not start, the day's digest gets a `PAUSED` entry with the first line of the command's stdout as the reason, the notify command is called, and the launcher exits 0. Any other exit, a command that cannot run, or a timeout means go, logged (ADR 0044) |
+| `NIGHTSHIFT_QUOTA_CMD` | launcher | unset = every night starts; a shell command `bin/nightshift-cron.sh` runs once before the night with the effective adapter in `NIGHTSHIFT_AGENT` (stdin closed, `NIGHTSHIFT_QUOTA_TIMEOUT` seconds, default 60). Exit 75 = pause: the night does not start, the day's digest gets a `PAUSED` entry with the first line of the command's stdout as the reason, the notify command is called, and the launcher exits 0. Any other exit, a command that cannot run, or a timeout means go, logged (ADR 0044) |
 | `NIGHTSHIFT_NOTIFY_CMD` | all | unset = nobody is told; a shell command called with one line as `$1` (stdin closed, `NIGHTSHIFT_NOTIFY_TIMEOUT` seconds, default 60) when the quota check pauses a night and when a running night stops for `agent_unavailable` — usually a quota spent mid-night. A failure is logged and changes nothing else (ADR 0044) |
 
 A model that cannot be reached two stages in a row — each failed within 30 s with no tokens counted,
 which is how a spent quota or an outage looks from the CLI — stops the night (ADR 0023). The count is
-kept per model, so a spent review model stops the night even while the claude model still answers
+kept per model, so a spent review model stops the night even while the work model still answers
 the Fix stages in between. No other adapter or model takes over
 ([ADR 0044](adr/0044-claude-only-opus-works-a-review-model-reviews.md)): the digest says `ABORTED`
 and `NIGHTSHIFT_NOTIFY_CMD`, if set, gets one line. To avoid starting a night on a nearly spent week
@@ -290,9 +294,6 @@ choice came from — which model actually served is a separate, after-the-fact q
 and `runs.jsonl` records the model that actually served each stage (`model_id`, `context_window`). The
 two answer different questions: the log says what was asked for, the ledger what arrived.
 
-These are per-process, so a whole run shares one model. Per-*stage* cost control (a cheap model for
-the recon survey, the full model for fix/review) means one run per model setting today.
-
 `NIGHTSHIFT_CLAUDE_FLAGS` replaces the default extra Claude arguments with whitespace-separated
 arguments. The Runner refuses to start the stage if the override includes `--mcp-config`,
 `--setting-sources`, or `--settings`, including their `--flag=value` forms.
@@ -382,6 +383,8 @@ Agent capabilities depend on the adapter and stage.
   tools to the disposable worktree. The default profiles omit Bash, so agents have no shell to run
   `git push`. If the operator enables Bash, the guard rejects commands that try to bypass or widen
   the injected `pre-push` hook.
+- **Codex** can execute commands. Its stages run read-only except for Fix, which receives a
+  workspace-write sandbox with network access disabled for commands.
 
 The runner performs the branch push. Its `pre-push` hook allows new branches and fast-forward updates
 under the configured `branch_prefix` (`nightshift/` by default) and rejects deletions, tags and other
@@ -432,11 +435,11 @@ destinations. See the [hook specification](design/hook-spec.md) and [risk analys
   another harvest can reorder them between commands; copy the stable `ITEM` from `todos`. Your verdict outranks the
   machine's ([ADR 0007](adr/0007-human-verdicts-outrank-machine-reconcile.md),
   [ADR 0021](adr/0021-closing-open-findings.md)).
-- **Independent branch review:** set `agent.advisors: claude` in the rulebook and every open branch
-  gets a merge / fix / reject recommendation every night, on the review model. The
+- **Independent branch review:** list `claude`, `codex`, or both under `agent.advisors` in the rulebook and every open branch
+  gets a merge / fix / reject recommendation from each advisor. The
   digest shows them as one table with a combined recommendation and the required fix
   ([ADR 0038](adr/0038-every-open-branch-gets-two-vendors-advice.md)). Answers are cached in
-  `state/advice/` per branch tip, base, adapter and model, so an unchanged branch is not reviewed
+  `state/advice/` per branch tip, base, adapter, model and effort, so an unchanged branch is not reviewed
   again; delete that directory to force a fresh review. `NIGHTSHIFT_ADVISORS` overrides the list
   (empty = off for one run). The older `NIGHTSHIFT_BRANCH_REVIEW=1` still turns it on as well. It never merges or pushes.
 - **Logs:** `bin/schedule.sh logs [N]` or `journalctl --user -u nightshift.service`.
@@ -453,7 +456,7 @@ destinations. See the [hook specification](design/hook-spec.md) and [risk analys
   `ABORTED`, names the adapter that died, the model when it was the one that could not be
   reached, and the cause, the day's log carries a `FATAL:` line naming the stage, and the systemd unit
   is marked failed. Nothing was recorded — no recon caches, no `empty` ledger rows — so there is no
-  state to clean up. For a credentials abort, log in to the `claude` CLI again;
+  state to clean up. For a credentials abort, log in to the affected CLI again;
   otherwise the `FATAL:` line names the stage's raw output, where the CLI says why — for a spent
   quota, wait until the reset it gives. Then re-run:
   ```

@@ -101,14 +101,12 @@ reject "a removed pi key"            'agent:
   pi_model: x'                       "pi_model"
 reject "an empty primary agent"     'agent:
   primary:'                         "agent.primary is empty"
-# The Codex adapter and the reviewer routing were removed on 2026-11-19 (ADR 0044); a rulebook that
-# still names them must fail, not silently run the night on something else.
-reject "the removed codex adapter"   'agent:
-  primary: codex'                    "agent.primary: unknown adapter 'codex'"
-reject "a removed codex model key"   'agent:
-  codex_model: x'                    "agent: unknown key 'codex_model'"
-reject "a removed codex effort key"  'agent:
-  codex_effort: high'                "agent: unknown key 'codex_effort'"
+reject "an empty codex model"       'agent:
+  codex_model:'                     "agent.codex_model is empty"
+reject "an unknown codex effort"    'agent:
+  codex_effort: hihg'               "agent.codex_effort: expected one of"
+reject "an empty Claude effort"     'agent:
+  claude_effort:'                   "agent.claude_effort: expected one of"
 reject "the removed review routing"  'agent:
   review_agent: claude'              "agent: unknown key 'review_agent'"
 
@@ -247,10 +245,10 @@ jq -e '.agent.review_model == ""' "$TMP/stdout-no-agent" >/dev/null || {
   [ "$(env -u NIGHTSHIFT_AGENT bash -c "$route" _ "$ROOT/bin/nightshift.sh")" = mock ]
   [ "$(NIGHTSHIFT_AGENT=claude bash -c "$route" _ "$ROOT/bin/nightshift.sh")" = claude ]
   # An env value the parser never sees is refused once, before the night spends anything.
-  if NIGHTSHIFT_AGENT=codex bash -c 'source "$1"; main' _ "$ROOT/bin/nightshift.sh" >/dev/null 2>"$TMP/codex-env.err"; then
+  if NIGHTSHIFT_AGENT=unknown bash -c 'source "$1"; main' _ "$ROOT/bin/nightshift.sh" >/dev/null 2>"$TMP/unknown-env.err"; then
     exit 1
   fi
-  grep -q 'unknown NIGHTSHIFT_AGENT=codex (expected claude or mock)' "$TMP/codex-env.err"
+  grep -q 'unknown NIGHTSHIFT_AGENT=unknown (expected claude, codex or mock)' "$TMP/unknown-env.err"
 
   cron_env="$(sed -n '1,/^# Make the tools nightshift invokes findable/p' "$ROOT/bin/nightshift-cron.sh")"
   cron_env+=$'\nprintf "%s" "${NIGHTSHIFT_AGENT:-<unset>}"'

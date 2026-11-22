@@ -3,6 +3,7 @@
 - Status: accepted
 - Date: 2026-08-02
 - 2026-11-19 — the Codex adapter and its `codex_model`/`codex_effort` keys were removed; `agent.review_model` (with `NIGHTSHIFT_REVIEW_MODEL`) joined `claude_model` under the same precedence ([ADR 0044](0044-claude-only-opus-works-a-review-model-reviews.md)).
+- 2026-11-22 — [ADR 0045](0045-the-host-rulebook-selects-the-agent.md) restored the Codex keys and added Claude effort.
 - Closes the question left open by [ADR 0019](0019-stage-context-excludes-operator-config.md):
   whether nightshift must now pin a model of its own.
 

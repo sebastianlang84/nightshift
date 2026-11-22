@@ -79,7 +79,7 @@ EOF
 echo "sandbox ready: $SB"
 echo "rulebook  -> $SB/rulebook.yaml (points at the sandbox; live rulebook untouched)"
 echo
-echo "run it isolated (mock or claude):"
+echo "run it isolated with the mock adapter:"
 echo "  NIGHTSHIFT_AGENT=mock RULEBOOK=$SB/rulebook.yaml \\"
 echo "    NIGHTSHIFT_STATE_DIR=$SB/state NIGHTSHIFT_RUNS_DIR=$SB/runs \\"
 echo "    NIGHTSHIFT_DIGEST_DIR=$SB/digests NIGHTSHIFT_WORKTREES=$SB/wt \\"

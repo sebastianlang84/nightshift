@@ -42,7 +42,7 @@ contains the agent confinement hooks.
 Read [hook-spec.md](docs/design/hook-spec.md) and the
 [threat model](docs/design/risk-analysis.md) before changing adapters or confinement hooks.
 
-Claude uses a tool guard; it is the only real adapter. The ship gate runs candidate code in
+Claude uses a tool guard. Codex uses its stage sandbox. The ship gate runs candidate code in
 bubblewrap with an allowlisted environment and no host home. Missing bubblewrap blocks shipping.
 `NIGHTSHIFT_TEST_SANDBOX=none` explicitly opts out of the gate sandbox. Preserve the fail-closed default.
 

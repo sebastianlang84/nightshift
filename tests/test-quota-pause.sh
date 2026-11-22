@@ -62,6 +62,20 @@ printf '# nightshift digest — 0001-01-01\n\n- **ABORTED: test**\n' > "$d/diges
 [ "$(streak 9999-12-31)" = "1 0001-01-01 0001-01-01 -" ] \
   || fail "a pause after an aborted night was read as a completed one: $(streak 9999-12-31)"
 
+# The quota hook sees the effective adapter even when only the rulebook selects it.
+ln -s "$ROOT/lib" "$TMP/launcher/lib"
+cat > "$TMP/codex.yaml" <<EOF
+agent:
+  primary: codex
+repos:
+  - path: $TMP/unused
+    mode: findings-only
+EOF
+launch codex RULEBOOK="$TMP/codex.yaml" NIGHTSHIFT_AGENT= \
+  NIGHTSHIFT_QUOTA_CMD='echo "$NIGHTSHIFT_AGENT window spent"; exit 75'
+grep -q 'PAUSED:.*codex window spent' "$TMP/codex/digests/$night.md" || fail "wrong quota window"
+[ ! -e "$TMP/codex/ran" ] || fail "a Codex quota pause started a night"
+
 # 2. go
 launch go NIGHTSHIFT_QUOTA_CMD='echo "Claude week 40% spent"' NIGHTSHIFT_NOTIFY_CMD="$notify" \
   || { cat "$TMP/go/out" >&2; fail "a go night failed"; }

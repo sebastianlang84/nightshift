@@ -66,9 +66,9 @@ The exceptions inside the root are `.claude/settings.json`, `.claude/settings.lo
 `.mcp.json`. These paths can supply startup configuration, so Fix may not create or edit them.
 A repository that intentionally changes those files needs human handling.
 
-The guard is one layer, and the Review stage and the branch advisors run Claude on whatever a
-worktree or a pushed branch holds. So the Runner enforces the same rule itself, for every adapter (`worktree_control_files_clean` in
-`bin/nightshift.sh`): right after Fix, at the `.git`-pointer choke point, a worktree in which any of the
+Codex Fix can write files that a later Claude stage would load. The Runner therefore checks
+Claude control files after every Fix and before branch advice. Right after Fix, `worktree_control_files_clean` in
+`bin/nightshift.sh` checks the worktree at the `.git`-pointer check. A worktree in which any of the
 three files — or `.claude` itself, which a symlink could replace — is changed, untracked or ignored is
 refused as `worktree-tampered` before Review runs. `advise_branches` asks the same of a pushed branch
 against its merge base (`branch_control_files_changed`) and rejects such a branch without checking it
@@ -125,10 +125,10 @@ both hold in unattended mode. Optional defense-in-depth remains: **GitHub branch
 ## Stage isolation — the operator's personal config is not stage context
 
 Decision and rationale: [ADR 0019](../adr/0019-stage-context-excludes-operator-config.md). This
-section is the mechanism; the agent adapters and stage-home helpers live in
+section is the mechanism; the agent adapters live in
 [`lib/adapters.sh`](../../lib/adapters.sh).
 
-A stage runs on the operator's machine but must **not** inherit the operator's personal Claude Code
+A stage runs on the operator's machine but must exclude the operator's personal CLI
 configuration. That config is chat-scoped and person-scoped (preferred reply language, private
 conventions, tripwire strings); a stage's output is repo-scoped and permanent — `bin/nightshift.sh`
 commits the Fix worknote **verbatim** as the commit body and pushes it. Observed on a supervised
@@ -174,6 +174,21 @@ context loading at all.
 `tests/test-claude-context-isolation.sh` covers source overrides, reserved flags, strict MCP
 configuration, and the memory environment variable. `tests/test-claude-control-files.sh` covers
 malformed source selections at startup, after Fix, and before branch advice.
+
+### Codex stage isolation
+
+The Runner invokes `codex exec` with `--ephemeral --ignore-user-config --ignore-rules
+--strict-config` and approval policy `never`. Each invocation gets a fresh private directory
+under its item directory as both `HOME` and `CODEX_HOME`. Its XDG configuration, data, cache
+and state directories point inside that home. The only operator file linked into it is
+`auth.json`, when present. The target repository's instructions remain available.
+A failure to prepare the home refuses the stage. The Runner removes the home after the call.
+
+Recon, Explore, Review, Advise and Verify use `--sandbox read-only`. Fix uses
+`--sandbox workspace-write` with command network access disabled and the shared temporary
+directories excluded from writable roots. The Runner injects the Git pre-push hook through
+the environment. Codex relies on its OS sandbox for command confinement. The ship gate still
+runs separately in bubblewrap. See [R15](risk-analysis.md#r15) for the Fix shell's read access.
 
 ## Out of scope for §2a — narrowed by capability profiles
 

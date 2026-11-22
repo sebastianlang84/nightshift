@@ -4,7 +4,7 @@
 # things an unattended run needs that an interactive one gets for free:
 #   1. a single-instance flock — a long run must NEVER overlap the next night's;
 #   2. an explicit PATH — systemd user services start with a minimal env, but
-#      nightshift shells out to claude/gh which may live under ~/.local/bin;
+#      nightshift shells out to claude/codex/gh which may live under ~/.local/bin;
 #   3. a timestamped log file (everything also still goes to journald);
 #   4. optionally, a quota check before the night starts (NIGHTSHIFT_QUOTA_CMD) and one line to the
 #      operator when it pauses the night (NIGHTSHIFT_NOTIFY_CMD) — ADR 0044.
@@ -31,13 +31,13 @@ if [ -z "${NIGHTSHIFT_AGENT:-}" ]; then
     _primary="${RB[agent.primary]}"
   fi
   [ -n "$_primary" ] || export NIGHTSHIFT_AGENT=claude
-  unset _rb _primary
+  unset _rb
 fi
 # Make the tools nightshift invokes findable under systemd's minimal PATH.
 # System dirs come FIRST so a binary planted under ~/.local/bin (which a write
 # primitive could reach) cannot shadow the Runner's unqualified jq/git/gh/
 # python3 calls — see docs/design/risk-analysis.md R10/N4. Agent tools
-# that live only under ~/.local/bin (claude/gh) are still resolved there.
+# that live only under ~/.local/bin (claude/codex/gh) are still resolved there.
 export PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:${PATH:-}"
 
 # The repos' ship gates (ADR 0022) run the repo's OWN suite, so they need the developer toolchain —
@@ -126,7 +126,7 @@ notify_operator() { # line
     || echo "[nightshift-cron] notify command failed (rc=$?) — the operator was not told" | tee -a "$LOG"
 }
 
-# The operator's rule for unattended runs: a (nearly) spent Claude week pauses the night and says so
+# The operator's rule for unattended runs: a (nearly) spent quota window pauses the night and says so
 # in one line; it never switches models (ADR 0044). NIGHTSHIFT_QUOTA_CMD is the host's check, run
 # once before the night: exit 75 (EX_TEMPFAIL) = pause, with the first line of its stdout as the
 # reason; any other exit = go. Pause is a positive signal so a check that crashes, cannot run or times
@@ -134,7 +134,7 @@ notify_operator() { # line
 # a failure — exit 0, and its digest entry is `PAUSED`, never `ABORTED`.
 if [ -n "${NIGHTSHIFT_QUOTA_CMD:-}" ]; then
   quota_rc=0
-  quota_out="$(timeout -k 5 "${NIGHTSHIFT_QUOTA_TIMEOUT:-60}" sh -c "$NIGHTSHIFT_QUOTA_CMD" </dev/null 2>>"$LOG")" \
+  quota_out="$(NIGHTSHIFT_AGENT="${NIGHTSHIFT_AGENT:-$_primary}" timeout -k 5 "${NIGHTSHIFT_QUOTA_TIMEOUT:-60}" sh -c "$NIGHTSHIFT_QUOTA_CMD" </dev/null 2>>"$LOG")" \
     || quota_rc=$?
   quota_why="$(printf '%s\n' "$quota_out" | head -n 1 | tr -d '\r' | cut -c1-300)"
   case "$quota_rc" in

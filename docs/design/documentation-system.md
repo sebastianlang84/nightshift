@@ -74,7 +74,7 @@ not report it (mock agent, older CLI output shapes) — telemetry can never fail
 | field | meaning |
 |-------|---------|
 | `night` · `item` · `stage` · `start` · `duration_s` · `exit` | which invocation this was, and how it ended |
-| `model` | the **adapter** name: `claude` \| `mock` (rows written before ADR 0044 may name a removed adapter). Stable identifier — harvest/digest code reads it |
+| `model` | the **adapter** name: `claude` \| `codex` \| `mock`. Stable identifier — harvest/digest code reads it |
 | `model_id` | the model that **actually served** the stage, as reported by the CLI: `claude-opus-5`, `claude-opus-4-8[1m]`, … — never the requested model |
 | `tokens` | **output** tokens (name kept for backwards compatibility) |
 | `input_tokens` · `cache_read_tokens` · `cache_creation_tokens` | input-side counters, i.e. how much context the stage consumed |
@@ -90,6 +90,9 @@ Where the numbers come from, and how to read them:
   always describe one model. Note the casing asymmetry the CLI emits: `usage.*` is snake_case,
   `modelUsage.<id>.*` is camelCase. Token counters come from `usage.*`, where `input_tokens`
   **excludes** cache reads.
+- **codex** — the JSON event stream reports cumulative usage on `turn.completed` (older versions use
+  `token_count`). Input tokens include cached input. The adapter records a model ID when reported
+  and leaves cost, context window and cache creation counts null.
 - **Context-window sizing (200k vs `[1m]`).** `context_window` answers this directly: it is the
   window the model ran with, recorded as a fact, so no inference from token sums is needed. The
   token counters cannot answer it on their own — they are *cumulative per stage over every request

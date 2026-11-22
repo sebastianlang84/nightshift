@@ -5,7 +5,7 @@
 # captured stderr, plus the CLI's own verdict inside raw stdout (the claude CLI reports the failure
 # as a JSON result object there). Deliberately broad, because a false negative costs a forged clean
 # fleet.
-AGENT_AUTH_RE='not logged in|/login|authentication_failed|invalid api key|unauthorized|oauth token|credentials? (not found|expired|invalid)'
+AGENT_AUTH_RE='not logged in|/login|authentication_failed|invalid api key|unauthorized|oauth token|credentials? (not found|expired|invalid)|codex login'
 
 # The signatures are PROSE, and prose matched against a stage's whole raw stdout matches the prose
 # of the repo under review. On 2026-08-24 an explore lens read bin/nightshift.sh — including a
@@ -38,6 +38,12 @@ agent_diagnosis() { # raw_file -> what the CLI said about the run, on stdout
           "$f" 2>/dev/null
         return 0 ;;
     esac
+  fi
+  if [ "${NIGHTSHIFT_AGENT:-}" = codex ]; then
+    # item events contain the repository's text. Only error events speak for the CLI.
+    jq -sr '.[] | select(type == "object") |
+      select(.type == "error" or .type == "turn.failed") |
+      (.error.message? // .message? // empty)' "$f" 2>/dev/null && return 0
   fi
   cat "$f"
 }
@@ -257,23 +263,29 @@ materialize_stage_output() { # stage item_dir
   return $rc
 }
 
-# The model a stage requests, "" = pass no --model and let the CLI resolve its own default. The work
-# stages use the night's model: NIGHTSHIFT_CLAUDE_MODEL if SET (an explicitly empty value is the
-# escape hatch — no --model), else the rulebook's `agent.claude_model` (ADR 0020), else nothing. The
-# rulebook layer matters because stage isolation (ADR 0019) drops the CLI's `user` settings scope,
-# so a pin in ~/.claude/settings.json cannot reach a stage; the host declares the model in its own
-# governance file instead. nightshift still commits no model of its own — rulebook.yaml is
-# host-owned and untracked.
-# The judging stages — Review and the branch advice — use the review model instead when one resolves
-# (ADR 0044): NIGHTSHIFT_REVIEW_MODEL if SET, else `agent.review_model`. An explicitly empty
-# NIGHTSHIFT_REVIEW_MODEL switches the review model off for the run, so those stages fall back to the
-# night's model like every other stage.
-stage_model() { # stage -> model id or ""
-  local review="${NIGHTSHIFT_REVIEW_MODEL-${RB_REVIEW_MODEL:-}}"
+# The review override belongs to the primary adapter. An advisor from the other
+# vendor uses its own work model. advise_branches keeps night_agent across its
+# temporary rebinding of NIGHTSHIFT_AGENT for each advisor.
+stage_model() { # stage [adapter]
+  local adapter="${2:-$NIGHTSHIFT_AGENT}" review="${NIGHTSHIFT_REVIEW_MODEL-${RB_REVIEW_MODEL:-}}"
   case "$1" in
-    review|advise) [ -z "$review" ] || { printf '%s' "$review"; return 0; } ;;
+    review|advise)
+      if [ "$adapter" = "${night_agent:-${NIGHTSHIFT_AGENT:-$adapter}}" ] && [ -n "$review" ]; then
+        printf '%s' "$review"
+        return 0
+      fi ;;
   esac
-  printf '%s' "${NIGHTSHIFT_CLAUDE_MODEL-${RB_CLAUDE_MODEL:-}}"
+  case "$adapter" in
+    claude) printf '%s' "${NIGHTSHIFT_CLAUDE_MODEL-${RB_CLAUDE_MODEL:-}}" ;;
+    codex)  printf '%s' "${NIGHTSHIFT_CODEX_MODEL-${RB_CODEX_MODEL:-}}" ;;
+  esac
+}
+
+stage_effort() { # adapter
+  case "$1" in
+    claude) printf '%s' "${NIGHTSHIFT_CLAUDE_EFFORT-${RB_CLAUDE_EFFORT:-}}" ;;
+    codex)  printf '%s' "${NIGHTSHIFT_CODEX_REASONING_EFFORT-${RB_CODEX_EFFORT:-}}" ;;
+  esac
 }
 
 # ---- claude adapter (first-party CLI headless, ADR 0003) ----
@@ -318,8 +330,11 @@ claude_run() { # stage workdir item_dir
   fi
   # Which model this stage runs on (stage_model above; ADR 0020, ADR 0044).
   local -a model_arg=()
-  model="$(stage_model "$stage")"
+  model="$(stage_model "$stage" claude)"
   [ -z "$model" ] || model_arg=(--model "$model")
+  local effort
+  effort="$(stage_effort claude)"
+  [ -z "$effort" ] || model_arg+=(--effort "$effort")
   # The default local scope skips personal settings and project hooks while keeping the repo's
   # CLAUDE.md. The Runner's --settings still loads its guard (docs/design/hook-spec.md).
   local -a sources_arg=()
@@ -394,6 +409,74 @@ claude_run() { # stage workdir item_dir
   materialize_stage_output "$stage" "$id" || parse_rc=$?
   # Preserve the CLI's own nonzero status, but only AFTER materializing any valid partial result it
   # returned. main() can then keep a grounded finding while still logging that Explore hit a limit.
+  [ "$rc" -eq 0 ] || return "$rc"
+  return "$parse_rc"
+}
+
+# ---- codex adapter (first-party CLI headless, ADR 0045) ----
+codex_run() { # stage workdir item_dir
+  local stage="$1" wd="$2" id="$3" prompt sandbox events model effort rc=0 parse_rc=0
+  id="$(realpath -e -- "$id")" || return 2
+  local -a args=(--ask-for-approval never exec --ephemeral --ignore-user-config --ignore-rules
+    --strict-config --json -o "$id/$stage.out")
+  prompt="$(stage_prompt "$stage" "$wd" "$id")"
+  case "$stage" in
+    fix) sandbox=workspace-write ;;
+    *)   sandbox=read-only ;;
+  esac
+  args+=(--sandbox "$sandbox")
+  [ "$stage" != fix ] || args+=(-c 'sandbox_workspace_write.network_access=false'
+    -c 'sandbox_workspace_write.exclude_slash_tmp=true' -c 'sandbox_workspace_write.exclude_tmpdir_env_var=true')
+  # Same precedence as the claude half: env if SET (empty = pass no --model), else the rulebook's
+  # `agent.codex_model` (ADR 0020), else the CLI default.
+  model="$(stage_model "$stage" codex)"
+  [ -z "$model" ] || args+=(--model "$model")
+  # Effort resolves the same way: env if SET (empty = pass none), else `agent.codex_effort`, else
+  # the CLI default.
+  effort="$(stage_effort codex)"
+  [ -z "$effort" ] || args+=(-c "model_reasoning_effort=\"$effort\"")
+  # The CLI loads global instructions from CODEX_HOME and user skills from HOME.
+  # Start each stage with fresh directories and carry over only file-based auth.
+  local auth home
+  auth="$(realpath -m -- "${CODEX_HOME:-$HOME/.codex}/auth.json")" || return 2
+  home="$(mktemp -d -- "$id/.codex-home.XXXXXXXX")" || return 2
+  events="$id/.raw_$stage"
+  (
+    trap 'rm -rf -- "$home"' EXIT
+    [ ! -f "$auth" ] || ln -s -- "$auth" "$home/auth.json" || exit 2
+    cd "$wd" || exit 2
+    HOME="$home" CODEX_HOME="$home" XDG_CONFIG_HOME="$home/.config" \
+      XDG_DATA_HOME="$home/.local/share" XDG_STATE_HOME="$home/.local/state" XDG_CACHE_HOME="$home/.cache" \
+      GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="$HOOKS_DIR" \
+      codex "${args[@]}" - < <(printf '%s' "$prompt")
+  ) > "$events" 2>"$id/$stage.err" || rc=$?
+  # Telemetry sidecar for run_agent — same object contract as the claude adapter. Codex's event
+  # stream is no more stable than claude's JSON: a payload sits either at the top level of an event
+  # or wrapped in `.msg`, so consider both for every event. Usage rides on `turn.completed` (with
+  # `token_count`/`total_token_usage` as the older shape) and is cumulative, hence `last`. The model
+  # ID is announced once by a session/thread event. Codex's `input_tokens` INCLUDES
+  # `cached_input_tokens`, unlike claude's, and codex reports neither cost nor the context window it
+  # ran with — those degrade to null rather than being inferred. See documentation-system.md.
+  jq -sc '
+    def evs: [.[] | select(type == "object") | ., (.msg | select(type == "object"))];
+    def usage: [ evs[]
+                 | (select(.type == "turn.completed") | .usage)
+                 , (select(.type == "token_count")   | .info.total_token_usage)
+                 | select(type == "object") ] | last // {};
+    def modelid: [ evs[]
+                   | (try (.model, .session.model, .thread.model, .turn.model) catch empty)
+                   | select(type == "string" and . != "") ] | last // null;
+    usage as $u |
+    { model_id: modelid,
+      output_tokens:         ($u.output_tokens // null),
+      input_tokens:          ($u.input_tokens // null),
+      cache_read_tokens:     ($u.cached_input_tokens // $u.cache_read_input_tokens // null),
+      cache_creation_tokens: null,
+      context_window:        null,
+      cost_usd:              null,
+      model_cost_usd:        null }' \
+    "$events" > "$id/.usage_$stage" 2>/dev/null || true
+  materialize_stage_output "$stage" "$id" || parse_rc=$?
   [ "$rc" -eq 0 ] || return "$rc"
   return "$parse_rc"
 }

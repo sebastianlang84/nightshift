@@ -29,7 +29,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # The launcher searches /usr/local/bin first. Give that exact path private command
 # names so updates to the host's provider files or bin symlink cannot redirect them.
-for provider in claude; do
+for provider in claude codex; do
   stub="$TMP/bin/$provider"
   cat > "$stub" <<'EOF'
 #!/bin/sh
@@ -61,7 +61,7 @@ from pathlib import Path
 
 original, alias, shadow = map(Path, sys.argv[1:])
 for entry in original.iterdir():
-    if entry.name not in {"claude", "systemctl"}:
+    if entry.name not in {"claude", "codex", "systemctl"}:
         # Resolve relative symlinks in the original directory before relocating commands.
         target = Path(os.path.realpath(entry))
         if target.is_relative_to(original):
@@ -70,7 +70,7 @@ for entry in original.iterdir():
 PY
   isolated+=(--ro-bind "$original" "$alias")
 fi
-cp -- "$TMP/bin/"{claude,systemctl} "$shadow/"
+cp -- "$TMP/bin/"{claude,codex,systemctl} "$shadow/"
 isolated+=(--ro-bind "$shadow" /usr/local/bin --)
 
 # The dry-run mktemps its sandbox under TMPDIR; pointing that at the test dir keeps the whole thing
@@ -102,7 +102,7 @@ run_dry_run() {
 
   [ ! -e "$attempts" ] || { cat "$attempts" >&2; fail "$mode: dry-run attempted a production provider route"; }
   # Check route selection even if a CLI lookup fails or there are no branches to advise on.
-  if grep -E '^\[nightshift\] (agent=claude |claude (review )?model: |branch advisors: )' "$out" >&2; then
+  if grep -E '^\[nightshift\] (agent=(claude|codex) |(claude|codex) (review )?model: |branch advisors: )' "$out" >&2; then
     fail "$mode: dry-run selected a production provider route"
   fi
   [ "$rc" -eq 0 ] || { tail -40 "$out" >&2; fail "$mode: dry-run exited $rc"; }
@@ -129,7 +129,7 @@ run_dry_run() {
 
 # The production quota check and notify command must not run either: a smoke test never pauses a
 # night or messages the operator.
-run_dry_run modern NIGHTSHIFT_ADVISORS=claude NIGHTSHIFT_REVIEW_MODEL=review-model \
+run_dry_run modern NIGHTSHIFT_ADVISORS=codex,claude NIGHTSHIFT_REVIEW_MODEL=review-model \
   NIGHTSHIFT_QUOTA_CMD='printf "quota check\n" >> "$PROVIDER_ATTEMPTS"; exit 1' \
   NIGHTSHIFT_NOTIFY_CMD='printf "notify\n" >> "$PROVIDER_ATTEMPTS"'
 

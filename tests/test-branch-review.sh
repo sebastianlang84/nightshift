@@ -149,8 +149,8 @@ printf '%s' "$out" | grep -qF '| **?** | **fix (1 advisor missing)** |' || fail 
   source "$ROOT/bin/nightshift.sh"
   NIGHTSHIFT_ADVISORS=' claude , mock'; resolve_advisors && [ "${ADVISORS[*]}" = "claude mock" ] || exit 1
   NIGHTSHIFT_ADVISORS='mock,mock'; resolve_advisors && [ "${#ADVISORS[@]}" -eq 2 ] || exit 1
-  # `codex` is a removed adapter (ADR 0044) and refused like any other unknown name.
-  for bad in 'claude,claude' 'claude,,mock' 'claude,' ' , ' $'claude,\nmock' 'codex' 'claude,codex'; do
+  NIGHTSHIFT_ADVISORS='codex,claude'; resolve_advisors && [ "${ADVISORS[*]}" = 'codex claude' ] || exit 1
+  for bad in 'claude,claude' 'claude,,mock' 'claude,' ' , ' $'claude,\nmock' 'codex,codex' 'claude,unknown'; do
     NIGHTSHIFT_ADVISORS="$bad"; ! resolve_advisors 2>/dev/null || { echo "accepted '$bad'" >&2; exit 1; }
   done ) || fail "resolve_advisors normalisation wrong"
 
@@ -170,9 +170,9 @@ reject_adv() { # value expected-error
 }
 reject_adv claude,gemini "agent.advisors: unknown adapter 'gemini'"
 reject_adv claude,claude "agent.advisors: an adapter is listed twice"
-reject_adv claude,codex "agent.advisors: unknown adapter 'codex'"
-printf 'agent:\n  advisors: claude, mock\nrepos:\n  - path: /srv/x\n    mode: findings-only\n' > "$TMP/ok.yaml"
-python3 "$ROOT/lib/parse_rulebook.py" "$TMP/ok.yaml" | jq -e '.agent.advisors == ["claude", "mock"]' >/dev/null || fail "advisors: claude, mock not normalised"
+reject_adv codex,codex "agent.advisors: an adapter is listed twice"
+printf 'agent:\n  advisors: claude, codex, mock\nrepos:\n  - path: /srv/x\n    mode: findings-only\n' > "$TMP/ok.yaml"
+python3 "$ROOT/lib/parse_rulebook.py" "$TMP/ok.yaml" | jq -e '.agent.advisors == ["claude", "codex", "mock"]' >/dev/null || fail "advisors: claude, codex, mock not normalised"
 # An env typo is refused before the night spends anything.
 run 5 NIGHTSHIFT_ADVISORS=mock,gemini && fail "NIGHTSHIFT_ADVISORS=mock,gemini was accepted"
 grep -q "invalid branch advisor 'gemini'" "$TMP/err.5" || fail "env advisor typo not reported" "$TMP/err.5"

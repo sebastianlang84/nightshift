@@ -5,9 +5,9 @@ unset GIT_CONFIG_COUNT  # a Fix stage exports the pre-push confinement hook this
 # The rulebook's `agent:` block declares which model a stage runs on (ADR 0020). It exists because
 # stage isolation (ADR 0019) drops the CLI's `user` settings scope, so a machine-wide pin in
 # ~/.claude/settings.json can no longer reach a stage — the host declares the model in its own
-# governance file instead. Precedence under test: NIGHTSHIFT_CLAUDE_MODEL if SET (an explicitly EMPTY
+# governance file instead. Precedence under test: NIGHTSHIFT_*_MODEL if SET (an explicitly EMPTY
 # value is the escape hatch and must beat the rulebook) > rulebook > nothing at all.
-# A stub `claude` on PATH records its own argv, NUL-separated so no flag value can be mistaken for
+# The stub CLIs on PATH record their argv, NUL-separated so no flag value can be mistaken for
 # a separate argument.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -24,14 +24,27 @@ printf '%s\0' "$@" > "$NIGHTSHIFT_TEST_ARGV"
 jq -nc '{type:"result",result:"{}",usage:{output_tokens:1},total_cost_usd:0.01}'
 EOF
 chmod +x "$TMP/bin/claude"
-export PATH="$TMP/bin:$PATH"
+cat > "$TMP/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\0' "$@" > "$NIGHTSHIFT_TEST_ARGV"
+out=""; prev=""
+for a in "$@"; do [ "$prev" = -o ] && out="$a"; prev="$a"; done
+[ -z "$out" ] || printf '%s' '{}' > "$out"
+cat >/dev/null
+printf '%s\n' '{"type":"turn.completed","usage":{"output_tokens":1}}'
+EOF
+chmod +x "$TMP/bin/codex"
+export PATH="$TMP/bin:$PATH" CODEX_HOME="$TMP/operator-codex"
 
-# A rulebook that declares both models (the review model's routing is in test-review-model.sh). `repos:` must stay valid — load_rulebook fails
+# Review routing is covered in test-review-model.sh. `repos:` must stay valid — load_rulebook fails
 # closed on a parse error, which would make every assertion below meaningless.
 cat > "$TMP/rulebook.yaml" <<EOF
 branch_prefix: nightshift/
 agent:
   claude_model: rulebook-claude-model
+  claude_effort: medium
+  codex_model: rulebook-codex-model
   review_model: rulebook-review-model
 limits:
   max_open_branches: 1
@@ -47,6 +60,7 @@ EOF
 export NIGHTSHIFT_STATE_DIR="$TMP/state" NIGHTSHIFT_RUNS_DIR="$TMP/runs" \
        NIGHTSHIFT_DIGEST_DIR="$TMP/digests" NIGHTSHIFT_WORKTREES="$TMP/worktrees"
 export RULEBOOK="$TMP/rulebook.yaml"
+unset NIGHTSHIFT_CLAUDE_EFFORT
 # shellcheck disable=SC1090
 NIGHTSHIFT_SOURCED=1 source "$ROOT/bin/nightshift.sh"
 load_rulebook
@@ -108,6 +122,10 @@ check_precedence() { # adapter_fn env_var rulebook_var rulebook_value
 }
 
 check_precedence claude_run NIGHTSHIFT_CLAUDE_MODEL RB_CLAUDE_MODEL rulebook-claude-model
+i="$(index_of --effort)"
+[ -n "$i" ] && [ "${ARGV[i+1]}" = medium ] || fail "Claude effort did not reach the CLI"
+
+check_precedence codex_run NIGHTSHIFT_CODEX_MODEL RB_CODEX_MODEL rulebook-codex-model
 
 # (f) the SELECTION is announced, never silent — a host that lost its pin must see it. What the run
 # can announce is the model it requests and where that came from; which model actually served the

@@ -1,8 +1,7 @@
 # Prototype — how to run it
 
 - Status: **runnable prototype, 2026-07-11.** Proves the v2 mechanics end-to-end with zero risk to
-  real repos. Adapter paths are `mock` (deterministic) and `claude`, which invokes its
-  first-party CLI headlessly.
+  real repos. The deterministic adapter is `mock`. The real adapters invoke `claude -p` or `codex exec`.
 
 ## Run it
 
@@ -78,9 +77,10 @@ Stages are invoked through `run_agent(stage, workdir, item_dir)`, which dispatch
   no model is committed as the default. The PreToolUse guard is wired through the generated settings
   and confines Fix-stage `Write`/`Edit` paths to the worktree. Still to harden: sub-agents for
   Explore (context control, §3b) and non-sandbox permission mode.
+- `NIGHTSHIFT_AGENT=codex` runs Fix with workspace writes and command networking disabled. All other stages run read-only.
+
 The Review stage and the branch advice can run on a separate model — `agent.review_model` in the
-rulebook, `NIGHTSHIFT_REVIEW_MODEL` as the env override (ADR 0044). Omitted, they run on the night's
-`claude_model`.
+rulebook, `NIGHTSHIFT_REVIEW_MODEL` as the env override (ADR 0044). Omitted, each adapter uses its work model. The review override applies only to the primary adapter.
 
 **Verification debt — real-model prompt behavior (partly closed).** The Runner logic (recon
 caching, yield-weighted dimension selection, the empty-scope ledger row and its digest suggestions

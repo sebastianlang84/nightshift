@@ -4,7 +4,7 @@
 # Outer loop: select a repo -> Explore -> Fix<->Review (capped) -> Finalize
 # (push a nightshift/* branch) -> record. Enforces the nightly branch cap and the
 # global open-branch backpressure. The agent invocation sits behind run_agent()
-# (ADR 0001 adapter seam): NIGHTSHIFT_AGENT=mock | claude. The Review stage and the branch advice
+# (ADR 0001 adapter seam): NIGHTSHIFT_AGENT=mock | claude | codex. The Review stage and the branch advice
 # may run on a separate review model (ADR 0044) — see stage_model() in lib/adapters.sh.
 set -euo pipefail
 
@@ -112,7 +112,7 @@ source "$NIGHTSHIFT_HOME/lib/commit_identity.sh"
 source "$NIGHTSHIFT_HOME/lib/rulebook.sh"
 # Rulebook-declared models (ADR 0020, ADR 0044); empty = the rulebook declares none. Kept separate
 # from the NIGHTSHIFT_*_MODEL env vars so the precedence env > rulebook > CLI default stays legible.
-RB_CLAUDE_MODEL="" RB_REVIEW_MODEL="" RB_MAX_VERIFY=""
+RB_CLAUDE_MODEL="" RB_CLAUDE_EFFORT="" RB_CODEX_MODEL="" RB_CODEX_EFFORT="" RB_REVIEW_MODEL="" RB_MAX_VERIFY=""
 # Which adapters advise on every open branch each night (ADR 0038), comma-separated; empty = none.
 RB_ADVISORS=""
 # The night's own adapter as declared by the rulebook.
@@ -161,6 +161,9 @@ load_rulebook() {
   RECON_ENABLED="${RB[recon.enabled]}"
   RECON_TTL_DAYS="${RB[recon.ttl_days]}"
   RB_CLAUDE_MODEL="${RB[agent.claude_model]}"
+  RB_CLAUDE_EFFORT="${RB[agent.claude_effort]}"
+  RB_CODEX_MODEL="${RB[agent.codex_model]}"
+  RB_CODEX_EFFORT="${RB[agent.codex_effort]}"
   RB_REVIEW_MODEL="${RB[agent.review_model]}"
   RB_PRIMARY_AGENT="${RB[agent.primary]}"
   rb_list list agent.advisors
@@ -215,7 +218,7 @@ load_rulebook() {
 }
 
 # --------------------------------------------------------------- telemetry ----
-# `model` is the ADAPTER name (claude|mock) and stays that way — harvest/digest code may read
+# `model` is the ADAPTER name (claude|codex|mock) and stays that way — harvest/digest code may read
 # it. The model that ACTUALLY served the stage is the separate `model_id` field ("claude-opus-5",
 # "claude-opus-4-8[1m]", …), self-reported by the CLI; null whenever the CLI reports
 # none (mock, older CLI shapes). `tokens` remains OUTPUT tokens for backwards compatibility; the
@@ -514,8 +517,9 @@ run_agent() { # stage workdir item_dir [attempt]
   start=$(date +%s)
   case "$NIGHTSHIFT_AGENT" in
     mock)   "mock_$stage" "$workdir" "$item_dir" || status=$? ;;
+    codex)  codex_run "$stage" "$workdir" "$item_dir" || status=$? ;;
     claude) claude_run "$stage" "$workdir" "$item_dir" || status=$? ;;
-    *) log "unknown NIGHTSHIFT_AGENT=$NIGHTSHIFT_AGENT (expected mock or claude)"; status=2 ;;
+    *) log "unknown NIGHTSHIFT_AGENT=$NIGHTSHIFT_AGENT (expected claude, codex or mock)"; status=2 ;;
   esac
   # Before anything else looks at the worktree — including the failure paths below and the ship
   # gate — so a note survives a stage that failed, which is when it is most likely to exist. The
@@ -1874,7 +1878,7 @@ verify_findings() {
 # NEVER merges or pushes (read-only tool profile + git-confinement hold). The advisors are
 # NIGHTSHIFT_ADVISORS if set (explicitly EMPTY switches the rulebook's list off for one run), else
 # the rulebook's agent.advisors, else the pre-0038 opt-in NIGHTSHIFT_BRANCH_REVIEW=1 on the night's
-# adapter. "" = no branch review. With `claude` the only real adapter (ADR 0044) there is at most one real advisor; `mock` slots stay repeatable.
+# adapter. "" = no branch review. Each real adapter can advise once. Mock slots are repeatable.
 advisor_list() {
   local l="${NIGHTSHIFT_ADVISORS-${RB_ADVISORS:-}}"
   if [ -z "$l" ] && [ -z "${NIGHTSHIFT_ADVISORS+set}" ] && [ "${NIGHTSHIFT_BRANCH_REVIEW:-0}" = 1 ]; then
@@ -1897,9 +1901,9 @@ resolve_advisors() {
   for a in "${parts[@]}"; do
     a="${a#"${a%%[![:space:]]*}"}"; a="${a%"${a##*[![:space:]]}"}"
     case "$a" in
-      claude|mock) ;;
+      claude|codex|mock) ;;
       "") log "invalid branch advisors '$raw': empty entry"; return 1 ;;
-      *)  log "invalid branch advisor '$a' (expected claude or mock)"; return 1 ;;
+      *)  log "invalid branch advisor '$a' (expected claude, codex or mock)"; return 1 ;;
     esac
     if [ "$a" != mock ] && [[ "$seen" == *",$a,"* ]]; then
       log "invalid branch advisors '$raw': '$a' is listed twice"; return 1
@@ -1909,17 +1913,17 @@ resolve_advisors() {
 }
 
 # The model an advise stage on that adapter will request — part of the cache key, so a model change
-# re-reviews every branch. Claude advises on the review model (stage_model). The mock has no model;
+# re-reviews every branch. The primary adapter can advise on its review model. The mock has no model;
 # each slot stands in for a distinct one.
 advisor_model() { # adapter slot
   case "$1" in
-    claude) stage_model advise ;;
+    claude|codex) stage_model advise "$1" ;;
     *)      printf '%s-%s' "$1" "$2" ;;
   esac
 }
 
 advisor_label() { # adapter -> digest column header
-  case "$1" in claude) printf 'Claude' ;; *) printf '%s' "$1" ;; esac
+  case "$1" in claude) printf 'Claude' ;; codex) printf 'Codex' ;; *) printf '%s' "$1" ;; esac
 }
 
 # An answer is a verdict only if it names one of the three; anything else — no file, prose, a
@@ -1944,6 +1948,7 @@ advise_branches() {
   local -a advisors=("${ADVISORS[@]}")
   # Dynamic-scope override: run_agent reads the global NIGHTSHIFT_AGENT; a local here rebinds it per
   # advisor without disturbing the night's own adapter.
+  local night_agent="$NIGHTSHIFT_AGENT"
   local NIGHTSHIFT_AGENT="$NIGHTSHIFT_AGENT" ADVISE_SLOT=1 NIGHTSHIFT_ADVISE_BASE=""
   # Dead adapters are tracked per adapter (ADR 0038 §1), not in run_agent's night-wide slot: that
   # slot keeps only the FIRST death, so a second dead advisor went unrecorded and was called again on
@@ -1953,7 +1958,7 @@ advise_branches() {
   local -A dead=()
   [ -z "$AGENT_FATAL" ] || [ -z "$AGENT_FATAL_AGENT" ] || dead[$AGENT_FATAL_AGENT]="$AGENT_FATAL"
   local AGENT_FATAL="" AGENT_FATAL_AGENT=""
-  local i k path base base_sha branches ref name tip stem finding id wt adapter key cache ans
+  local i k path base base_sha branches ref name tip stem finding id wt adapter effort key cache ans
   local rec reason rf what benefit cells fixes n_missing n_merge n_reject combined head sep ctl rows=""
   mkdir -p "$ADVICE_CACHE_DIR"
   # Retention: an entry older than 90 days only costs one re-review if its branch is still open.
@@ -1988,9 +1993,10 @@ advise_branches() {
       fi
       for k in "${!advisors[@]}"; do
         adapter="${advisors[$k]}"; ADVISE_SLOT=$((k + 1))
-        # Cache key (ADR 0038): repo + branch tip + base + adapter + model. Any of them moving is a
-        # different question, so an unchanged branch is not re-reviewed every night.
-        key=$(printf '%s\n' "$path" "$tip" "$base_sha" "$adapter" "$(advisor_model "$adapter" "$ADVISE_SLOT")" | sha256sum | cut -c1-32)
+        # Include effort when configured. Old entries for the CLI default keep the same key.
+        effort="$(stage_effort "$adapter")"
+        key=$(printf '%s\n' "$path" "$tip" "$base_sha" "$adapter" \
+          "$(advisor_model "$adapter" "$ADVISE_SLOT")" ${effort:+"$effort"} | sha256sum | cut -c1-32)
         cache="$ADVICE_CACHE_DIR/$key.json"
         id="$stem-$ADVISE_SLOT-$adapter"; mkdir -p "$id"; ans="$id/advice.json"
         if valid_advice "$cache"; then
@@ -2136,8 +2142,8 @@ main() {
   # unrecognised value there (a removed adapter, say) would fail EVERY stage one at a time instead
   # of saying so once, before the night spends anything.
   case "$NIGHTSHIFT_AGENT" in
-    claude|mock) ;;
-    *) log "unknown NIGHTSHIFT_AGENT=$NIGHTSHIFT_AGENT (expected claude or mock)"
+    claude|codex|mock) ;;
+    *) log "unknown NIGHTSHIFT_AGENT=$NIGHTSHIFT_AGENT (expected claude, codex or mock)"
        return 2 ;;
   esac
   # The same for NIGHTSHIFT_ADVISORS: the rulebook list is parser-validated,
@@ -2159,14 +2165,24 @@ main() {
   # (ADR 0044). The reviewer's model is a governance fact the morning needs stated, not inferred from
   # runs.jsonl.
   log "agent=$NIGHTSHIFT_AGENT prefix=$BRANCH_PREFIX · cap: max $MAX_OPEN undecided ${BRANCH_PREFIX} branches · run ceiling $MAX_RUN_BRANCHES · fix iters $MAX_FIX_ITER"
-  local adv uses_claude=0
-  [ "$NIGHTSHIFT_AGENT" = claude ] && uses_claude=1
-  for adv in ${ADVISORS[@]+"${ADVISORS[@]}"}; do [ "$adv" != claude ] || uses_claude=1; done
-  if [ "$uses_claude" = 1 ]; then
-    log_model_selection claude NIGHTSHIFT_CLAUDE_MODEL "$RB_CLAUDE_MODEL" claude_model
-    log_model_selection "claude review" NIGHTSHIFT_REVIEW_MODEL "$RB_REVIEW_MODEL" review_model \
-      "Review and branch advice use the claude model"
-  fi
+  local adapter effort
+  for adapter in claude codex; do
+    if [ "$adapter" != "$NIGHTSHIFT_AGENT" ] && ! [[ " ${ADVISORS[*]} " == *" $adapter "* ]]; then
+      continue
+    fi
+    case "$adapter" in
+      claude)
+        log_model_selection claude NIGHTSHIFT_CLAUDE_MODEL "$RB_CLAUDE_MODEL" claude_model ;;
+      codex)
+        log_model_selection codex NIGHTSHIFT_CODEX_MODEL "$RB_CODEX_MODEL" codex_model ;;
+    esac
+    effort="$(stage_effort "$adapter")"
+    log "$adapter effort: ${effort:-CLI default}"
+    if [ "$adapter" = "$NIGHTSHIFT_AGENT" ]; then
+      log_model_selection "$adapter review" NIGHTSHIFT_REVIEW_MODEL "$RB_REVIEW_MODEL" review_model \
+        "Review and branch advice use the $adapter model"
+    fi
+  done
   if [ "${#ADVISORS[@]}" -gt 0 ]; then
     log "branch advisors: $(IFS=,; printf '%s' "${ADVISORS[*]}") (ADR 0038)"
   fi

@@ -12,7 +12,7 @@ are JSON arrays:
     {"branch_prefix": "nightshift/",
      "limits": {"max_open_branches": "2", "max_branches_per_run": "", ...},
      "recon": {"enabled": "true", "ttl_days": "7"},
-     "agent": {"primary": "", "claude_model": "", "review_model": "", "advisors": ["claude"]},
+     "agent": {"primary": "", "claude_model": "", "codex_model": "", "review_model": "", "advisors": [], ...},
      "dimensions": ["correctness", ...],
      "repos": [{"path": "/srv/x", "mode": "branch-fix", "base": "", "findings": "",
                 "dimensions": ["docs"], "test_net": "false", "test_robind": "",
@@ -52,13 +52,20 @@ RECON_KEYS = ("enabled", "ttl_days")
 AGENT_KEYS = (
     "primary",
     "claude_model",
+    "claude_effort",
+    "codex_model",
+    "codex_effort",
     "review_model",
     "advisors",
 )
-# Adapters the Runner implements (ADR 0044). `primary` and every `advisors` entry name one of these;
+# Adapters the Runner implements (ADR 0045). `primary` and every `advisors` entry name one of these;
 # anything else — a removed adapter included — is a typo, and tolerating it would run the night on
 # something the host never asked for.
-ADAPTERS = ("claude", "mock")
+ADAPTERS = ("claude", "codex", "mock")
+EFFORTS = {
+    "claude_effort": ("low", "medium", "high", "xhigh", "max"),
+    "codex_effort": ("minimal", "low", "medium", "high", "xhigh", "max", "ultra"),
+}
 # load() reads only these top-level sections. A typo here would otherwise be ignored and
 # every setting beneath it would silently revert to its default.
 TOP_LEVEL_KEYS = ("branch_prefix", "limits", "recon", "agent", "dimensions", "repos")
@@ -323,16 +330,21 @@ def load(path: str) -> dict:
     # "no model" would silently run the night on something else. Model ID *syntax* stays
     # unvalidated — it belongs to the CLI vendor and any pattern here would go stale.
     # `review_model` is the model the Review stage and the branch advice request instead (ADR 0044);
-    # omitted, they run on `claude_model` like every other stage.
+    # omitted, they use the selected adapter's model.
     agent_out: dict = {}
     out["agent"] = agent_out
-    for key in ("claude_model", "review_model"):
+    for key in ("claude_model", "codex_model", "review_model"):
         model = agent.get(key, "")
         if key in agent and not model:
             raise SystemExit(
                 f"agent.{key} is empty — give it a value, or omit the key entirely"
             )
         agent_out[key] = model
+    for key, choices in EFFORTS.items():
+        effort = agent.get(key, "")
+        if key in agent and effort not in choices:
+            raise SystemExit(f"agent.{key}: expected one of {', '.join(choices)}, got {effort!r}")
+        agent_out[key] = effort
     # Which adapter runs the night. Omitted = whatever $NIGHTSHIFT_AGENT says, which is the
     # pre-existing behaviour; the env var still wins when explicitly set, so a one-off hand run needs
     # no rulebook edit. Declared here for the same reason the models are (ADR 0020): the host owns
