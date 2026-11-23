@@ -140,13 +140,10 @@ configured_base_for_repo() { # path -> configured branch, 1 if the rulebook has 
 }
 
 # Rulebook base lookup that REFUSES to guess for a repo the rulebook does not list: prints nothing
-# and returns 1. A verdict derived against a guessed base is not a weaker answer, it is a wrong one.
-# Observed 2026-09-06: the operator narrowed the rulebook to one repo, and the next harvest ran the
-# reconcile loop over the whole ledger — that loop is fleet-wide by design, it must reach a branch
-# whose repo was removed. A lookup that fell back to auto-detection then picked `origin/main` for
-# six gitflow repos whose base is `develop`, so sixteen branches demonstrably merged into develop were not ancestors
-# of main and their `merged` verdicts were rewritten to `open`. Removing a repo from the rulebook
-# must not rewrite the history of the decisions already made about it.
+# and returns 1. Harvest reconciles the whole ledger, so a repo removed from the rulebook would
+# otherwise be judged against an auto-detected base (main instead of develop) and its recorded
+# merges rewritten.
+
 base_for_repo_strict() { # path -> configured/auto ref for a listed repo; 1 for an unlisted one
   local cfg
   cfg=$(configured_base_for_repo "$1") || return

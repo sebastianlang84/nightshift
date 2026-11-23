@@ -85,27 +85,17 @@ case "$cmd" in
     ;;
   dry-run)
     # Prove the launcher + orchestrator wiring now — WITHOUT touching the installation it is proving.
-    #
-    # Setting NIGHTSHIFT_AGENT=mock and nothing else (what this used to do) buys no isolation: state,
-    # runs, digests and the rulebook all default under $NIGHTSHIFT_HOME, so a "dry-run" was a full
-    # production night. Harvest appended verdicts to the live ledger; every clean (repo,dim) pass
-    # appended an `empty` row, which the service cadence and the ADR 0015 exclusion window later read
-    # as evidence that lens was reviewed (the rows ADR 0023 exists to retract); dim-scan markers
-    # advanced rotation; the day's digest was overwritten; and since the orchestrator has no no-push
-    # mode, a managed repo containing one of the mock's trigger strings got a mock-authored
-    # nightshift/* branch pushed to its real origin.
-    #
-    # So isolation is what makes the claim true. The SAME launcher and orchestrator run, against a
-    # throwaway sandbox: its own rulebook, state, runs, digests, worktrees, log and flock, and a
-    # target repo whose origin is a LOCAL bare remote (is_network_remote treats it as local, so the
-    # ADR 0017 split-state guard stays quiet and the push path is still exercised — into the sandbox).
-    # Its own flock, too: a dry-run must never make the real nightly run skip as "already running".
+    # NIGHTSHIFT_AGENT=mock alone isolates nothing: state, runs, digests and the rulebook default
+    # under $NIGHTSHIFT_HOME, and the orchestrator has no no-push mode. So the same launcher runs
+    # against a throwaway sandbox with its own rulebook, state, runs, digests, worktrees, log and
+    # flock (so the real night never skips as "already running"), and a target repo whose origin is
+    # a LOCAL bare remote (the ADR 0017 guard stays quiet and the push path is still exercised).
     SB="$(mktemp -d "${TMPDIR:-/tmp}/nightshift-dry-run.XXXXXX")"
     echo "dry-run sandbox: $SB (throwaway — live ledger, digests and managed repos are untouched)"
     bash "$NIGHTSHIFT_HOME/bin/setup-sandbox.sh" "$SB" >/dev/null
 
-    # Isolating the run takes the live rulebook out of the picture, and that file is the first thing
-    # a real night reads — a malformed one aborts it. Check it the one way that writes nothing.
+    # The sandbox run does not read the live rulebook, which a real night aborts on if malformed, so
+    # check it here without writing anything.
     if [ -f "$NIGHTSHIFT_HOME/rulebook.yaml" ]; then
       # shellcheck source=../lib/rulebook.sh
       ( source "$NIGHTSHIFT_HOME/lib/rulebook.sh" && rulebook_load "$NIGHTSHIFT_HOME/rulebook.yaml" ) \
@@ -115,8 +105,10 @@ case "$cmd" in
       echo "WARN: no rulebook.yaml — a real night would fall back to rulebook.example.yaml" >&2
     fi
 
-    # An explicitly empty advisor list also disables the legacy single-advisor route.
-    # Bash startup files can export nightly routes again after these overrides are set.
+    # An explicitly empty NIGHTSHIFT_ADVISORS turns branch advice off, the legacy
+    # NIGHTSHIFT_BRANCH_REVIEW route included. BASH_ENV is unset because a
+    # bash startup file could re-export the nightly routes after these overrides.
+
     env -u BASH_ENV NIGHTSHIFT_HOME="$NIGHTSHIFT_HOME" \
         NIGHTSHIFT_AGENT=mock \
         NIGHTSHIFT_ADVISORS= \

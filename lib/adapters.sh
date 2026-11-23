@@ -7,18 +7,11 @@
 # fleet.
 AGENT_AUTH_RE='not logged in|/login|authentication_failed|invalid api key|unauthorized|oauth token|credentials? (not found|expired|invalid)|codex login'
 
-# The signatures are PROSE, and prose matched against a stage's whole raw stdout matches the prose
-# of the repo under review. On 2026-08-24 an explore lens read bin/nightshift.sh — including a
-# comment about re-running a CLI's login — and AGENT_AUTH_RE read that as the account being logged
-# out. The night aborted after one stage while .usage_explore recorded 29,600 output tokens, 2.4M
-# cache reads and $3.32 spent; a CLI that cannot authenticate spends nothing. The pattern sits
-# latent in 33 of 197 archived raw streams, and goes off whenever a stage fails to parse for any
-# other reason.
-#
-# So the raw stream is no longer searched whole. claude's is a JSON event array in which the CLI's
-# own verdict is the `result` event; the assistant/user/system events are the model's work, i.e.
-# the repo's words. A raw stream that is not a parseable event array is not model output either, and
-# passes through whole: that is the shape of the 2026-08-05 outage, where the CLI printed one line.
+# The signatures are prose, so claude's raw stream is never searched whole: its assistant/user/system
+# events quote the repo under review, which can mention logins. Only the CLI's own `result` event is
+# read; codex's stream is cut to its error events. A stream neither filter can parse passes through
+# whole: usually a CLI that could not start (one plain line), but a truncated codex stream also
+# lands here, model text included.
 agent_diagnosis() { # raw_file -> what the CLI said about the run, on stdout
   local f="$1" n
   [ -s "$f" ] || return 0
@@ -28,9 +21,8 @@ agent_diagnosis() { # raw_file -> what the CLI said about the run, on stdout
     case "$n" in
       ''|*[!0-9]*|0) : ;;                 # no result event: not a stream we can filter, so do not
       *)
-        # `is_error: false` is the CLI's receipt that it ran the session — nothing to diagnose, and
-        # .result there is the MODEL's answer, which may discuss credentials as a matter of code.
-        # Only a failed result is worth reading, and then its text is the CLI's own.
+        # `is_error: false` means the session ran, and its .result is the MODEL's answer. Only a
+        # failed result's text is the CLI's own.
         jq -r 'if type=="array" then . else [.] end
                | map(select((.type? // "") == "result"))
                | if any(.is_error? == false) then ""
@@ -54,9 +46,8 @@ agent_credentials_failed() { # errfile rawfile -> 0 if the CLI's own output repo
   agent_diagnosis "$rawf" | grep -qiE "$AGENT_AUTH_RE"
 }
 
-# Second, adapter-independent riddle-out: a stage that reached the API cannot have failed to
-# authenticate. The adapters write .usage_$stage from the CLI's own
-# counters, so a non-zero token count is the CLI's receipt for a completed request.
+# A stage that reached the API cannot have failed to authenticate. .usage_$stage comes from the CLI's
+# own counters, so a non-zero count is its receipt for a completed request.
 agent_reached_the_api() { # usage_file -> 0 if the run spent tokens or money
   local f="$1"
   [ -s "$f" ] || return 1
@@ -123,27 +114,23 @@ mock_explore() { # workdir item_dir — emits the v2 container {found, findings:
         end),
         unresolved:[]}}
       + (if ($f|length>0) then {} else {scope:$scope} end)' > "$id/finding.json"
-  # A stage that FAILS is not the same as a stage that found nothing, and a stage can fail after
-  # having written a usable verdict — the claude CLI's `--max-turns` ceiling is the live case for both.
-  # The sentinel is the exit code itself (env, not a file in the worktree) so a test can reach either
-  # half of the Runner's response: with findings on disk it must keep them, without it must record no
-  # verdict at all. finding.json is written first on purpose, exactly as the failing case leaves it.
+  # A stage can fail after writing a usable verdict (the CLI's --max-turns ceiling). finding.json is
+  # written first on purpose, so a test can check the Runner keeps findings on disk and records no
+  # verdict without them.
   return "${NIGHTSHIFT_MOCK_EXPLORE_RC:-0}"
 }
 mock_fix() { # workdir item_dir — applies the fix for THIS finding (dispatched on .file)
   local wd="$1" id="$2" file
   file=$(jq -r '.file' "$id/finding.json" 2>/dev/null || echo "")
-  # The Fix stage's honest way out: it looked, it could not stand behind any change, it left the
-  # tree alone. Reaching that path in a test needs a fix that deliberately changes nothing.
+  # A Fix stage that changes nothing, the honest way out when no change holds up.
   if [ "${NIGHTSHIFT_MOCK_FIX_NOOP:-0}" = 1 ]; then
     printf '# Worknote\n\nThe finding does not hold up on reading the code; nothing changed.\n' \
       > "$id/worknote.md"
     return 0
   fi
-  # The commit retry (ADR 0036): a mock that reads the hook's demand out of the PROMPT the real
-  # adapters would send, so a test proves the output reached the Fix prompt, redaction included. It
-  # copies the hook's `NEED=…` demand into HOOK_OK.
-  # `revert` instead undoes the whole change, the retry's other way to reach an empty commit.
+  # The commit retry (ADR 0036): read the hook's `NEED=…` demand out of the real Fix PROMPT into
+  # HOOK_OK, so a test proves the hook output reached it, redaction included. `revert` undoes the
+  # whole change instead, the retry's other way to an empty commit.
   if [ -s "$id/commit-rejected.log" ]; then
     case "${NIGHTSHIFT_MOCK_FIX_HEEDS_HOOK:-0}" in
       1) stage_prompt fix "$wd" "$id" | grep -o 'NEED=[A-Za-z0-9]*' | tail -n 1 > "$wd/HOOK_OK" || true ;;
@@ -168,12 +155,9 @@ mock_review() { # workdir item_dir
   fi
   [ "${NIGHTSHIFT_MOCK_REVIEW_NO_ARTIFACT:-0}" != 1 ] \
     || return "${NIGHTSHIFT_MOCK_REVIEW_RC:-1}"
-  # Deterministic `abandon`, so the reviewer's give-up verdict is reachable in mock mode like every
-  # other path. The trigger is a sentinel PATH, not content in the worktree, because a test must be
-  # able to arm it MID-loop — from a failing test_cmd, say.
-  # A RELATIVE sentinel resolves against the worktree, which is the only place a test_cmd can write
-  # since ADR 0026 sandboxed the gate. Keeping it out of the commit is then the fixture's job (a
-  # .gitignore entry), not the path's.
+  # Deterministic `abandon`, armed by a sentinel PATH so a test can arm it mid-loop (from a failing
+  # test_cmd). A relative path resolves against the worktree, the only place a sandboxed test_cmd
+  # can write (ADR 0026); the fixture keeps it out of the commit with .gitignore.
   case "$sentinel" in ""|/*) ;; *) sentinel="$_wd/$sentinel" ;; esac
   if [ -n "$sentinel" ] && [ -e "$sentinel" ]; then
     jq -nc '{verdict:"abandon",reason:"mock: abandon sentinel present."}' > "$id/review.md"
@@ -253,9 +237,8 @@ materialize_stage_output() { # stage item_dir
     advise)  python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/advice.json" 2>>"$id/$stage.err" ;;
     verify)  python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/verify.json" 2>>"$id/$stage.err" ;;
   esac
-  # A repaired verdict parses, so the stage succeeds and run_agent never prints its stderr. Surface
-  # the repair here instead: the artifact that reaches the ledger is not byte-for-byte what the
-  # model wrote, and a night log that hides that is the wrong kind of quiet (ADR 0030).
+  # A repaired verdict parses, so run_agent never prints its stderr; log the repair here, since the
+  # artifact is not byte-for-byte what the model wrote (ADR 0030).
   local rc=$?
   if [ -s "$id/$stage.err" ] && grep -q '^json-repair:' "$id/$stage.err" 2>/dev/null; then
     log "  stage $stage: $(grep -m1 '^json-repair:' "$id/$stage.err")"
@@ -302,10 +285,7 @@ claude_run() { # stage workdir item_dir
   local stage="$1" wd="$2" id="$3" prompt out model sources flag
   local rawf="$id/.raw_$stage" errf="$id/$stage.err" rc=0 parse_rc=0
   # --max-turns is the C6 runaway cap (docs/design/risk-analysis.md), not a budget: the spend cap and
-  # the wall-clock bound are what limit cost. It was 25, which Explore reached and died on for 5 of 26
-  # items on 2026-08-12 — each after spending its full ~$2 of tokens and returning nothing. A ceiling
-  # that is hit routinely is the wrong ceiling: 60 still hard-stops a loop, but leaves a navigating
-  # stage room to finish. Every abort is now visible in the digest rather than read as "found nothing".
+  # wall clock limit cost. It must stay high enough that a navigating stage rarely hits it.
   local flags_override="${NIGHTSHIFT_CLAUDE_FLAGS:---dangerously-skip-permissions --max-turns 60}"
   local -a flags=()
   # Read through EOF to split multiline overrides without expanding filenames.
@@ -339,12 +319,9 @@ claude_run() { # stage workdir item_dir
   # CLAUDE.md. The Runner's --settings still loads its guard (docs/design/hook-spec.md).
   local -a sources_arg=()
   [ -z "$sources" ] || sources_arg=(--setting-sources "$sources")
-  # Per-stage CAPABILITY profile: enforce each stage's rules by which tools EXIST, not by
-  # asking the prompt nicely (same philosophy as the git-confinement hook). explore/review
-  # are read-only by nature -> only Read/Grep/Glob, no Write/Edit/Bash. fix edits the working
-  # tree -> Write/Edit, but still NO Bash, which capability-enforces fix.md's "do NOT run git,
-  # no destructive commands". Verified: with these sets claude cannot write outside its granted
-  # tools even under --dangerously-skip-permissions (adversarial test, 2026-07-09).
+  # Per-stage CAPABILITY profile: a stage's rules are enforced by which tools exist, even under
+  # --dangerously-skip-permissions. Read-only stages get Read/Grep/Glob; fix adds Write/Edit but
+  # still no Bash, so it cannot run git or commands.
   local tools
   case "$stage" in
     fix) tools="${NIGHTSHIFT_FIX_TOOLS:-Read,Grep,Glob,Write,Edit}" ;;
@@ -356,40 +333,26 @@ claude_run() { # stage workdir item_dir
   # (blocks disabling Layer 1) via --settings. NIGHTSHIFT_BRANCH_PREFIX is already exported.
   # NIGHTSHIFT_WORKTREE tells the PreToolUse guard which root to confine Write/Edit to
   # (the Fix stage has Write/Edit but no Bash; absolute paths would otherwise escape — R8).
-  # CLAUDE_CODE_DISABLE_AUTO_MEMORY: the auto-memory store is keyed by cwd under ~/.claude/projects/
-  # and is NOT covered by --setting-sources. A stage worktree is throwaway, so there is nothing to
-  # read — but the memory writer is a write path OUTSIDE the worktree that the PreToolUse guard
-  # never sees (R8). Off for stages: nightshift's memory is its ledger, not a per-cwd store.
-  # stdout and stderr both go to FILES, and the exit code is inspected afterwards, rather than the
-  # older `out="$(… 2>/dev/null)" || return 1`. That form discarded the CLI's diagnosis twice over:
-  # stderr went to /dev/null, and a non-zero exit dropped the captured stdout on the floor with it —
-  # so a stage that never started left an empty item dir and no trace of why (see AGENT_FATAL above).
-  # Keeping both lets run_agent report the reason and recognise a credential failure.
+  # CLAUDE_CODE_DISABLE_AUTO_MEMORY: the auto-memory writer is a write path outside the worktree that
+  # --setting-sources does not cover and the PreToolUse guard never sees (R8).
+  # stdout and stderr both go to FILES and the status is read afterwards, so run_agent can report a
+  # failed start and recognise a credential failure.
   (cd "$wd" && \
     GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="$HOOKS_DIR" \
     NIGHTSHIFT_WORKTREE="$wd" CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 \
     claude -p --output-format json --settings "$STATE_DIR/claude-settings.json" --tools "$tools" \
       "${model_arg[@]}" "${sources_arg[@]}" --strict-mcp-config "${flags[@]}" < <(printf '%s' "$prompt")) >"$rawf" 2>"$errf" || rc=$?
   out="$(cat "$rawf")"
-  # `claude -p --output-format json` is NOT a stable shape. Sometimes it is a single
-  # result object ({result,usage,total_cost_usd}); sometimes a JSON ARRAY of events with
-  # the result object as one element (observed with claude 2.1.197, e.g. when a
-  # rate_limit_event is present). A parser that assumes one shape silently yields an empty
-  # result on the other — every explore then reports found:false and claude mode does
-  # nothing. So normalise both: pick the result object whether top-level is it or an array.
+  # `claude -p --output-format json` is either one result object or an ARRAY of events holding it
+  # (e.g. after a rate_limit_event). Assuming one shape silently yields an empty result on the
+  # other, so both are normalised to the result object.
   local pick='if type=="array" then (map(select(.type=="result"))|last) else . end'
   printf '%s' "$out" | jq -r "$pick"' | (.result // "")' > "$id/$stage.out" 2>/dev/null \
     || : > "$id/$stage.out"
-  # Telemetry sidecar for run_agent. `modelUsage` is keyed by the REAL model ID
-  # ("claude-opus-5", "claude-opus-4-8[1m]", …) and is the only place the served model appears — the
-  # adapter name alone cannot answer "which model ran, and did it need the [1m] context variant". A
-  # stage may touch more than one model (e.g. a small model for side work), so attribute it to the
-  # one that consumed the most tokens; fall back to a top-level `.model` for older result shapes.
-  # `model_id`, `context_window` and `model_cost_usd` all come from that ONE attributed entry, so
-  # they never describe different models. `contextWindow` is the window the model actually ran with
-  # (200000 vs 1000000) — it settles the [1m] question outright, instead of bounding it from the
-  # cumulative token sums. Note the casing asymmetry the CLI emits: `usage.*` is snake_case,
-  # `modelUsage.<id>.*` is camelCase.
+  # Telemetry sidecar for run_agent. `modelUsage`, keyed by the served model id, is the only place
+  # that id appears. A stage may use several models, so the one with the most tokens is attributed,
+  # and model_id, context_window and model_cost_usd all come from that ONE entry; a top-level
+  # `.model` is the fallback. `usage.*` is snake_case, `modelUsage.<id>.*` camelCase.
   # Every field is optional: absent -> null, and a jq failure here must never fail the stage.
   printf '%s' "$out" | jq -c "$pick"' |
     (((.modelUsage // {}) | to_entries

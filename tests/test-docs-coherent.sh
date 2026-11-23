@@ -26,13 +26,15 @@ fi
 
 # --- 2. each claim class is genuinely caught ----------------------------------
 # A fresh git repo, because the checker reads `git ls-files` — an untracked scratch note is not a doc.
+# SCRIPT, when set, is written to SCRIPT_PATH (default bin/tool.sh) as a tracked source file.
 fixture() { # doc-body -> prints the fixture root
   local d; d="$(mktemp -d -p "$TMP")"
   git init -q -b main "$d"
-  mkdir -p "$d/docs/adr" "$d/bin"
+  mkdir -p "$d/docs/adr" "$d/bin" "$d/hooks" "$d/lib"
   printf 'line1\nline2\n' > "$d/bin/real.sh"
   printf '# ADR 0001 — a real one\n' > "$d/docs/adr/0001-real.md"
   printf '%s\n' "$1" > "$d/README.md"
+  [ -z "${SCRIPT-}" ] || printf '%s\n' "$SCRIPT" > "$d/${SCRIPT_PATH:-bin/tool.sh}"
   git -C "$d" add -A
   echo "$d"
 }
@@ -67,9 +69,39 @@ expect_clean "a resolvable ADR"           'This follows ADR 0001 closely.'
 expect_clean "a file that exists"         'Run `bin/real.sh` nightly.'
 expect_clean "a citation inside the file" 'The flag lives at `bin/real.sh:2`.'
 expect_clean "another project's citation" 'Upstream has it at `src/other.py:12`.'
+expect_clean "a bare basename from elsewhere" 'Upstream has it at `other_project.sh:3`.'
 expect_clean "an external URL"            'See [upstream](https://example.com/x.md).'
 expect_clean "a pure anchor"              'Jump to [the section](#context).'
 expect_clean "runtime state, not source"  'The ledger is `state/ledger.jsonl` and is gitignored.'
+
+# Source comments: a `#` line in a tracked script, backticks optional.
+SCRIPT='  # the flag lives at real.sh:99' \
+  expect_caught "a stale comment citation" 'Plain doc.' "tool.sh:1: cites real.sh:99, but that file has only 2 lines"
+SCRIPT='# see bin/vanished.sh:3-9' SCRIPT_PATH=hooks/pre-push \
+  expect_caught "a hook comment citing a gone file" 'Plain doc.' "pre-push:1: cites bin/vanished.sh:3,"
+SCRIPT='# the flag lives at `bin/real.sh:2`' expect_clean "a valid comment citation" 'Plain doc.'
+SCRIPT='echo "see bin/real.sh:99"' expect_clean "a citation in code, not a comment" 'Plain doc.'
+expect_clean "a # line inside a markdown file" '# see bin/real.sh:99'
+SCRIPT='# moved from gone_helper.sh:3' \
+  expect_caught "a comment citing a deleted basename" 'Plain doc.' "tool.sh:1: cites gone_helper.sh:3, which does not exist"
+SCRIPT='# see hooks/pre-push:9' SCRIPT_PATH=hooks/pre-push \
+  expect_caught "a citation of an extensionless script" 'Plain doc.' "cites hooks/pre-push:9, but"
+SCRIPT='# see bin/real.sh:1-99' \
+  expect_caught "a range ending past EOF" 'Plain doc.' "cites bin/real.sh:1-99, but that file has only 2 lines"
+SCRIPT='# see bin/real.sh:99' SCRIPT_PATH=lib/tool.py \
+  expect_caught "a stale citation in a .py comment" 'Plain doc.' "tool.py:1: cites bin/real.sh:99"
+expect_caught "a doc range ending past EOF" 'See `bin/real.sh:1-9`.' "cites bin/real.sh:1-9, but"
+SCRIPT='# see bin/real.sh:1-2' expect_clean "a range inside the file" 'Plain doc.'
+SCRIPT='# decided in ADR 0099' \
+  expect_caught "a comment citing a missing ADR" 'Plain doc.' "tool.sh:1: ADR 0099 referenced"
+SCRIPT='# decided in ADR 0001' expect_clean "a comment citing a real ADR" 'Plain doc.'
+
+# An untracked copy (a sandbox, run output) must not make a cited basename ambiguous.
+d="$(SCRIPT='# the flag lives at real.sh:99' fixture 'Plain doc.')"
+mkdir -p "$d/sandbox" && printf 'x\n' > "$d/sandbox/real.sh"
+if python3 "$CHECK" "$d" >/dev/null 2>&1; then
+  echo "test-docs-coherent: an untracked copy hid a stale citation" >&2; exit 1
+fi
 
 # Deleting an indexed document must not require staging before the working tree can be checked.
 d="$(fixture 'See [the ADR](docs/adr/0001-real.md).')"

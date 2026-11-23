@@ -16,18 +16,14 @@ export PATH
 
 NIGHTSHIFT_HOME="${NIGHTSHIFT_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 NIGHTSHIFT_AGENT="${NIGHTSHIFT_AGENT:-}"
-# After pushing a nightshift/* branch, optionally open a PR for it (1=on). OFF by default:
-# a PR is a host-API object that needs per-host API credentials (a forge API token, for example)
-# which the SSH git transport does NOT provide — so branch-only is the credential-free baseline and
-# the pushed branch is the unit of review. Opt in with NIGHTSHIFT_OPEN_PR=1 once the host credential
-# is in the run environment (GitHub-only today; see "Branch-only operation across Git hosts" in
-# docs/deployment.md).
+# 1 = open a PR after each push. Off by default: a PR needs a forge API credential that the SSH
+# transport does not provide, so the pushed branch is the unit of review (GitHub only; see
+# "Branch-only operation across Git hosts" in docs/deployment.md).
 NIGHTSHIFT_OPEN_PR="${NIGHTSHIFT_OPEN_PR:-0}"
 RULEBOOK="${RULEBOOK:-$NIGHTSHIFT_HOME/rulebook.yaml}"
 [ -f "$RULEBOOK" ] || RULEBOOK="$NIGHTSHIFT_HOME/rulebook.example.yaml"
 HOOKS_DIR="$NIGHTSHIFT_HOME/hooks"
-# State/runs/digests default under NIGHTSHIFT_HOME but are env-overridable so a test
-# run (e.g. an isolated claude e2e) writes nowhere near the live ledger/digest.
+# Env-overridable so a test run writes nowhere near the live ledger and digest.
 STATE_DIR="${NIGHTSHIFT_STATE_DIR:-$NIGHTSHIFT_HOME/state}"
 NIGHT="$(date +%Y-%m-%d)"
 RUNS_DIR="${NIGHTSHIFT_RUNS_DIR:-$NIGHTSHIFT_HOME/runs}/$NIGHT"
@@ -37,20 +33,15 @@ LEDGER="$STATE_DIR/ledger.jsonl"
 # harvest and by the verify phase. Read by the dashboard's Nightshift tab through the same mount.
 PROBE_SNAPSHOT="$STATE_DIR/findings-probe.json"
 SURVIVAL_SNAPSHOT="$STATE_DIR/fix-survival.json"   # derived by harvest (lib/probe_survival.py), read by the digest
-# Derived, disposable index of the per-(repo,dimension) ledger aggregates the selection loop needs:
-# the last service epoch (last_dim_epoch) and the last SHIPPED epoch (evidence_override). One
-# aggregating ledger.py pass over the append-only ledger, memoized on the ledger's mtime, so their nested
-# repo×dimension callers stop re-slurping the whole ledger on every cell (see last_dim_epoch).
+# Derived, disposable index of the per-(repo,dimension) last service epoch (last_dim_epoch) and last
+# SHIPPED epoch (evidence_override): one ledger.py pass, rebuilt when the ledger's mtime changes.
 LEDGER_EPOCH_INDEX="$STATE_DIR/.ledger-epoch.idx"
-# Format marker, written as the index's FIRST line. An index left by an older nightshift has no
-# shipped column, and reading its missing field as 0 would silently suppress every evidence
-# override — so the format, not just the mtime, invalidates the cache. The lookups match a repo
-# path in $1, so this line can never be mistaken for a row.
+# Format marker on the index's FIRST line: a format change must invalidate the cache too, since a
+# missing shipped column read as 0 would suppress every evidence override. Lookups match a repo path
+# in $1, so this line can never be mistaken for a row.
 LEDGER_EPOCH_INDEX_VERSION="#nightshift-ledger-epoch-idx v2"
-# The same treatment for the one ledger aggregate the epoch index does not carry: the per-repo
-# service cadence median_gap measures. It is keyed by repo alone (not repo×dimension), and it reads
-# the ledger through a different filter (retraction-aware, all four work outcomes plus `empty`), so
-# it gets its own one-pass, mtime-invalidated file rather than a fifth column.
+# Per-repo service cadence for median_gap. Keyed by repo alone and read through a different ledger
+# filter, so it is its own mtime-invalidated index rather than a column of the epoch index.
 LEDGER_GAP_INDEX="$STATE_DIR/.ledger-gap.idx"
 # v2 counts parent Explore passes, not each sibling finding's completion timestamp.
 LEDGER_GAP_INDEX_VERSION="#nightshift-ledger-gap-idx v2"
@@ -76,12 +67,10 @@ for _ns_part in sandbox adapters digest; do
 done
 unset _ns_lib _ns_part
 
-# Stage isolation has a location precondition: the claude CLI also collects CLAUDE.md files along the
-# cwd->/ directory chain, and for a cwd under $HOME that chain includes ~/.claude/CLAUDE.md — which
-# --setting-sources cannot drop (verified 2026-08-02, claude 2.1.205). Worktrees default under
-# ${TMPDIR:-/tmp}, outside $HOME, where the isolation holds. Overriding NIGHTSHIFT_WORKTREES into
-# $HOME silently reopens the leak, so say so instead of failing the run (see docs/design/hook-spec.md).
-# Called from main() after parsing the rulebook and resolving the branch advisors.
+# Stage isolation (ADR 0019) needs worktrees outside $HOME: the claude CLI collects CLAUDE.md along
+# the cwd->/ chain, for a cwd under $HOME that includes ~/.claude/CLAUDE.md, and --setting-sources
+# cannot drop it.
+# Warn rather than fail. Called from main() after the rulebook and the advisors are resolved.
 warn_worktrees_in_home() {
   local a
   for a in "$NIGHTSHIFT_AGENT" ${ADVISORS[@]+"${ADVISORS[@]}"}; do
@@ -117,12 +106,9 @@ RB_CLAUDE_MODEL="" RB_CLAUDE_EFFORT="" RB_CODEX_MODEL="" RB_CODEX_EFFORT="" RB_R
 RB_ADVISORS=""
 # The night's own adapter as declared by the rulebook.
 RB_PRIMARY_AGENT=""
-# Announce which model the night will REQUEST, and where that choice came from (ADR 0020). Not which
-# model serves it: with no --model the CLI picks for itself, and even a given id may be an alias that
-# resolves elsewhere — that answer only exists afterwards, in `runs.jsonl` (`model_id`). Announcing
-# the selection is still the point: stage isolation (ADR 0019) means a machine-wide pin in the CLI's
-# own config no longer reaches a stage, so a host that believes it pinned one must learn otherwise at
-# the start of the night rather than the morning after.
+# Announce which model the night will REQUEST and where that choice came from (ADR 0020); what
+# served it is known only afterwards, in runs.jsonl `model_id`. Stage isolation (ADR 0019) keeps a
+# pin in the CLI's own config from reaching a stage, so the operator must see the selection up front.
 log_model_selection() { # label env_var_name rulebook_value rulebook_key [fallback]
   local label="$1" name="$2" rb="$3" key="$4" fallback="${5:-}"
   [ -n "$fallback" ] || fallback="the CLI's own default applies (runs.jsonl model_id records what served)"
@@ -218,16 +204,11 @@ load_rulebook() {
 }
 
 # --------------------------------------------------------------- telemetry ----
-# `model` is the ADAPTER name (claude|codex|mock) and stays that way — harvest/digest code may read
-# it. The model that ACTUALLY served the stage is the separate `model_id` field ("claude-opus-5",
-# "claude-opus-4-8[1m]", …), self-reported by the CLI; null whenever the CLI reports
-# none (mock, older CLI shapes). `tokens` remains OUTPUT tokens for backwards compatibility; the
-# input/cache counters are per-stage CUMULATIVE over every request the stage made, so they bound
-# (never equal) the peak context of a single request. `context_window` answers the 200k-vs-[1m]
-# question outright — it is the window the served model actually ran with, reported by the CLI, not
-# inferred from those sums. `cost_usd` is the whole stage invocation; `model_cost_usd` is the slice
-# attributed to `model_id`, which differs only when a stage touched more than one model.
-# See docs/design/documentation-system.md.
+# `model` is the ADAPTER name (claude|codex|mock) and must stay so: harvest and digest may read
+# it. The served model is `model_id`, null when the CLI reports none; `tokens` stays OUTPUT tokens for
+# compatibility. The input/cache counters are CUMULATIVE per stage, so never derive a request's
+# context size from them; `context_window` is the CLI's own report. Field meanings:
+# docs/design/documentation-system.md.
 append_run() { # stage agent start dur status item usage_json
   local usage="${7:-}"
   [ -n "$usage" ] || usage='{}'
@@ -257,12 +238,11 @@ ledger_append() { # item repo fp branch sha outcome [summary] [pr_url] [proof] [
   ledger append-run "$NIGHT" "$(date -Iseconds)" "$@"
 }
 
-# Runner-canonical finding identity (ADR 0014). Computed by the Runner from NORMALIZED structured
-# fields — NOT trusted from the model's free-form `fingerprint`, which is prose-unstable. Layered:
-#   sorted files : normalized type : semantic anchor (symbol, else a normalized code snippet)
-# Prose summary and line numbers are DELIBERATELY excluded, so the identity survives rewording and
-# line movement; files are sorted so multi-file order is irrelevant. Falls back to the model's
-# fingerprint only when no structured anchor exists at all, else "" so the caller drops the finding.
+# Runner-canonical finding identity (ADR 0014), from normalized structured fields, not the model's
+# prose-unstable `fingerprint`:  sorted files : normalized type : symbol, else normalized snippet.
+# Summary and line numbers are excluded so the identity survives rewording and line movement. With
+# no structured anchor it falls back to the model's fingerprint; with neither it prints "" and the
+# caller drops the finding.
 finding_fingerprint() { # finding.json -> canonical identity or ""
   jq -r '
     ((.files // [ .file ]) | map(select(. != null and . != "")) | unique) as $files
@@ -368,10 +348,9 @@ last_serviced_epoch() { # repo -> epoch of the last recorded service (0 if never
   date -d "$iso" +%s 2>/dev/null || echo 0
 }
 
-# Layer 2 settings for the agent: register the PreToolUse guard. The matcher MUST
-# cover Bash (anti-bypass of the pre-push hook) AND the file-writing tools
-# (Write/Edit/MultiEdit/NotebookEdit) — otherwise the guard never fires for a Write
-# and the worktree confinement (R8) is dead. The matcher is a regex over tool names.
+# Layer 2 settings for the agent: register the PreToolUse guard. The matcher (a regex over tool
+# names) MUST cover Bash, against bypassing the pre-push hook, and every file-writing tool, or the
+# worktree confinement (R8) is dead.
 write_claude_settings() {
   jq -nc --arg cmd "$HOOKS_DIR/pretooluse-guard.sh" \
     '{hooks:{PreToolUse:[{matcher:"Bash|Write|Edit|MultiEdit|NotebookEdit",
@@ -380,35 +359,27 @@ write_claude_settings() {
 }
 
 # --------------------------------------------------------------- run_agent ----
-# A stage that fails because the agent CLI has no usable credentials is NOT a quiet night: every
-# later stage fails the same way, in a second or two, and the night still exits rc=0 having written
-# a negative recon cache and an `empty` ledger row per repo — i.e. an infrastructure outage forges
-# the record of a clean fleet. Observed 2026-08-05: all 8 stages died with `authentication_failed`
-# ("Not logged in · Please run /login"), the log said "nothing worth doing" four times, and the four
-# resulting `empty` rows are fiction. So classify the failure once and let main() abort the night.
+# An agent without usable credentials is not a quiet night (ADR 0023): carrying on would write a
+# negative recon cache and an `empty` ledger row per repo, forging a clean fleet. Classify the
+# failure once and let main() abort the night.
 AGENT_FATAL=""         # non-empty = the agent itself is unusable; set by run_agent, read by main()
 AGENT_FATAL_AGENT=""   # WHICH adapter died — an advisor may legitimately run on a different one
 
-# An agent that cannot reach its model — spent quota, an outage, a CLI that dies on start — is the
-# same class of event as a bad credential (ADR 0023): nothing it "returned" is evidence about the
-# code. The CLI's reports drift: Claude's spent five-hour window was a `rate_limit_event` on
-# 2026-08-21 and an `is_error` result with `api_error_status` 429 on 2026-10-31. A signature per
-# shape misses each new one until it has cost a night, so the test reads the one receipt every
-# adapter writes instead: the stage failed quickly and its token counters (.usage_<stage>) show no
-# request. In runs.jsonl up to 2026-10-31 all 46 such failures fell in seven nights where the agent
-# was blocked from the first stage on, and none in a healthy night; failures without tokens that ran
-# longer (7 of 61-300 s, 2 over 300 s) were real stages, hence the time bound.
+# An agent that cannot reach its model (spent quota, outage, a CLI dying on start) is the same class
+# of event as a bad credential (ADR 0023): nothing it returned is evidence about the code. The test
+# reads not the CLI's error shapes, which drift, but the receipt every adapter writes: the stage
+# failed quickly and its token counters (.usage_<stage>) show no request. The time bound keeps out
+# long tokenless failures, which were real stages.
 # Counted per adapter AND model (ADR 0044): a spent window belongs to one model, and Fix and Review
-# alternate on the same adapter. Keyed by adapter alone, a Fix on a working model between two walled
-# reviews restarted the count, and the night kept building fixes nothing could review.
+# alternate on one adapter, so with an adapter-only key a working Fix would reset the streak of a
+# walled Review.
 AGENT_WALL_LIMIT=2        # this many such failures in a row make the adapter unusable for the night
 declare -gA AGENT_WALL_STREAK=()   # "adapter[:model]" -> consecutive failures that never reached it
 AGENT_LAST_WALLED=0       # 1 = the latest stage was such a failure: record nothing derived from it
 
-# How many EXTRA attempts a stage gets after the model returns nothing at all (ADR 0034). One, so a
-# single blip costs a second call and a night's budget is not lost to it, while a provider returning
-# nothing repeatedly still stops after two. 0 disables the retry. A non-numeric value falls back to
-# the default rather than aborting the night on a typo in an env var.
+# EXTRA attempts a stage gets after the model returns nothing at all (ADR 0034): one, so a blip costs
+# one more call and a provider returning nothing stops after two; 0 disables the retry. A non-numeric
+# value falls back to the default rather than aborting the night on a typo.
 EMPTY_ANSWER_RETRIES="${NIGHTSHIFT_EMPTY_ANSWER_RETRIES:-1}"
 case "$EMPTY_ANSWER_RETRIES" in
   ''|*[!0-9]*) EMPTY_ANSWER_RETRIES=1 ;;
@@ -434,10 +405,8 @@ preserve_stage_attempt() { # stage item_dir label — keep one attempt's evidenc
   done
 }
 
-# An EMPTY answer: the file exists and holds no non-whitespace text. Existence is half the test —
-# every real adapter writes this file unconditionally (an empty one when the model said nothing),
-# while the mock agent writes none at all, so an absent file means "this adapter does not report an
-# answer here" and must not be read as one.
+# An EMPTY answer: the file exists and holds no non-whitespace text. Real adapters always write it;
+# the mock writes none, so an absent file means "no answer reported" and must not count as empty.
 stage_answer_empty() { # answer_file
   [ -f "$1" ] || return 1
   ! grep -q '[^[:space:]]' "$1" 2>/dev/null
@@ -455,22 +424,13 @@ verify_artifact_usable() { # item_dir -> a complete finding-verification result
          and ((.evidence | type) == "string")' "$1/verify.json" >/dev/null 2>&1
 }
 
-# The agent's channel for something about the ENVIRONMENT rather than the code: a tool that is
-# missing, a gate that cannot work, an instruction that contradicts what the repo actually does.
-# Until now such an observation had nowhere to go. The Fix stage's worknote becomes the commit
-# message, which is meant to describe the change — so a remark about the harness either distorted
-# that message or was dropped. On 2026-09-06 an agent could not delete a scratch file it had made
-# and said so in its worknote; that is the shape of note this exists for.
+# The agent's channel for remarks about the ENVIRONMENT rather than the code (a missing tool, a gate
+# that cannot work), kept out of the Fix worknote, which becomes the commit message. The agent
+# writes the note inside its worktree and the Runner moves it out (docs/design/hook-spec.md).
 #
-# The agent writes the note inside its worktree, and the Runner moves it out. See
-# docs/design/hook-spec.md for the adapter write boundaries.
-#
-# Read back by a human, never by an agent. Feeding these notes into a later stage would turn model
-# output into model input, and an agent's note may quote a file from the repository it was reading —
-# so a line in some repo could address the next night as if it were the Runner. The same confusion
-# aborted a healthy night on 2026-08-24, when credential prose in a reviewed file was read as this
-# account being logged out. Repetition is handled mechanically instead: an identical note already in
-# the file is dropped rather than shown to anyone again.
+# Read by a human, never fed to a later stage: a note may quote a file from the repo it read, so a
+# line in some repo could address the next night as if it were the Runner. A note identical to one
+# already recorded is dropped rather than recorded again.
 AGENT_NOTE_FILE="${NIGHTSHIFT_AGENT_NOTES:-$STATE_DIR/agent-notes.md}"
 AGENT_NOTE_MAX_BYTES="${NIGHTSHIFT_AGENT_NOTE_MAX_BYTES:-4000}"
 
@@ -487,9 +447,8 @@ collect_agent_note() { # stage workdir repo -> move a stage's note into the note
   body="$(printf '%s' "$body" | sed 's/[[:space:]]*$//' | grep -v '^[[:space:]]*$' || true)"
   [ -n "$body" ] || return 0
   mkdir -p "$(dirname "$AGENT_NOTE_FILE")" 2>/dev/null || return 0
-  # Deduplicated on the note's own text, so the same standing annoyance reported every night appears
-  # once. The key is the body with whitespace collapsed — a model rarely repeats itself byte for
-  # byte, but it does repeat itself sentence for sentence.
+  # Deduplicated on the body with whitespace collapsed: a model repeats itself sentence for sentence,
+  # rarely byte for byte.
   key="$(printf '%s' "$body" | tr -s '[:space:]' ' ' | md5sum | cut -d' ' -f1)"
   if [ -f "$AGENT_NOTE_FILE" ] && grep -qF "<!-- note:$key -->" "$AGENT_NOTE_FILE" 2>/dev/null; then
     log "  stage $stage: note already recorded — not repeated"
@@ -521,21 +480,18 @@ run_agent() { # stage workdir item_dir [attempt]
     claude) claude_run "$stage" "$workdir" "$item_dir" || status=$? ;;
     *) log "unknown NIGHTSHIFT_AGENT=$NIGHTSHIFT_AGENT (expected claude, codex or mock)"; status=2 ;;
   esac
-  # Before anything else looks at the worktree — including the failure paths below and the ship
-  # gate — so a note survives a stage that failed, which is when it is most likely to exist. The
-  # repo name comes from the item dir the Runner already writes, not from a global.
+  # Before anything else looks at the worktree, failure paths and ship gate included, so a note
+  # survives a failed stage, when it is most likely to exist. The repo name comes from the item dir
+  # the Runner already writes, not from a global.
   collect_agent_note "$stage" "$workdir" "$(cat "$item_dir/repo" 2>/dev/null || true)"
   # A stage that succeeded or spent tokens proves the adapter reaches its model; its wall count restarts.
   if [ "$status" -eq 0 ] || agent_reached_the_api "$item_dir/.usage_$stage"; then
     AGENT_WALL_STREAK[$wall_key]=0
     AGENT_LAST_WALLED=0
   fi
-  # A non-zero stage is reported as a FAILURE, not absorbed into "found nothing". The exit code has
-  # always been recorded in runs.jsonl, but nothing ever read it back out — so a stage that could not
-  # run at all was indistinguishable, in the night log and in the digest, from one that ran and had
-  # nothing to say. The claude adapter leaves the CLI's own diagnosis in $stage.err (stderr) and
-  # .raw_$stage (unparsed stdout); the last non-blank stderr line goes straight into the log so the
-  # morning does not start with an archaeology session.
+  # A non-zero stage is logged as a FAILURE, never absorbed into "found nothing". Each adapter
+  # leaves the CLI's diagnosis in $stage.err (stderr) and .raw_$stage (stdout); the last non-blank
+  # stderr line goes into the log.
   if [ "$status" -ne 0 ]; then
     local errf="$item_dir/$stage.err" rawf="$item_dir/.raw_$stage" detail=""
     if [ -s "$errf" ]; then
@@ -568,15 +524,8 @@ run_agent() { # stage workdir item_dir [attempt]
       log "FATAL: $AGENT_FATAL — aborting the night rather than spending every remaining lens on the same wall."
       log "FATAL: check that the $attempt_agent CLI is logged in and has quota left ($rawf says why), then run bin/nightshift.sh again."
     fi
-    # An EMPTY answer is not a verdict (ADR 0034). The provider accepted the turn, billed it, and
-    # returned no text — observed 2026-09-11, when web-app's first explore lens came back with a
-    # stopped assistant message carrying an empty content array. The parser then said "no parseable
-    # JSON from stage", the item recorded no verdict, and the Runner saw a pass with no new work and
-    # ended a night whose findings budget was untouched. One empty response ended the night.
-    #
-    # Retried only when the stage failed with status 1 — the parse/answer failure every adapter
-    # reports. Status 2 is an adapter refusing to run because of its configuration: a
-    # deterministic configuration verdict that a second identical call can only repeat.
+    # An EMPTY answer is not a verdict (ADR 0034): retry it. Only on status 1, the parse/answer
+    # failure; status 2 is a configuration refusal that an identical call can only repeat.
     if [ -z "$AGENT_FATAL" ] && [ "$status" -eq 1 ] \
        && [ "$attempt" -le "$EMPTY_ANSWER_RETRIES" ] \
        && stage_answer_empty "$item_dir/$stage.out"; then
@@ -607,17 +556,11 @@ run_agent() { # stage workdir item_dir [attempt]
 }
 
 # ----------------------------------------------------------- commit subject ----
-# A host repo's `commit-msg` gate reads the Conventional Commits type as a CHECKED CLAIM about user
-# visibility — git-workflow's changelog-check.sh demands a CHANGELOG entry for `feat|fix|perf`,
-# exempts `refactor|test|chore|docs|ci|build|style|revert`, and treats an UNPARSEABLE subject as
-# user-visible so a malformed message never becomes a bypass. The fixed `nightshift: ` subject was
-# exactly that unparseable case: every change touching a code-classified file was read as
-# user-visible and blocked for a missing CHANGELOG entry — and the Fix stage could not satisfy the
-# gate by choosing a better subject, because it does not write the subject. (Observed 2026-08-07:
-# one target repository lost two comment-only `doc` findings that way, and two `bug` fixes on 08-05.)
-#
-# An unrecognised finding type deliberately yields NOTHING here, which restores the old subject and
-# with it the gate's fail-closed default: nightshift must never under-claim its way past a gate.
+# A host repo's `commit-msg` gate may read the Conventional Commits type as a CHECKED CLAIM about user
+# visibility and treat an unparseable subject as user-visible (ADR 0024); the Fix stage does not
+# write the subject, so the Runner declares the type. An unrecognised finding type yields NOTHING:
+# the subject falls back to `nightshift: <summary>`, which such a gate cannot parse and so treats as
+# user-visible. nightshift must never under-claim its way past a gate.
 commit_type() { # finding_type -> conventional commits type, or empty when unknown
   case "$1" in
     bug|typo)                        printf 'fix' ;;
@@ -627,9 +570,8 @@ commit_type() { # finding_type -> conventional commits type, or empty when unkno
   esac
 }
 
-# The `nightshift` scope keeps authorship visible in `git log --oneline`, which the old fixed prefix
-# carried and the committer identity alone does not show. A scope is optional in the grammar every
-# such gate parses, so carrying it costs the type nothing.
+# The `nightshift` scope keeps authorship visible in `git log --oneline`, which the committer
+# identity alone does not; a scope is optional in the grammar such gates parse.
 commit_subject() { # finding_type summary -> subject line
   local ct; ct="$(commit_type "$1")"
   if [ -n "$ct" ]; then printf '%s(nightshift): %s' "$ct" "$2"; else printf 'nightshift: %s' "$2"; fi
@@ -669,11 +611,9 @@ Prefer a change under ${MAX_FILES:-15} files and ${MAX_LINES:-400} lines. Larger
 if it is genuinely ONE coherent, reviewable improvement — never bundle unrelated changes." ;;
   esac
   if [ "$stage" = fix ]; then
-    # Name the gates the repo will apply to the runner's commit. The Fix stage cannot commit and so
-    # never sees a hook fire; an unmet convention surfaces only as `commit-failed` AFTER the model
-    # is gone, discarding the whole change (that is how web-app's CHANGELOG gate silently ate a
-    # deps cleanup, and auth-extension's two test fixes before it). Detected, not guessed: only
-    # what is actually present is listed, and nothing is listed when the repo gates nothing.
+    # Name the gates the repo will apply to the runner's commit (ADR 0024). The Fix stage cannot
+    # commit, so an unmet convention surfaces only as `commit-failed` after the model is gone,
+    # discarding the change. Only gates actually present are listed.
     local gates="" hooks changelog f
     for f in CHANGELOG.md CHANGELOG CHANGES.md; do
       [ -f "$wd/$f" ] && { changelog="$f"; break; }
@@ -682,22 +622,17 @@ if it is genuinely ONE coherent, reviewable improvement — never bundle unrelat
 - \`$changelog\` is present — a user-visible change is expected to carry an entry. Match the file's
   own format and add to its newest/unreleased section; do not invent a release."
     hooks="$(git -C "$wd" config core.hooksPath 2>/dev/null || true)"
-    # `core.hooksPath` is very often RELATIVE (`.githooks` is the common spelling, and this repo
-    # uses it). git resolves that against the working tree; testing it as-is would resolve it
-    # against the RUNNER's cwd instead, so the hook silently went undetected and the Fix stage was
-    # never told about a gate that then rejected its commit — the exact `commit-failed` this block
-    # exists to prevent.
+    # A RELATIVE `core.hooksPath` (`.githooks`) resolves against the working tree, not the Runner's
+    # cwd; testing it as-is would miss the hook.
     case "$hooks" in "" ) ;; /* ) ;; * ) hooks="$wd/$hooks" ;; esac
     [ -n "$hooks" ] || hooks="$(git -C "$wd" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)/hooks"
-    # BOTH message hooks, not just `pre-commit`: a repo that moved its CHANGELOG check to
-    # `commit-msg` (which alone can see the commit type) was reported as ungated, and the Fix stage
-    # was never told about the gate that then rejected its commit. One observed target repository
-    # was exactly that case: its `pre-commit` is a SKILL.md lint and its `commit-msg` is the CHANGELOG gate.
-    # A hooks dir inside the worktree is candidate-writable, and even its unchanged hooks call scripts
-    # in the tree, so finalize redirects core.hooksPath away from it (worktree_hook_args): those hooks
-    # do NOT run on the runner's commit. Say so instead of promising a gate that never executes; the
-    # Fix stage has to meet their checks itself.
-    # Same rule as worktree_hook_args: only a CONFIGURED core.hooksPath is redirected.
+    # Check `commit-msg` too, not just `pre-commit`: a CHANGELOG check may live there, since only it
+    # sees the commit type.
+    # A hooks dir inside the worktree is candidate-writable, and even its unchanged hooks call
+    # scripts in the tree, so finalize redirects core.hooksPath away from it (worktree_hook_args,
+    # ADR 0026): those hooks do NOT run on the runner's commit, and the prompt says so instead of
+    # promising a gate that never executes. Same rule as worktree_hook_args: only a CONFIGURED
+    # core.hooksPath is redirected.
     local hooks_r wd_r inwt=0
     if [ -n "$(git -C "$wd" config core.hooksPath 2>/dev/null || true)" ]; then
       hooks_r="$(realpath -m -- "$hooks" 2>/dev/null || printf '%s' "$hooks")"
@@ -718,9 +653,8 @@ if it is genuinely ONE coherent, reviewable improvement — never bundle unrelat
       fi
     done
     if [ -n "$gates" ]; then
-      # Name the subject VERBATIM. A hook that reads the commit type decides against this exact
-      # line, and the Fix stage has no other way to know it — left to guess, it reasoned about a
-      # subject it would never get and concluded a gate would pass that then blocked it.
+      # Name the subject VERBATIM: a hook that reads the commit type decides against this exact
+      # line, and the Fix stage has no other way to know it (ADR 0024).
       local subj
       subj="$(commit_subject "$(jq -r '.type // "change"' "$id/finding.json" 2>/dev/null || true)" \
                              "$(jq -r '.summary // ""'   "$id/finding.json" 2>/dev/null || true)")"
@@ -739,13 +673,12 @@ subject line will be exactly:
 Judge any hook that reads the subject against THAT line, not against one you would have written.
 Satisfy these as part of the change:$gates"
     fi
-    # A commit-rejected.log here means finalize tried to commit the tree this worktree still holds
-    # and git refused it — almost always the repo's own hooks (ADR 0036). This is the one retry.
-    # Unlike the suite output in tests.log, the hooks ran on the HOST, outside the ship gate's
-    # sandbox, so their output is redacted of credential-shaped text before a model sees it —
-    # redacted whole, before trimming, so a cut cannot separate a key from its label. Trimmed
-    # to its tail, where a hook states its verdict, and to a byte cap so a chatty hook cannot crowd
-    # out the prompt. Tested with -f, not -s: a hook that fails silently still consumed a commit.
+    # A commit-rejected.log means git refused finalize's commit of this tree, almost always the
+    # repo's own hooks (ADR 0036); this is the one retry. Unlike tests.log, the hooks ran on the
+    # HOST, outside the gate's sandbox, so credential-shaped text is redacted before a model sees
+    # it: over the whole output and before trimming, so a cut cannot separate a key from its label.
+    # Then trimmed to its tail, where a hook states its verdict, and to a byte cap so a chatty hook
+    # cannot crowd out the prompt. Tested with -f, not -s: a silent failing hook still cost a commit.
     if [ -f "$id/commit-rejected.log" ]; then
       local hookout
       hookout="$(redact_hook_output < "$id/commit-rejected.log" | tail -n 100 | tail -c 6000 | fence_safe)"
@@ -870,9 +803,8 @@ $(cat "$id/signals.json")"
 $(cat "$id/finding.json")" ;;
   esac
   if [ "$stage" = review ]; then
-    # Stage first, then show the STAGED diff so review sees exactly what finalize commits. A plain
-    # `git diff` reports tracked modifications only and omits new untracked files, letting a
-    # fix-created file ship unreviewed (R9 / fix N3).
+    # Stage first, then show the STAGED diff so review sees exactly what finalize commits; a plain
+    # `git diff` omits new untracked files, letting a fix-created file ship unreviewed (R9).
     git -C "$wd" add -A
     prompt="$prompt
 
@@ -893,18 +825,14 @@ $(git -C "$wd" diff "${NIGHTSHIFT_ADVISE_BASE:-HEAD}...HEAD" 2>/dev/null || true
 
 # --------------------------------------------------------------- selection ----
 select_order() { # emit "path<TAB>mode<TAB>base", least-recently-serviced repo first (ADR 0008)
-  # Fairness over recency: the repo nightshift has NOT touched in the longest sorts first, so
-  # coverage rotates instead of fixating on the most-active repo (which is nightshift itself —
-  # it commits nightly, so a commit-recency sort put it first every night and starved the tail
-  # repos at the open-branch cap). Human commit-recency stays as the tiebreaker: among equally-
-  # (or never-) serviced repos, prefer the one with the hottest code. Cold start = no ledger =
-  # every repo ties at serviced 0, so night one still orders by commit-recency exactly as before.
+  # Fairness over recency: the repo nightshift has NOT serviced longest sorts first, so coverage
+  # rotates instead of starving the tail at the open-branch cap. Commit recency breaks ties, which
+  # also orders a cold start (no ledger, every repo at 0).
   local i path mode base ct st
   for i in "${!REPO_PATHS[@]}"; do
     path="${REPO_PATHS[$i]}"; mode="${REPO_MODES[$i]}"; base="${REPO_BASES[$i]:-}"
-    # The parser rejects an unknown mode outright, so this is defence in depth — but it must still
-    # SAY something. A bare `continue` here is what made a typo'd mode invisible: the repo vanished
-    # from the night with no line in the log and no entry in the digest.
+    # Defence in depth behind the parser, and it must still log: a silent skip makes the repo vanish
+    # from the night.
     case "$mode" in
       branch-fix|findings-only) ;;
       *) log "skip $path (unknown mode '$mode' — the rulebook parser should have refused this)"; continue ;;
@@ -927,10 +855,8 @@ repo_findings() { # repo -> per-repo `findings:` override from the rulebook, els
 }
 
 repo_test_cmd() { # repo -> the repo's ship-gate command, or "" for a findings-only repo (ADR 0022)
-  # Deliberately has NO global fallback: a test command is repo-specific by nature, and inheriting
-  # some fleet-wide default would run the wrong suite. Empty is reachable only for a `findings-only`
-  # repo — the parser refuses a `branch-fix` repo without one (ADR 0026), because a repo nightshift
-  # pushes branches for must have something that can say the repo is still whole.
+  # NO global fallback: a fleet-wide default would run the wrong suite. Empty only for a
+  # `findings-only` repo; the parser refuses a `branch-fix` repo without one (ADR 0026).
   local repo="$1" i
   for i in "${!REPO_PATHS[@]}"; do
     if [ "${REPO_PATHS[$i]}" = "$repo" ]; then
@@ -941,9 +867,8 @@ repo_test_cmd() { # repo -> the repo's ship-gate command, or "" for a findings-o
 }
 
 repo_test_net() { # repo -> 1 if this repo's gate sandbox gets network egress, else 0 (ADR 0026)
-  # Off unless the rulebook says otherwise, and it is per repo on purpose: `npm ci` needs a registry
-  # and `uv run --with-requirements` needs an index, while most suites need nothing at all. Granting
-  # egress fleet-wide to satisfy two repos would hand every other suite an exfil channel for free.
+  # Off unless the rulebook opts in, and per repo on purpose: fleet-wide egress would hand every
+  # suite an exfiltration channel.
   local repo="$1" i
   for i in "${!REPO_PATHS[@]}"; do
     if [ "${REPO_PATHS[$i]}" = "$repo" ]; then
@@ -979,22 +904,14 @@ dim_scan_marker() { # repo dim -> marker file path (basename + path hash keeps s
   printf '%s/%s-%s__%s' "$SCAN_DIR" "$(basename "$1")" "$(printf '%s' "$1" | sha1sum | cut -c1-8)" "$2"
 }
 refresh_ledger_epoch_index() { # rebuild LEDGER_EPOCH_INDEX (repo\tdim\tservice_epoch\tshipped_epoch) iff the ledger changed
-  # last_dim_epoch AND evidence_override both run once per (repo,dimension) cell inside nested loops
-  # — select_dimension's dimension loop and write_digest's repo×dimension coverage matrix — so a
-  # per-call `jq -rs` slurp re-parses the whole append-only, never-pruned ledger O(R*D) times a
-  # night, each slurp forking a `date` per matching row. Instead derive BOTH per-key aggregates in
-  # ONE ledger.py pass and cache them, invalidated on the ledger's mtime (the file is command-substitution-
-  # safe state, since callers may run in a subshell). Each column is exactly what its old per-call
-  # query returned, so neither the staleness ranking nor the evidence override changes:
+  # last_dim_epoch and evidence_override run once per (repo,dimension) cell inside nested loops, so
+  # both aggregates come from ONE ledger.py pass, cached in a file (callers may run in a subshell)
+  # and invalidated on the ledger's mtime:
   #   col 3  max service ts over finding|shipped|abandoned   (last_dim_epoch)
   #   col 4  max epoch over shipped rows                     (evidence_override: ∃ts>gen ⟺ max>gen)
-  # Col 4 reduces over PARSED epochs, not over raw strings: an unparsable ts scores 0, exactly as the
-  # old per-row `date -d ... || echo 0` scored it, and a lexical max would let one such row mask a
-  # real shipped finding behind it. That is why the `ship` rows arrive UNGROUPED and the max is
-  # taken below: `ledger.py dimension-epochs` converts the whole batch in ONE process (it used to be
-  # one `date` fork per shipped row ever recorded, re-paid on every ledger append, since the mtime
-  # invalidates this index nightly). An empty ts stays empty (skipped) while an unparsable one
-  # still scores 0 for its row alone.
+  # Col 4 reduces over PARSED epochs, so the `ship` rows arrive ungrouped and the max is taken here:
+  # a lexical max would let one unparsable ts (scored 0) mask a real shipped finding. An empty ts is
+  # skipped.
   if [ ! -f "$LEDGER" ]; then rm -f "$LEDGER_EPOCH_INDEX" 2>/dev/null || true; return 0; fi
   # Fresh index (exists, current format, ledger not newer) → reuse; nested cells cost a lookup, not
   # a scan. `read` is a builtin, so the version check costs no fork on that hot path.
@@ -1005,12 +922,11 @@ refresh_ledger_epoch_index() { # rebuild LEDGER_EPOCH_INDEX (repo\tdim\tservice_
   fi
   local raw tmp kind repo dim e key
   local -A svc=() ship=()
-  # On a read failure keep any existing index and retry next call — never cache an empty index
-  # over a good one (matches the old per-call `|| true`, which fell back to epoch 0 only for that
-  # one call).
+  # On a read failure keep any existing index and retry next call: never cache an empty index over a
+  # good one.
   raw=$(ledger dimension-epochs 2>/dev/null) || return 0
   while IFS=$'\t' read -r kind repo dim e; do
-    [ -n "$e" ] || continue        # a null/absent ts parses to nothing, as it scored 0 before
+    [ -n "$e" ] || continue        # a null/absent ts parses to nothing and is skipped
     key="$repo"$'\t'"$dim"
     if [ "$kind" = svc ]; then
       svc["$key"]=$e
@@ -1022,8 +938,8 @@ refresh_ledger_epoch_index() { # rebuild LEDGER_EPOCH_INDEX (repo\tdim\tservice_
   {
     printf '%s\n' "$LEDGER_EPOCH_INDEX_VERSION"
     # $key is already "repo<TAB>dim"; a shipped row implies a service row, so svc's keys are the
-    # complete key set and a key with no shipped row scores 0 (no override), as the old scan did.
-    # A ledger with no service rows yet writes the marker alone — still a valid, cacheable index.
+    # complete key set and a key with no shipped row scores 0 (no override). A ledger with no
+    # service rows writes the marker alone, still a valid, cacheable index.
     if [ "${#svc[@]}" -gt 0 ]; then
       for key in "${!svc[@]}"; do
         printf '%s\t%s\t%s\n' "$key" "${svc[$key]}" "${ship[$key]:-0}"
@@ -1033,10 +949,8 @@ refresh_ledger_epoch_index() { # rebuild LEDGER_EPOCH_INDEX (repo\tdim\tservice_
   mv -f "$tmp" "$LEDGER_EPOCH_INDEX"
 }
 last_dim_epoch() { # repo dim -> epoch this (repo,dim) was last SERVICED — a work-item row OR an Explore scan
-  # A lens can Explore and find nothing; counting only work-item outcomes left its epoch at 0
-  # forever — permanently maximal staleness, so select_dimension re-picked it every run and
-  # starved the others.
-  # The Explore scan marker (touched every pass, outcome or not) is what makes rotation advance.
+  # The Explore scan marker, touched every pass, counts too: a lens that finds nothing must still
+  # age, or select_dimension re-picks it forever and starves the others.
   local repo="$1" dim="$2" lepoch=0 mepoch=0 marker
   refresh_ledger_epoch_index
   if [ -f "$LEDGER_EPOCH_INDEX" ]; then
@@ -1053,10 +967,9 @@ recon_cache_path() { # repo -> cache path; basename for readability + a path has
   printf '%s/%s-%s.json' "$RECON_DIR" "$(basename "$1")" "$(printf '%s' "$1" | sha1sum | cut -c1-8)"
 }
 # --- ADR 0015: recon reprioritizes via yield weights, never excludes ----------
-# Recon can no longer drop a dimension; it only weights it. The finite low-weight floor is the real
-# anti-starvation guarantee (a `low` lens recurs ~DIM_W_HIGH/DIM_W_LOW = 10x less often than a `high`
-# one, never never); the cadence-relative ceiling is a legibility backstop. The 2.0/1.0/0.2
-# weights are scaled ×5 to integers so the whole selection score stays integer arithmetic in bash.
+# Recon only weights a dimension, never drops it. The finite low weight is the anti-starvation
+# guarantee (a `low` lens recurs ~10x less often than a `high` one, never never); the cadence-relative
+# ceiling is a backstop. The 2.0/1.0/0.2 weights are scaled ×5 so scores stay integer arithmetic.
 DIM_W_HIGH=10 DIM_W_NORMAL=5 DIM_W_LOW=1
 
 dim_weight() { # repo dim -> integer yield weight; no cache / unknown / pre-0015 => normal (never drops)
@@ -1076,12 +989,9 @@ recon_generated_epoch() { # repo -> epoch the recon cache was generated (0 if no
 
 evidence_override() { # repo dim -> 0 if a SHIPPED finding for (repo,dim) postdates recon's last look.
   # A shipped finding (passed review) newer than recon's judgment proves a `low` verdict stale, so the
-  # weight floors at normal. Anchored to recon's generation time, it self-clears once recon re-runs
-  # with that finding in history. Only `shipped` counts — a later-dropped false positive must not pin
-  # the weight up. Derived from the durable ledger; NOTHING is written to the disposable recon cache.
-  # "Some shipped ts postdates recon" is a max over that key's shipped epochs (∃ts>gen ⟺ max>gen),
-  # so it comes from the same cached one-pass index last_dim_epoch reads — a lookup per cell, not a
-  # whole-ledger re-parse plus a `date` fork per matching row, once per (repo,dimension) cell.
+  # weight floors at normal; it self-clears once recon re-runs with that finding in history. Only
+  # `shipped` counts, so a later-dropped false positive cannot pin the weight up. Nothing is written
+  # to the disposable recon cache; the max shipped epoch comes from the epoch index.
   local repo="$1" dim="$2" gen ship=0
   [ -f "$LEDGER" ] || return 1
   refresh_ledger_epoch_index
@@ -1093,12 +1003,8 @@ evidence_override() { # repo dim -> 0 if a SHIPPED finding for (repo,dim) postda
 }
 
 refresh_ledger_gap_index() { # rebuild LEDGER_GAP_INDEX (repo\tservices\tmedian_gap) iff the ledger changed
-  # median_gap runs once per repo per pass (dim_ceiling, from select_dimension) and used to re-slurp
-  # the whole never-pruned ledger and fork a `date` per matching row to do it — the same unbounded
-  # per-row cost the epoch index above exists to remove, on the one aggregate that was left out of
-  # it. Derive every repo's cadence in ONE ledger.py pass, cached on the ledger's
-  # mtime and stored in a file (callers run inside command substitutions, so an in-memory
-  # associative array would not survive to the next cell).
+  # Every repo's cadence in ONE ledger.py pass, cached on the ledger's mtime in a file: callers run
+  # inside command substitutions, so an in-memory array would not survive to the next call.
   if [ ! -f "$LEDGER" ]; then rm -f "$LEDGER_GAP_INDEX" 2>/dev/null || true; return 0; fi
   local first=""
   if [ -f "$LEDGER_GAP_INDEX" ] && [ ! "$LEDGER" -nt "$LEDGER_GAP_INDEX" ]; then
@@ -1106,20 +1012,16 @@ refresh_ledger_gap_index() { # rebuild LEDGER_GAP_INDEX (repo\tservices\tmedian_
     [ "$first" = "$LEDGER_GAP_INDEX_VERSION" ] && return 0
   fi
   local rows tmp
-  # The whole ledger is read before any row is judged: a retracted row is identified by an entry
-  # that appears LATER in the append-only ledger. A retracted `empty` never counted as a service —
-  # it is the record of a night that claimed to have reviewed something without doing so
-  # (ADR 0023), and letting it shorten the measured cadence would make every lens look more
-  # overdue than it is.
-  # item-<epoch>-fN siblings are ONE Explore service; retractions are filtered first so a
-  # withdrawn row cannot supply that pass's timestamp.
-  # On a read failure keep any existing index and retry next call, as above.
+  # The whole ledger is read before any row is judged: a retraction appears LATER than its row. A
+  # retracted `empty` (a night that did not really review, ADR 0023) is no service, or every lens
+  # would look more overdue than it is. item-<epoch>-fN siblings are ONE Explore service, counted
+  # after retractions are filtered so a withdrawn row cannot supply that pass's timestamp. On a read
+  # failure keep any existing index, as above.
   rows=$(ledger service-gaps 2>/dev/null) || return 0
   tmp="$(mktemp "$STATE_DIR/.ledger-gap.idx.XXXXXX")"
-  # A repo with no service rows simply gets no row; the lookup then reads 0 services and bootstraps,
-  # exactly as an empty epoch list did. A ledger with no service rows at all writes the marker alone
-  # — still a valid, cacheable index. The lookups match a repo PATH in $1, so the marker line (which
-  # starts with `#`) can never be mistaken for a row.
+  # A repo with no service rows gets no row and bootstraps; a ledger with none writes the marker
+  # alone, still a valid, cacheable index. Lookups match a repo PATH in $1, so the `#` marker line
+  # can never be mistaken for a row.
   {
     printf '%s\n' "$LEDGER_GAP_INDEX_VERSION"
     if [ -n "$rows" ]; then printf '%s\n' "$rows"; fi
@@ -1128,11 +1030,9 @@ refresh_ledger_gap_index() { # rebuild LEDGER_GAP_INDEX (repo\tservices\tmedian_
 }
 
 median_gap() { # repo D -> median inter-Explore interval (secs); 60d bootstrap
-  # "Overdue" is judged RELATIVE to how often this repo actually gets attention, not absolute calendar
-  # age — else a slow-cadence repo would trip an absolute ceiling on every lens every run, neutralizing
-  # the weights. Until the repo has >= D recorded services, bootstrap with an absolute 60d.
-  # The counting and the median itself come from the cached index; the two floors stay HERE, because
-  # D — the repo's dimension count — is a rulebook fact the ledger knows nothing about.
+  # "Overdue" is RELATIVE to this repo's cadence, or a slow repo would trip an absolute ceiling on
+  # every lens and neutralize the weights. Below D recorded services, bootstrap with 60d. The floors
+  # stay here, not in the index: D, the repo's dimension count, is a rulebook fact.
   local repo="$1" D="$2" boot=$((60*86400)) row n m
   [ -f "$LEDGER" ] || { echo "$boot"; return; }
   refresh_ledger_gap_index
@@ -1191,10 +1091,8 @@ ensure_recon() { # repo -> refresh cache if missing / configured base changed / 
     fi
   fi
   id="$RUNS_DIR/recon-$(date +%s%N)"; mkdir -p "$id"
-  # Recon is read-only, but the "never the live checkout" invariant is absolute: if the
-  # isolated worktree can't be created, SKIP recon rather than pointing a stage at the
-  # operator's working tree. Recon degrades gracefully — no cache written this run means
-  # dim_weight() returns the normal weight for every dimension, so nothing is starved.
+  # "Never the live checkout" is absolute even for read-only recon: without an isolated worktree,
+  # SKIP recon. No cache means dim_weight() returns normal for every dimension, so nothing starves.
   wt="$WORKTREES_DIR/$(basename "$id")"
   if setup_worktree "$repo" "$wt" "$base"; then
     "$NIGHTSHIFT_HOME/lib/recon_signals.sh" "$wt" > "$id/signals.json" 2>/dev/null || echo '{}' > "$id/signals.json"
@@ -1203,11 +1101,9 @@ ensure_recon() { # repo -> refresh cache if missing / configured base changed / 
     log "  $(basename "$repo"): recon worktree failed — skipping recon (never the live checkout)"
     return 0
   fi
-  # An agent that cannot authenticate produces no recon result — but that is a statement about the
-  # CLI, not about the repo, and caching it would be wrong twice: the negative cache asserts "recon
-  # found nothing here" and its backoff then suppresses the retry for 6h, so the operator's fix does
-  # not take effect on the next run either. Leave the cache untouched and let main() end the night.
-  # The same holds for the first of the failures that make an agent unusable, before it is fatal.
+  # An unusable agent (fatal, or its first wall) says nothing about the repo (ADR 0023): a negative
+  # cache would claim "recon found nothing" and its backoff would delay the retry after the operator's
+  # fix. Leave the cache untouched.
   if [ -n "$AGENT_FATAL" ] || [ "$AGENT_LAST_WALLED" = 1 ]; then
     log "  $(basename "$repo"): recon skipped — agent unavailable (cache left untouched)"
     return 0
@@ -1236,15 +1132,9 @@ ensure_recon() { # repo -> refresh cache if missing / configured base changed / 
 SETTLED_BRANCHES=""   # newline-separated "<repo>\t<branch>" the ledger has already settled
 
 refresh_settled_branches() { # cache the branches whose latest ledger verdict is terminal
-  # The cap asks "how many decisions am I still waiting on", but `--no-merged` can only answer
-  # "is the sha an ancestor of base" — the same naive test ADR 0016 already replaced inside
-  # harvest, and it is wrong in both directions once the ref outlives the decision:
-  #   * a CLOSED PR whose branch was never deleted is a REJECTION, not a pending decision, yet
-  #     it holds a slot forever even though the operator has already decided;
-  #   * a squash- or rebase-merged branch never becomes an ancestor of base (ADR 0016 §1/§2),
-  #     so a surviving ref counts as open although the change demonstrably landed.
-  # harvest already resolves both via its authoritative ladder and records the verdict. Read that
-  # instead of re-deriving a weaker answer: the ledger is the record (ADR 0021).
+  # The cap counts decisions still pending (ADR 0025), which ancestry cannot answer: a closed PR's
+  # surviving ref is a rejection, a squash-merged ref never becomes an ancestor (ADR 0016). harvest
+  # records the verdict, so read the ledger instead of re-deriving a weaker answer.
   SETTLED_BRANCHES=""
   [ -f "$LEDGER" ] || return 0
   # The shared terminal verdicts all mean "decided" (ADR 0025).
@@ -1299,9 +1189,8 @@ open_branch_count() { # count decisions still pending in the refreshed inventory
 }
 
 # ---------------------------------------------------------------- worktree ----
-# Every work item runs in a throwaway, isolated git worktree — never the repo's
-# live checkout. So nightshift never touches your branch/state, and any misstep
-# (incl. non-git shell, §2b) is confined to a dir we delete afterwards.
+# Every work item runs in a throwaway worktree, never the repo's live checkout, so any misstep
+# (incl. non-git shell, §2b) is confined to a dir deleted afterwards.
 setup_worktree() { git -C "$1" worktree add -q --detach "$2" "$3"; }   # repo wt base
 remove_worktree() {                                                    # repo wt
   git -C "$1" worktree remove --force "$2" 2>/dev/null || true
@@ -1309,12 +1198,10 @@ remove_worktree() {                                                    # repo wt
 }
 
 # --------------------------------------------------------------------- pr ----
-# Open a normal (non-draft) PR for a freshly pushed nightshift/* branch. A PR is a
-# GitHub-API object, NOT a push to main — the pre-push hook is untouched and the
-# merge stays the human's click. Best-effort: PR off, no GitHub remote (e.g. a
-# local bare remote / sandbox), missing gh, or a gh failure all just skip the PR;
-# the branch is already pushed either way. Echoes the PR url ("" if none). All
-# progress/errors go to stderr so stdout stays clean for the caller.
+# Open a normal (non-draft) PR for a freshly pushed nightshift/* branch. A PR is an API object, not a
+# push: the pre-push hook is untouched and the merge stays the human's click. Best-effort: PR off,
+# no GitHub remote, missing gh or a gh failure skip the PR. All progress and errors go to stderr:
+# stdout carries only the url.
 open_pr() { # repo wt branch item_dir base -> echoes PR url ("" if none)
   local repo="$1" wt="$2" branch="$3" id="$4" base="${5:-}" url
   [ "$NIGHTSHIFT_OPEN_PR" = 1 ] || return 0
@@ -1323,19 +1210,15 @@ open_pr() { # repo wt branch item_dir base -> echoes PR url ("" if none)
     *) log "  no GitHub remote — branch pushed, PR skipped"; return 0 ;;
   esac
   command -v gh >/dev/null 2>&1 || { log "  gh not found — branch pushed, no PR"; return 0; }
-  # The PR base MUST be the ref the branch was actually cut from (rulebook `base:`,
-  # e.g. develop) — NOT an auto-detected origin/main. Re-deriving with base_ref here
-  # ignored the configured base and opened every PR against main, so a develop-based
-  # one-line fix showed develop's whole divergence as its diff. Fall back to auto-
-  # detect only if the caller passed nothing.
+  # The PR base MUST be the ref the branch was cut from (rulebook `base:`), not an auto-detected
+  # main, or the diff shows the base's whole divergence. Auto-detect only if none was passed.
   [ -n "$base" ] || base="$(base_ref "$repo")"
   base="${base#refs/remotes/}"; base="${base#origin/}"; [ "$base" = HEAD ] && base=main
   # A runtime/behavioral finding the reviewer could not statically prove ships flagged, so the
   # morning human knows this one needs tests before merge and the verified ones do not.
   local mark=""
   [ "$(jq -r '.proof // ""' "$id/review.md" 2>/dev/null)" = unproven ] && mark="[unverified] "
-  # The verification chain travels WITH the PR so the morning merge is a 30-second audit,
-  # not a re-derivation — and so a rubber-stamp review is visible rather than hidden.
+  # The verification chain travels WITH the PR, so a rubber-stamp review is visible.
   local claim verify verif proof evidence
   claim=$(jq -r '.claim // ""'         "$id/finding.json" 2>/dev/null || true)
   verify=$(jq -r '.verify // ""'       "$id/finding.json" 2>/dev/null || true)
@@ -1429,7 +1312,7 @@ base_gate_status() { # repo sha item_dir cmd label consequence
 # Rerun on every red result, never cached: the registry or the network can fail between two fix
 # iterations, and a green base from the first would pin the next failure on the fix again.
 # 0 = red there too; 1 = green, or no answer (worktree or sandbox unavailable), which keeps the
-# failure on the fix as before.
+# failure on the fix.
 base_suite_red() { # repo worktree item_dir cmd
   local repo="$1" wt="$2" id="$3" tcmd="$4" head st=0
   head="$(git -C "$wt" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null)" || return 1
@@ -1440,13 +1323,9 @@ base_suite_red() { # repo worktree item_dir cmd
   [ "$st" -eq 1 ]
 }
 
-# Before Explore, once per repo and base commit in a night, run the gate on the unchanged base.
-# A red base (a broken merge, a registry outage, a suite that needs the host) or a gate that cannot
-# run used to surface only after Explore, Fix and Review: 2026-11-12..16 twenty fixes in three repos
-# ended gate-blocked, the night's work went to the one repo whose suite was green, and nobody was
-# told. Now such a repo is skipped for the night, named at the top of the digest, and reported once
-# per red spell through NIGHTSHIFT_BLOCKED_BASE_CMD so its owner can repair the suite. Zero model
-# tokens, one suite run per base.
+# Before Explore, once per repo and base commit in a night, run the gate on the unchanged base
+# (ADR 0041). A red base or a gate that cannot run skips the repo for the night, names it at the top
+# of the digest, and is reported once per red spell through NIGHTSHIFT_BLOCKED_BASE_CMD.
 declare -gA BASE_PRECHECK=()       # "repo<TAB>sha" -> green | red | unavailable, this process only
 declare -gA BASE_PRECHECK_LOG=()   # "repo<TAB>sha" -> the pre-check's log
 declare -gA BASE_SKIPPED=()        # repo -> why; a repo skipped once stays skipped for the run
@@ -1519,11 +1398,10 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 blocked, 3 
     log "  $(basename "$repo"): no test_cmd in the rulebook — NOT shipping"
     return 2
   fi
-  # The suite runs on the TRACKED tree plus what the suite itself builds, never on ignored files a
-  # stage left behind (ADR 0037). Dependencies installed before Fix, or by the previous gate, sit in
-  # a worktree the Fix stage can write, and `pnpm install --frozen-lockfile` trusts a node_modules it
-  # finds rather than re-verifying it — so a patched dependency would make this gate certify itself.
-  # The worktree held no ignored file when it was created, so this restores exactly that state.
+  # The suite runs on the TRACKED tree plus what it builds itself, never on ignored files left by a
+  # stage or by an earlier gate run, both writable by the next Fix (ADR 0037): an installer may trust
+  # a node_modules it finds, so a patched dependency would make the gate certify itself. A fresh
+  # worktree holds no ignored file, so purging restores that state.
   if ! purge_ignored_files "$wt"; then
     printf 'nightshift: ignored files in this worktree could not be removed before the gate.\n%s\n' \
       "The suite would run on dependencies a stage could have written. Not shipping." >"$id/tests.log"
@@ -1536,9 +1414,8 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 blocked, 3 
   gate_exec "$repo" "$wt" "$id" "$tcmd" "$id/tests.log" "test gate" "NOT shipping" || trc=$?
   [ "$GATE_UNAVAILABLE" = 0 ] || return 2
 
-  # Checked BEFORE the exit status, because the whole point of this attack is to exit 0. A hostile
-  # pointer is not a red suite to hand back to the Fix stage — nothing it can write repairs it, and
-  # retrying just runs the hostile command again. Refuse the item outright and say what happened.
+  # Checked BEFORE the exit status, since this attack exits 0. A hostile pointer is no red suite for
+  # the Fix stage: a retry just runs the hostile command again, so refuse the item (ADR 0026).
   if ! git_pointer_ok "$repo" "$wt"; then
     printf 'nightshift: this worktree'"'"'s .git no longer resolves into %s.\n%s\n' "$repo" \
       "Refusing the item: the next git command would read a gitdir the suite chose." >"$id/tests.log"
@@ -1548,20 +1425,16 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 blocked, 3 
 
   if [ "$trc" -ne 0 ]; then
     [ "$trc" -eq 124 ] && log "  $(basename "$repo"): test gate TIMED OUT after ${TEST_TIMEOUT}s"
-    # 125 is how the sandbox's own pid 1 reports that a resource ceiling would not apply, and how
-    # `timeout` reports its own failure. Same class either way: a host problem, never a regression
-    # the Fix stage can repair, so it must not burn a fix iteration. (A suite that exits 125 itself
-    # lands here too — the cost is a refusal without a retry, never a ship, so it errs safe.)
-    # A sandbox that never CAME UP is caught earlier, by --json-status-fd: bwrap exits 1 for a bad
-    # bind, a bad --chdir and an unknown option alike, so no exit code identifies that case.
+    # 125: the sandbox's pid 1 could not apply a resource ceiling, or `timeout` itself failed. A host
+    # problem, not a regression, so it must not burn a fix iteration; a suite exiting 125 itself is
+    # refused too, which errs safe. A sandbox that never came up is caught earlier, by
+    # --json-status-fd, since bwrap's exit 1 does not identify it.
     if [ "$trc" -eq 125 ] && [ "$TEST_SANDBOX" != none ]; then
       log "  $(basename "$repo"): test gate could not run under its resource ceilings — NOT shipping"
       return 2
     fi
-    # Red is the fix's fault only if the unchanged base is green. On 2026-10-29 and 2026-11-01 the
-    # registry refused npm downloads before a single test ran, and the Fix stage was asked again and
-    # again to repair a suite it had not touched. Red on the base as well means the host, the
-    # network or the base itself, which no Fix iteration can repair.
+    # Red is the fix's fault only if the unchanged base is green; red on the base too means the host,
+    # the network or the base itself, which no Fix iteration can repair.
     if base_suite_red "$repo" "$wt" "$id" "$tcmd"; then
       log "  $(basename "$repo"): test gate failed (rc=$trc) and the suite is red on the unchanged base as well — not the fix; NOT shipping (see $id/tests.log, $id/base-tests.log)"
       return 2
@@ -1569,15 +1442,9 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 blocked, 3 
     log "  $(basename "$repo"): test gate failed (rc=$trc) — see $id/tests.log"
     return 1
   fi
-  # A green suite only certifies the tree the suite RAN ON. ADR 0027 commits the tree review was
-  # shown — so if the suite changed the worktree, those two are not the same tree and this green
-  # says nothing about what would ship. The classic shape is a lockfile: the fix edits a manifest,
-  # the suite regenerates the lock and passes, ADR 0027 discards the lock, and the branch goes out
-  # with a manifest/lock mismatch that was never tested and would be red on main.
-  #
-  # So refuse, rather than ship a verdict that does not apply to the artifact. "No gate, no ship" is
-  # the whole principle here, and a gate whose result is about a different tree is not a gate for
-  # this one. rc=2, not 1: another fix iteration would run the same suite to the same effect.
+  # A green suite only certifies the tree it RAN ON, and ADR 0027 commits the reviewed tree: if the
+  # suite changed the worktree (a regenerated lockfile, say), its green does not apply to what would
+  # ship, so refuse. rc=2, not 1: another fix iteration would run the same suite to the same effect.
   local rtree=""
   [ -f "$id/reviewed-tree" ] && rtree="$(cat "$id/reviewed-tree")"
   if [ -n "$rtree" ]; then
@@ -1601,9 +1468,7 @@ run_test_gate() { # repo worktree item_dir -> 0 pass, 1 red suite, 2 blocked, 3 
       return 2
     fi
   fi
-  # Removed on success on purpose: the file's PRESENCE is what tells stage_prompt that the previous
-  # attempt broke the suite. A stale log from an earlier iteration would keep asking the Fix stage
-  # to repair damage it has already repaired.
+  # Removed on success: its PRESENCE tells stage_prompt that the previous attempt broke the suite.
   rm -f "$id/tests.log"
   log "  $(basename "$repo"): test gate passed"
   return 0
@@ -1627,8 +1492,7 @@ finalize() { # repo worktree item_dir [seq] [base] [retry_ok] -> echoes branch n
   else
     slug="$(printf '%s-%s' "$type" "$(basename "$repo")" | tr '[:upper:] /' '[:lower:]--' | cut -c1-40)"
   fi
-  # `seq` (a per-run monotonic counter) disambiguates several findings that finalize within the
-  # same clock second in one repo/pass — without it their timestamped branch names would collide.
+  # `seq` (a per-run counter) keeps branch names of findings finalized in the same second distinct.
   branch="${BRANCH_PREFIX}${slug}-$(date +%Y%m%d-%H%M%S)-${seq}"
   # Last line of defence before the Runner runs git against candidate content: a `.git` pointing at
   # a gitdir the candidate wrote turns any of the commands below into arbitrary execution.
@@ -1637,10 +1501,7 @@ finalize() { # repo worktree item_dir [seq] [base] [retry_ok] -> echoes branch n
     return 1
   fi
   # What gets committed is the tree the REVIEWER approved, not whatever the worktree holds now
-  # (ADR 0027). The ship gate runs between review and here and executes the repo's own suite over
-  # this worktree, so an `add -A` at this point ships whatever that suite left behind, unreviewed —
-  # a suite that rewrites `.github/workflows/ci.yml` and exits 0 gets that workflow pushed, and
-  # GitHub runs it with the repository's secrets before any human opens the PR.
+  # (ADR 0027): the suite ran in between, and an `add -A` would ship what it left behind, unreviewed.
   # Checked BEFORE the branch exists, so a refusal has nothing to clean up.
   local rtree=""
   [ -f "$id/reviewed-tree" ] && rtree="$(cat "$id/reviewed-tree")"
@@ -1653,12 +1514,10 @@ finalize() { # repo worktree item_dir [seq] [base] [retry_ok] -> echoes branch n
   local -a hookargs=()
   mapfile -t hookargs < <(worktree_hook_args "$repo" "$wt")
   git -C "$wt" ${hookargs[@]+"${hookargs[@]}"} checkout -q -b "$branch"
-  # Say so when the suite changed something: a lockfile a test run legitimately refreshed is being
-  # dropped right here, and dropping it silently would be its own kind of lie.
-  # Compared against the REVIEWED TREE, not against HEAD: `status --porcelain` reports the staged
-  # fix itself, so every honest night would claim the gate had meddled. `diff-index` covers tracked
-  # divergence; `ls-files --others` covers files the suite created (ignored ones stay ignored, so a
-  # suite's node_modules does not trip it).
+  # Say so when the suite changed something, since it is dropped here. Compared against the
+  # REVIEWED TREE, not HEAD, which would report the staged fix itself. Two halves: `diff-index`
+  # catches tracked changes, `ls-files --others` files the suite created; ignored files stay
+  # ignored, so a suite's node_modules does not trip it.
   git -C "$wt" update-index -q --refresh >/dev/null 2>&1 || true
   if ! git -C "$wt" diff-index --quiet "$rtree" -- 2>/dev/null \
      || [ -n "$(git -C "$wt" ls-files --others --exclude-standard 2>/dev/null | head -1)" ]; then
@@ -1668,18 +1527,12 @@ finalize() { # repo worktree item_dir [seq] [base] [retry_ok] -> echoes branch n
   # below still see exactly what the reviewer approved. The commit then takes the index as it
   # stands: no `add -A`, so nothing the suite created can enter it.
   git -C "$wt" read-tree --reset -u "$rtree"
-  # The TARGET repo's own hooks run for this commit — deliberately: nightshift must not manufacture
-  # commits the host repo would reject. So the commit can fail (a blocking pre-commit hook, or an
-  # empty index because the Fix stage changed nothing), and NOTHING below may treat that as shipped.
-  # Without this check `rev-parse HEAD` just returned the BASE sha, the untouched branch was pushed,
-  # and the ledger recorded `shipped` — a fix that does not exist, holding an open-branch slot.
-  # (Observed 2026-08-02: web-app's CHANGELOG pre-commit hook rejected a deps cleanup; the empty
-  # branch shipped anyway. `set -e` cannot catch it — finalize runs inside an `if` condition.)
-  # The hooks' output is captured (stdout AND stderr) rather than left on the Runner's stderr: on a
-  # rejection it is the only statement of what the gate wanted, and the one retry (ADR 0036) hands
-  # it to the Fix stage. It is still copied to stderr, so the night's log reads as before.
-  # Whether anything is staged is decided BEFORE the hooks run: a hook that unstages the change and
-  # then fails has rejected a real fix, not found an empty one.
+  # The TARGET repo's own hooks run for this commit, deliberately (ADR 0022): nightshift must not
+  # manufacture commits the host would reject. So the commit can fail (a blocking hook, or an empty
+  # index), and NOTHING below may treat that as shipped; `set -e` cannot catch it, since finalize
+  # runs inside an `if` condition. The hooks' output is captured for the one retry (ADR 0036) and
+  # copied to stderr. Whether anything is staged is decided BEFORE the hooks run: a hook that
+  # unstages the change and then fails has rejected a real fix, not found an empty one.
   # The identity is set in the commit's own environment, which outranks both user.* and an
   # exported GIT_AUTHOR_*/GIT_COMMITTER_* in the Runner's: harvest recognises our commits by it.
   local crc=0 staged=1
@@ -1695,13 +1548,9 @@ $(cat "$id/worknote.md")" >"$id/commit-hook.log" 2>&1 || crc=$?
   if [ "$crc" -eq 0 ]; then
     rm -f "$id/commit-hook.log" "$id/commit-rejected.log"
   else
-    # An EMPTY index is not the same event as a rejected commit, and recording it as one makes the
-    # Fix stage's honest way out look like a malfunction. A stage that tried, found no change it
-    # could stand behind, and left the tree alone has ABANDONED the item — a verdict the ledger
-    # already has, from the reviewer's `abandon`. Distinguishing them is what makes "stop rather
-    # than force something" a usable instruction instead of a statistic against the night.
-    # After a hook rejection (ADR 0036) the same empty index means the retry reverted a fix the
-    # reviewer had accepted; `abandoned` would latch that finding, so it stays the rejection it was.
+    # An EMPTY index is not a rejected commit: a Fix stage that left the tree alone has ABANDONED the
+    # item, its honest way out. After a hook rejection (ADR 0036) the same empty index means the
+    # retry reverted an accepted fix; `abandoned` would latch that finding, so it stays commit-failed.
     if [ "$staged" -eq 0 ] && [ -f "$id/commit-rejected.log" ]; then
       log "  $(basename "$repo"): commit retry: the revision removed the whole change — commit-failed, not shipped: $branch"
       ledger_append "$(basename "$id")" "$repo" "$fp" "" "" "commit-failed" "$summary" "" "" "$verif" "$dim" "$type" "$csig"
@@ -1728,13 +1577,10 @@ $(cat "$id/worknote.md")" >"$id/commit-hook.log" 2>&1 || crc=$?
       || log "  $(basename "$repo"): cleanup warning — local branch remains: $branch"
     return "$crc"
   fi
-  # A hook that PASSES may still have changed the commit: a formatter that rewrites and stages
-  # files, or a post-commit hook that amends or moves the branch. Then the commit is not the tree
-  # the reviewer and the test gate saw, and pushing it breaks ADR 0027 by the hook's hand instead
-  # of the suite's. It is refused as `commit-failed` — a commit the host repo's hooks would not let
-  # ship as reviewed — with no retry: the hook printed no demand the Fix stage could answer.
-  # The check reads the BRANCH, not HEAD, and the push below sends that exact sha: a post-commit
-  # hook can leave HEAD on the reviewed commit and point the branch elsewhere.
+  # A hook that PASSES may still have changed the commit (a formatter, a post-commit amend), so it
+  # is not the reviewed tree (ADR 0027): refused as `commit-failed`, with no retry, since the hook
+  # stated no demand. The check reads the BRANCH, not HEAD, and the push sends that exact sha: a
+  # post-commit hook can leave HEAD on the reviewed commit and point the branch elsewhere.
   local ctree
   sha=$(git -C "$wt" rev-parse -q --verify "refs/heads/$branch^{commit}" 2>/dev/null || true)
   ctree=$(git -C "$wt" rev-parse -q --verify "${sha:-refs/heads/$branch}^{tree}" 2>/dev/null || true)
@@ -1767,10 +1613,8 @@ $(cat "$id/worknote.md")" >"$id/commit-hook.log" 2>&1 || crc=$?
 
 # ------------------------------------------------- independent branch review ----
 # ----------------------------------------------------------- finding closure ----
-# A finding is a human-owned TODO with no branch and no sha, so harvest's reconcile loop — which
-# tests a branch sha against base — can never reach it. Left alone it stays open in the ledger, the
-# digest and the dashboard forever, and known_work keeps re-injecting it into Explore. This phase
-# closes the loop, cheapest layer first:
+# A finding has no branch and no sha, so harvest's reconcile can never close it (ADR 0021). This
+# phase does, cheapest layer first:
 #   1. the deterministic freshness probe (lib/probe_findings.py) recomputes every open finding's
 #      content signature (ADR 0014). An UNCHANGED signature proves the target code was never
 #      touched, so the finding cannot have been fixed — no model is spent on it.
@@ -1832,8 +1676,8 @@ verify_findings() {
     wt="$WORKTREES_DIR/verify-$(date +%s%N)"
     setup_worktree "$repo" "$wt" "$base" || { log "verify: no worktree for $(basename "$repo") — skip"; continue; }
     id="$RUNS_DIR/verify-$(date +%s%N)"; mkdir -p "$id"
-    # The stage sees the finding as recorded — NOT the original code. Judging the present state is
-    # the whole point; handing it a reconstruction would invite pattern-matching on the old defect.
+    # The stage sees the finding as recorded, NOT the original code: it must judge the present
+    # state, not pattern-match on the old defect.
     jq -nc --arg s "$summary" --arg fp "$fp" --arg d "$dim" --arg ts "$ts" \
       --argjson files "$(jq -c '[(.fingerprint|split(":")[0]|split(","))[]|select(length>0)]' <<<"$row")" \
       '{summary:$s,fingerprint:$fp,dimension:$d,recorded:$ts,files:$files}' > "$id/finding.json"
@@ -1926,8 +1770,8 @@ advisor_label() { # adapter -> digest column header
   case "$1" in claude) printf 'Claude' ;; codex) printf 'Codex' ;; *) printf '%s' "$1" ;; esac
 }
 
-# An answer is a verdict only if it names one of the three; anything else — no file, prose, a
-# pre-0038 `do-not-merge` — is "?" (ADR 0034: an empty answer is not a verdict) and is never cached.
+# An answer is a verdict only if it names one of the three; anything else (no file, prose, a legacy
+# `do-not-merge`) is "?" (ADR 0034: an empty answer is not a verdict) and is never cached.
 # A verdict without its what/benefit/reason (or a `fix` without its required_fix) is incomplete,
 # and caching it would freeze an empty row for as long as the branch stays unchanged.
 valid_advice() { # file
@@ -1950,11 +1794,9 @@ advise_branches() {
   # advisor without disturbing the night's own adapter.
   local night_agent="$NIGHTSHIFT_AGENT"
   local NIGHTSHIFT_AGENT="$NIGHTSHIFT_AGENT" ADVISE_SLOT=1 NIGHTSHIFT_ADVISE_BASE=""
-  # Dead adapters are tracked per adapter (ADR 0038 §1), not in run_agent's night-wide slot: that
-  # slot keeps only the FIRST death, so a second dead advisor went unrecorded and was called again on
-  # every branch, and a full slot also switched off every advisor's empty-answer retry (ADR 0034).
-  # Each advisor call therefore starts from an empty local slot; what it leaves there is that
-  # adapter's death alone.
+  # Dead adapters are tracked per adapter (ADR 0038 §1), not in run_agent's night-wide slot, which
+  # keeps only the FIRST death and, while full, disables the empty-answer retry (ADR 0034). Each
+  # advisor call therefore starts from an empty local slot; what it leaves is that adapter's death.
   local -A dead=()
   [ -z "$AGENT_FATAL" ] || [ -z "$AGENT_FATAL_AGENT" ] || dead[$AGENT_FATAL_AGENT]="$AGENT_FATAL"
   local AGENT_FATAL="" AGENT_FATAL_AGENT=""
@@ -1963,9 +1805,8 @@ advise_branches() {
   mkdir -p "$ADVICE_CACHE_DIR"
   # Retention: an entry older than 90 days only costs one re-review if its branch is still open.
   find "$ADVICE_CACHE_DIR" -maxdepth 1 -name '*.json' -mtime +90 -delete 2>/dev/null || true
-  # "Open" is ADR 0025's, as in open_branch_count: a branch the ledger has settled (dropped, wontfix,
-  # squash-merged...) is decided even if its ref survives, and advising on it would bill every
-  # advisor again each time its base moves.
+  # "Open" is ADR 0025's, as in open_branch_count: a branch the ledger has settled is decided even if
+  # its ref survives, and advising on it would bill every advisor again each time its base moves.
   refresh_settled_branches
   for i in "${!REPO_PATHS[@]}"; do
     path="${REPO_PATHS[$i]}"; [ -e "$path/.git" ] || continue
@@ -2003,8 +1844,7 @@ advise_branches() {
           cp "$cache" "$ans"
           log "branch review: $adapter on $name — cached ($(jq -r .recommendation "$ans"))"
         elif [ -n "${dead[$adapter]+x}" ]; then
-          # The adapter that failed to authenticate would die the same way on every branch; a
-          # DIFFERENT adapter is unaffected, so gate per adapter, not on the fact that one died.
+          # A dead adapter would die the same way on every branch; a different one is unaffected.
           log "branch review: $adapter skipped on $name — ${dead[$adapter]}"
         else
           if [ -z "$wt" ]; then
@@ -2066,12 +1906,10 @@ over_budget() { # 0 (true) iff a time budget is set and the run has reached it
 }
 
 # -------------------------------------------------- state/remote coherence ----
-# ADR 0017. A run whose ledger is not the canonical one harvest reads ($NIGHTSHIFT_HOME/state)
-# while pushing to a NETWORK remote silently drops its `shipped` rows: the branch lands on the real
-# forge, but the row lands in the isolated ledger harvest never reads, so the branch resurfaces
-# later only as an orphan (ADR 0016) — its verdict recoverable only by harvest's adoption sweep
-# (ADR 0018). A legitimate isolated e2e run pushes to a LOCAL bare remote (a filesystem path, not a
-# host) and never trips this. This is the run-start half of the defense; adoption is the backstop.
+# ADR 0017. A run whose ledger is not the canonical one harvest reads ($NIGHTSHIFT_HOME/state) while
+# pushing to a NETWORK remote loses its `shipped` rows: the branch resurfaces only as an orphan for
+# harvest's adoption sweep (ADR 0018), the backstop. An isolated run against a LOCAL bare remote
+# never trips this.
 is_network_remote() { # url -> 0 iff it targets a remote host (git's own "colon before first slash" rule)
   case "$1" in
     file://*) return 1 ;;   # explicitly local
@@ -2108,11 +1946,9 @@ guard_state_remote_incoherence() { # hard-stop (override NIGHTSHIFT_ALLOW_SPLIT_
 }
 
 # --------------------------------------------------------------- ledger guard ----
-# Every ledger read in this file reads the whole file (`ledger … 2>/dev/null`) and fails on ONE bad
-# line. The suppression checks then read as "never seen", so a truncated append (full disk, a kill
-# mid-write) would silently re-surface, re-fix and re-push decided work every night while the digest
-# looked like a quiet night. harvest.sh already refuses such a ledger; the night must too, before it
-# spends anything. The launcher records the abort in the digest.
+# Every ledger read fails on ONE bad line. Suppression then fails closed (_fp_suppressed), so a
+# truncated append would silently skip every finding night after night. Refuse such a ledger, as
+# harvest.sh does, before the night spends anything; the launcher records the abort in the digest.
 guard_ledger_valid() {
   [ -f "$LEDGER" ] || return 0
   ledger validate >/dev/null 2>&1 && return 0
@@ -2138,9 +1974,8 @@ main() {
     log "no agent configured. Set NIGHTSHIFT_AGENT or agent.primary in $RULEBOOK"
     return 2
   fi
-  # The rulebook's `agent.primary` is validated by the parser; NIGHTSHIFT_AGENT is not, and an
-  # unrecognised value there (a removed adapter, say) would fail EVERY stage one at a time instead
-  # of saying so once, before the night spends anything.
+  # The parser validates `agent.primary` but not NIGHTSHIFT_AGENT; an unknown value would fail
+  # EVERY stage one at a time instead of once, before the night spends anything.
   case "$NIGHTSHIFT_AGENT" in
     claude|codex|mock) ;;
     *) log "unknown NIGHTSHIFT_AGENT=$NIGHTSHIFT_AGENT (expected claude, codex or mock)"
@@ -2153,17 +1988,15 @@ main() {
   guard_state_remote_incoherence
   guard_ledger_valid
   write_claude_settings
-  # Resolve the night's wall-clock budget: env (seconds, also the test hook) wins, else the rulebook's
-  # max_run_minutes, else none. Empty ⇒ no time cap (unchanged behavior).
+  # The night's wall-clock budget: env (seconds, also the test hook) wins, else the rulebook's
+  # max_run_minutes, else none (no time cap).
   RUN_START=$(date +%s)
   MAX_RUN_SECONDS="${NIGHTSHIFT_MAX_RUN_SECONDS:-}"
   if [ -z "$MAX_RUN_SECONDS" ] && [ -n "${RB_MAX_RUN_MINUTES:-}" ]; then
     MAX_RUN_SECONDS=$(( RB_MAX_RUN_MINUTES * 60 ))
   fi
   # Announce the configured models before verify_findings makes the first agent call (ADR 0020):
-  # the night's model, and the review model the Review stage and the branch advice request
-  # (ADR 0044). The reviewer's model is a governance fact the morning needs stated, not inferred from
-  # runs.jsonl.
+  # the night's model and the review model (ADR 0044), stated rather than left to runs.jsonl.
   log "agent=$NIGHTSHIFT_AGENT prefix=$BRANCH_PREFIX · cap: max $MAX_OPEN undecided ${BRANCH_PREFIX} branches · run ceiling $MAX_RUN_BRANCHES · fix iters $MAX_FIX_ITER"
   local adapter effort
   for adapter in claude codex; do
@@ -2190,14 +2023,12 @@ main() {
   local runner_pid="$BASHPID"
   trap 'interrupted_digest TERM 143' TERM
   trap 'interrupted_digest INT 130' INT
-  # Harvest first: reconcile prior shipped branches against git reality (merged/
-  # dropped) so the morning digest scoreboard is current. Non-fatal — a harvest
-  # hiccup must never block the night's work.
+  # Harvest first, so the digest scoreboard is current. Non-fatal: a harvest hiccup must never block
+  # the night's work.
   if [ -x "$NIGHTSHIFT_HOME/bin/harvest.sh" ]; then
-    # Pass THIS run's state/ledger/rulebook through explicitly: they are resolved here (LEDGER and
-    # RULEBOOK independently of STATE_DIR) and never exported, so without this bridge an isolated
-    # run (e.g. an e2e test) would silently reconcile a different ledger than the one it writes.
-    # harvest.sh reads NIGHTSHIFT_STATE_DIR on its own too; the explicit STATE_DIR below still wins.
+    # Pass THIS run's state, ledger and rulebook explicitly: they are resolved here and never
+    # exported, so otherwise an isolated run would reconcile a different ledger than it writes. The
+    # explicit STATE_DIR outranks harvest's own reading of NIGHTSHIFT_STATE_DIR.
     STATE_DIR="$STATE_DIR" LEDGER="$LEDGER" RULEBOOK="$RULEBOOK" \
       "$NIGHTSHIFT_HOME/bin/harvest.sh" >/dev/null 2>&1 || log "harvest: skipped (non-fatal)"
   fi
@@ -2208,12 +2039,10 @@ main() {
   # verify_findings above is the night's first agent call of all. If the credentials are already
   # dead there, every later stage is too — skip straight to the digest so the abort is on record.
   if [ -n "$AGENT_FATAL" ]; then stop_reason=agent_unavailable; fi
-  # No per-night production cap. The ONLY cap is the count of nightshift/* branches still AWAITING
-  # a verdict — not merely unmerged: a branch the ledger records with a terminal verdict
-  # is decided and frees its slot even if its ref survives on origin (see refresh_settled_branches).
-  # Work continues while fewer than max_open_branches are undecided; merging/closing frees slots and
-  # work resumes; when merging stops it fills to the cap and stops. "All night" continuous operation
-  # is bounded by this cap, by running out of new work, and by the subscription 5h window.
+  # Two branch caps, no per-night quota. The governing one counts nightshift/* branches still
+  # AWAITING a verdict (ADR 0025; see refresh_settled_branches): work continues while fewer than
+  # max_open_branches are undecided. MAX_RUN_BRANCHES is a per-run safety ceiling. The run also
+  # stops on the time budget, on running out of new work, and on the subscription's 5h window.
   while true; do
     [ "$made" -ge "$MAX_RUN_BRANCHES" ] && { log "safety ceiling ($MAX_RUN_BRANCHES) reached — stop"; stop_reason=ceiling; break; }
     if over_budget; then log "time budget (${MAX_RUN_SECONDS}s) exhausted — stop"; stop_reason=budget; break; fi
@@ -2298,23 +2127,15 @@ main() {
     fi
     explore_rc=0
     run_agent explore "$wt" "$id" || explore_rc=$?
-    # Bail out BEFORE anything derived from this stage is recorded. A dead agent must not advance the
-    # dimension rotation, must not count as `considered`, and above all must not append the `empty`
-    # ledger row below — that row is the fleet's memory of "this lens was clean on this night".
+    # Bail out BEFORE anything derived from this stage is recorded (ADR 0023): no rotation advance,
+    # no `considered`, above all no `empty` ledger row, the memory that "this lens was clean".
     if [ -n "$AGENT_FATAL" ]; then
       remove_worktree "$repo" "$wt"
       stop_reason=agent_unavailable; break
     fi
-    # An Explore that could not run to COMPLETION is not evidence about this repo either, and the
-    # same three artifacts are at stake: the `empty` ledger row (which ADR 0023 lets the fleet trust
-    # as "this lens was clean here"), the scan marker that rotates the lens onward, and the
-    # `considered` count. A credential failure is only the loudest way to lose a stage; the turn
-    # ceiling is the quiet one. Observed 2026-08-12: five of 26 items ended in the claude CLI's
-    # `error_max_turns` after ~$2 of tokens each, and every one was logged as "nothing worth doing"
-    # and stamped as serviced — so the coverage matrix reported those lenses as freshly reviewed.
-    #
-    # Findings that DID land are kept: a stage can hit the ceiling after writing a usable verdict,
-    # and throwing that away would be a second, self-inflicted loss.
+    # An Explore that did not COMPLETE (a turn ceiling, say) is no evidence either: the same three
+    # artifacts must not be written. Findings that DID land are kept, since a stage can hit the
+    # ceiling after writing a usable verdict.
     if [ "$explore_rc" -ne 0 ]; then
       n_partial=$(jq -c 'if (.findings|type)=="array" then (.findings|length)
                          elif (.found==true) then 1 else 0 end' "$id/finding.json" 2>/dev/null || echo 0)
@@ -2342,20 +2163,18 @@ main() {
     # Mark this (repo,dim) as serviced NOW — regardless of what Explore found — so the rotation
     # advances to the next lens next run even when this pass surfaced nothing (ADR 0010).
     [ -n "$dim" ] && touch "$(dim_scan_marker "$repo" "$dim")" 2>/dev/null || true
-    # Explore emits the v2 container {found, findings:[…]} or (back-compat) a single finding object
-    # {found:true,file,…}. Normalise to a findings array, cap it at the repo's N, then remove the
-    # explore worktree — explore is read-only; every fix gets its OWN fresh worktree so diffs never
-    # compound and each finding lands as one independently-reviewable, independently-rejectable branch.
+    # Explore emits {found, findings:[…]} or (back-compat) one finding object {found:true,file,…}.
+    # Normalise to an array capped at the repo's N. Every fix gets its OWN fresh worktree so diffs
+    # never compound and each finding is one independently rejectable branch (ADR 0011).
     farr=$(jq -c 'if (.findings|type)=="array" then .findings elif (.found==true) then [.] else [] end' "$id/finding.json" 2>/dev/null || echo '[]')
     remove_worktree "$repo" "$wt"
     n_find=$(printf '%s' "$farr" | jq 'length' 2>/dev/null || echo 0)
     [ "$n_find" -gt "$rfind" ] && n_find="$rfind"
     if [ "$n_find" -le 0 ]; then
-      # ADR 0015: an empty pass logs a {dimension, scope} ledger row (the scan marker already advanced
-      # rotation above). scope = the model's first-class "nothing here" verdict: `out_of_scope` (this
-      # lens has no surface in this repo — the confabulation-guard's honest return) vs the conservative
-      # default `in_scope_no_findings` (lens applies, just clean this pass). Only out_of_scope, repeated,
-      # feeds the digest's rulebook-exclusion suggestion, so we never up-rate an unstated verdict.
+      # ADR 0015: an empty pass logs a {dimension, scope} ledger row. scope is `out_of_scope` (the
+      # lens has no surface here) or the default `in_scope_no_findings`; only a repeated
+      # out_of_scope feeds the digest's exclusion suggestion, so an unstated verdict is never
+      # up-rated.
       scope=$(jq -r '.scope // "in_scope_no_findings"' "$id/finding.json" 2>/dev/null || echo in_scope_no_findings)
       case "$scope" in out_of_scope|in_scope_no_findings) ;; *) scope=in_scope_no_findings ;; esac
       [ -n "$dim" ] && ledger_append "$(basename "$id")" "$repo" "" "" "" "empty" "" "" "" "" "$dim" "" "" "$scope"
@@ -2366,10 +2185,9 @@ main() {
       if [ "$open" -ge "$MAX_OPEN" ]; then
         log "  open-branch cap reached ($open/$MAX_OPEN) — stop"; stop_reason=backpressure; break
       fi
-      # Per-finding dir as a SIBLING of the item dir ("item-<nanos>-f<k>"), not a child ("f<k>").
-      # The ledger/telemetry `item` field is basename "$fd"; a bare "f0"/"f1" collided across items
-      # and runs, making harvest `verdict <item>` and runs->ledger joins ambiguous. The sibling name
-      # is globally unique, so every downstream join keys cleanly.
+      # Per-finding dir as a SIBLING of the item dir ("item-<nanos>-f<k>"), not a child: the ledger
+      # and telemetry `item` field is basename "$fd" and must be globally unique for joins and
+      # harvest `verdict <item>`.
       fd="$id-f$k"; mkdir -p "$fd"
       printf '%s' "$farr" | jq -c ".[$k]" > "$fd/finding.json"
       fp=$(finding_fingerprint "$fd/finding.json")
@@ -2421,9 +2239,8 @@ main() {
       # Spend budget: stop BEFORE starting a new fix (the only mutation). Findings already surfaced
       # this pass stay recorded; we simply do not open another branch once the budget is spent.
       if over_budget; then log "  time budget exhausted — stop before fix"; stop_reason=budget; break; fi
-      # The run ceiling binds per branch, here where one would be opened: checked only per pass, one
-      # repo with a findings budget above it overshot (2026-08-28: ceiling 3, pass shipped 5). The
-      # item's remaining findings still run — a surfaced one opens no branch and must not be lost.
+      # The run ceiling binds per branch, here where one would be opened; a per-pass check alone lets
+      # one repo overshoot. The item's remaining findings still run: a surfaced one opens no branch.
       if [ "$made" -ge "$MAX_RUN_BRANCHES" ]; then
         log "  safety ceiling ($MAX_RUN_BRANCHES) reached — no further fix this run ($fp)"
         stop_reason=ceiling; continue
@@ -2441,18 +2258,15 @@ main() {
         log "  $(basename "$repo"): could not create worktree for finding — skip"; continue
       fi
       iter=0; verdict="revise"; gate=""; hook_retry=0; fix_cap="$MAX_FIX_ITER"
-      # The outer loop turns at most twice. Its second turn is the ONE retry a hook-rejected commit
-      # gets (ADR 0036): the same fix↔review↔gate loop again, from the rejected tree, with the hook's
-      # output in the Fix prompt — and on the same `iter` counter, so the retry spends the item's
+      # The outer loop turns at most twice; its second turn is the ONE retry a hook-rejected commit
+      # gets (ADR 0036), from the rejected tree, on the same `iter` counter so it spends the item's
       # fix-iteration budget instead of opening a second one.
       while :; do
       while [ "$iter" -lt "$fix_cap" ]; do
         iter=$((iter + 1))
-        # Cleared per ITERATION, not per finding: only the attempt the loop ends on may classify the
-        # item below. A `fail` carried over from an earlier iteration would outrank a later `abandon`
-        # — which breaks out before the gate is ever consulted — and label it `tests-failed`. That is
-        # a different outcome on purpose (ADR 0022 §3), and unlike `abandoned` it does not latch the
-        # finding, so the reviewer's refusal would come back for a fresh attempt every night.
+        # Cleared per ITERATION: only the attempt the loop ends on may classify the item. A stale
+        # `fail` would relabel a later `abandon` as `tests-failed` (ADR 0022 §3), which does not
+        # latch, so the reviewer's refusal would come back every night.
         gate=""
         fix_rc=0
         run_agent fix "$wt" "$fd" || fix_rc=$?
@@ -2462,17 +2276,14 @@ main() {
           log "  $(basename "$repo"): fix produced no usable worknote (exit $fix_rc) — retryable ($fp)"
           break
         fi
-        # The Review stage stages the worktree (`git add -A`, N3) to show the reviewer exactly what
-        # finalize will commit — unsandboxed, and BEFORE the ship gate exists to check anything. So
-        # a `.git` the Fix stage rewrote detonates here, earlier than any gate could catch it.
+        # Staging below (`git add -A`, N3) runs unsandboxed and BEFORE the ship gate, so a `.git` the
+        # Fix stage rewrote must be caught here (ADR 0026).
         if ! assert_worktree_git_sane "$repo" "$wt"; then gate=tampered; verdict=revise; break; fi
         # A Claude reviewer would load hooks or MCP servers the Fix just wrote and run them on the host.
         if ! worktree_control_files_clean "$repo" "$wt"; then gate=tampered; verdict=revise; break; fi
-        # Record the exact tree object the reviewer is about to judge. THIS object, and nothing
-        # assembled later, is what finalize commits (ADR 0027): "the reviewer saw what shipped"
-        # stops being a property that holds as long as nothing touches the worktree in between and
-        # becomes one that holds by construction — the ship gate runs after this and writes here.
-        # Done in the loop rather than in stage_prompt because the mock adapter builds no prompt.
+        # Record the exact tree object the reviewer is about to judge; THIS object is what finalize
+        # commits (ADR 0027), so "the reviewer saw what shipped" holds even though the ship gate
+        # later writes the worktree. Done here, not in stage_prompt: the mock builds no prompt.
         git -C "$wt" add -A
         git -C "$wt" write-tree > "$fd/reviewed-tree" 2>/dev/null || rm -f "$fd/reviewed-tree"
         review_rc=0
@@ -2486,10 +2297,9 @@ main() {
         verdict=$(jq -r '.verdict' "$fd/review.md")
         [ "$verdict" = abandon ] && break
         if [ "$verdict" = ship ]; then
-          # The reviewer is satisfied that the FINDING is fixed. The gate asks the other question —
-          # is the repo still whole? — and it OVERRULES a ship (ADR 0022). A failure is not the end
-          # of the item: the Fix stage broke it, is still in the loop, and gets the failing output
-          # back on the next turn. Only running out of iterations refuses the item.
+          # The gate asks whether the repo is still whole and OVERRULES a ship (ADR 0022). A red
+          # suite goes back to the Fix stage on the next turn; only running out of iterations
+          # refuses the item.
           grc=0; run_test_gate "$repo" "$wt" "$fd" || grc=$?
           if [ "$grc" -eq 0 ]; then gate=pass; break; fi
           verdict=revise
@@ -2543,12 +2353,10 @@ main() {
       if [ "$gate" = finalized ]; then
         :
       elif [ "$hook_retry" -eq 1 ] && [ "$gate" != tampered ]; then
-        # The retry ended before a second commit: the time budget ran out, its Fix or Review stage
-        # failed, the reviewer did not ship the revision, or the suite refused it. The item is what it already was — a fix the
-        # repo's hooks rejected — and it is recorded as that, unlatched, so a later night may try
-        # again. An unusable agent ends the night below; the rejection it follows was observed while
-        # the agent still worked, so ADR 0023 does not withhold it.
-        # Same row shape as finalize's own commit-failed (verifiability and type included).
+        # The retry ended before a second commit (budget, a failed stage, no ship, a red suite): the
+        # item stays a hook-rejected fix, recorded unlatched so a later night may try again. The
+        # rejection was observed while the agent still worked, so ADR 0023 does not withhold it even
+        # if the agent died since. Same row shape as finalize's own commit-failed.
         ledger_append "$(basename "$fd")" "$repo" "$fp" "" "" "commit-failed" "$summary" "" "" \
           "$(jq -r '.verifiability // ""' "$fd/finding.json" 2>/dev/null || true)" "$dim" \
           "$(jq -r '.type // "change"' "$fd/finding.json" 2>/dev/null || true)" "$csig"
@@ -2584,9 +2392,8 @@ main() {
     case "$stop_reason" in backpressure|budget|agent_unavailable|ceiling) break ;; esac
   done </dev/null
     case "$stop_reason" in budget|agent_unavailable) break ;; esac
-    # Gate on SHIPPABLE progress. Findings surface once (they dedup/latch), so a pass that only
-    # surfaced findings must not spin the loop — else a nondeterministic Findings-only fleet never
-    # halts. Always emit an explicit stop reason.
+    # Gate on SHIPPABLE progress: a pass that only surfaced findings must not spin the loop, or a
+    # nondeterministic findings-only fleet never halts. Always emit an explicit stop reason.
     if [ "$ship_progress" -eq 0 ]; then
       if [ "$progress" -ne 0 ]; then
         log "pass $pass: only surfaced findings, no shippable work — stop (findings don't keep the loop alive)"
@@ -2603,10 +2410,8 @@ main() {
   fi
   local advice; advice="$(advise_branches)"
   write_digest "$made" "$open" "$stop_reason" "$advice"
-  # An aborted night exits NON-ZERO. `nightshift-cron.sh` records the rc in the day's log and the
-  # systemd unit surfaces it as a failed service — the two places an operator finds out something
-  # broke without reading a digest. The old unconditional rc=0 meant a credential outage looked, to
-  # every layer above, exactly like a night that simply found nothing.
+  # An aborted night exits NON-ZERO: `nightshift-cron.sh` logs the rc and the systemd unit shows a
+  # failed service, where an operator learns of it without reading a digest (ADR 0023).
   trap - TERM INT
   if [ -n "$AGENT_FATAL" ]; then
     log "night ABORTED: $AGENT_FATAL — $considered repos considered, nothing recorded."

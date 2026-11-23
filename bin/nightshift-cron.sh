@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Unattended launcher for the nightly scheduler (the "dumb" side: the timer fires
-# this, this fires the smart orchestrator bin/nightshift.sh). It adds the three
-# things an unattended run needs that an interactive one gets for free:
+# Unattended launcher: the timer fires this, this fires bin/nightshift.sh. It adds what an
+# unattended run lacks:
 #   1. a single-instance flock — a long run must NEVER overlap the next night's;
 #   2. an explicit PATH — systemd user services start with a minimal env, but
 #      nightshift shells out to claude/codex/gh which may live under ~/.local/bin;
@@ -12,15 +11,9 @@ set -euo pipefail
 
 NIGHTSHIFT_HOME="${NIGHTSHIFT_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 export NIGHTSHIFT_HOME
-# Nightly runs are real work by default; the mock is only for --dry-run testing. But this default
-# must not overrule the rulebook's `agent.primary` (ADR 0031): the Runner treats a SET
-# NIGHTSHIFT_AGENT as the caller's explicit choice and lets it win, so exporting one here
-# unconditionally made that key dead in unattended runs.
-#
-# So the default is applied only when the rulebook names no adapter. Asking the parser is the one
-# way to know that without duplicating its rules here; a rulebook that does not parse leaves the
-# answer empty and falls back to `claude`, which is what a run would have done before this existed
-# (the Runner then aborts on the same parse error and says so).
+# Default to the real adapter, but only when the rulebook's `agent.primary` names none: the Runner
+# lets a SET NIGHTSHIFT_AGENT win over the rulebook. A rulebook that does not parse falls back to
+# `claude`, and the Runner then aborts on the same parse error.
 if [ -z "${NIGHTSHIFT_AGENT:-}" ]; then
   _rb="${RULEBOOK:-$NIGHTSHIFT_HOME/rulebook.yaml}"
   [ -f "$_rb" ] || _rb="$NIGHTSHIFT_HOME/rulebook.example.yaml"
@@ -33,31 +26,16 @@ if [ -z "${NIGHTSHIFT_AGENT:-}" ]; then
   [ -n "$_primary" ] || export NIGHTSHIFT_AGENT=claude
   unset _rb
 fi
-# Make the tools nightshift invokes findable under systemd's minimal PATH.
-# System dirs come FIRST so a binary planted under ~/.local/bin (which a write
-# primitive could reach) cannot shadow the Runner's unqualified jq/git/gh/
-# python3 calls — see docs/design/risk-analysis.md R10/N4. Agent tools
-# that live only under ~/.local/bin (claude/codex/gh) are still resolved there.
+# Make the tools nightshift invokes findable under systemd's minimal PATH; two tests anchor here.
+# System dirs come FIRST so a binary planted under ~/.local/bin cannot shadow the Runner's
+# unqualified jq/git/gh/python3 calls (docs/design/risk-analysis.md R10/N4); claude/codex/gh that
+# live only there still resolve.
 export PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:${PATH:-}"
 
-# The repos' ship gates (ADR 0022) run the repo's OWN suite, so they need the developer toolchain —
-# node, npm and the corepack shims (pnpm) — which lives under nvm and is therefore absent from the
-# PATH above. It must stay absent there: that PATH puts the system dirs first so nothing planted
-# under a $HOME directory can shadow the Runner's own unqualified jq/git/python3/gh calls (R10/N4),
-# and prepending an nvm bin would reopen exactly that hole. So it is exported as its own variable and
-# the Runner prepends it for the `test_cmd` subprocess only — a process that already executes the
-# repo's package scripts, so its PATH is not a security boundary.
-#
-# Observed 2026-08-12 with this missing: /usr/bin/node is v18, so an extension's
-# `node --experimental-strip-types` gate exited 9 and web-app's `pnpm` gate exited 127. Six finished
-# fixes were discarded as "the fix broke the suite" that night, and the same work is re-attempted and
-# re-discarded every night because `tests-failed` is deliberately not latched (ADR 0022).
-#
-# Since ADR 0026 the variable does more than order PATH: the gate runs in a bwrap sandbox with no
-# $HOME at all, so these directories are also the ones BOUND into it. A tool that is not named here
-# is not merely found late — it does not exist inside the gate. Hence the `:`-separated list below:
-# `uv` lives in ~/.local/bin and `node` under nvm, and the fleet needs both in the same gate.
-# This still does not touch the Runner's own PATH, so R10/N4 is unaffected.
+# The ship gates (ADR 0022) run the repo's own suite and need the developer toolchain (node under
+# nvm, uv under ~/.local/bin). It must stay off the Runner's PATH above (R10/N4), so it is exported
+# separately and prepended for the suite only. The gate sandbox has no $HOME (ADR 0026), so these
+# `:`-separated dirs are also the ones bound into it: a tool not named here does not exist there.
 #
 # Set NIGHTSHIFT_TEST_PATH yourself to override; set it empty to opt out entirely.
 nvm_toolchain_bin() { # -> bin dir of the default (else newest) nvm Node, or nothing at all
@@ -75,8 +53,7 @@ nvm_toolchain_bin() { # -> bin dir of the default (else newest) nvm Node, or not
 gate_toolchain_path() { # -> `:`-separated dirs the gates need bound and on PATH
   local out="" d
   out="$(nvm_toolchain_bin)"
-  # ~/.local/bin is where uv/pipx-style tools land. It is on the Runner's PATH already (last, on
-  # purpose), but the sandbox has no $HOME, so it must be named to exist inside a gate at all.
+  # ~/.local/bin (uv, pipx tools) must be named to exist inside a gate at all.
   for d in "$HOME/.local/bin"; do
     [ -d "$d" ] && out="${out:+$out:}$d"
   done
@@ -84,12 +61,9 @@ gate_toolchain_path() { # -> `:`-separated dirs the gates need bound and on PATH
 }
 export NIGHTSHIFT_TEST_PATH="${NIGHTSHIFT_TEST_PATH-$(gate_toolchain_path)}"
 
-# The sandbox has no $HOME, so a python package installed with `pip install --user` is invisible
-# inside a gate — the suite then fails on an import, which reads downstream as "the fix broke the
-# tests". Naming the user site-packages directory here binds it READ-ONLY; it is a directory under
-# $HOME, not $HOME itself, so the sandbox's own refusal of any bind containing $HOME still holds.
-# Nothing is added to any gate's import path by this: a suite that needs those packages says so in
-# its own `test_cmd` (PYTHONPATH=…), which keeps the operator's packages out of every other repo.
+# The operator's user site-packages, bound READ-ONLY so `pip install --user` packages exist inside a
+# gate. It is under $HOME, not $HOME itself, so the sandbox's $HOME refusal still holds. Nothing is
+# added to an import path: a suite that needs them sets PYTHONPATH in its own `test_cmd`.
 #
 # Set NIGHTSHIFT_TEST_SANDBOX_ROBIND yourself to override; set it empty to opt out entirely.
 gate_user_site() { # -> the operator's user site-packages dir, if python3 has one that exists
@@ -105,8 +79,7 @@ mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/$(date +%Y-%m-%d).log"
 LOCK="${NIGHTSHIFT_LOCK:-${TMPDIR:-/tmp}/nightshift.lock}"
 
-# Single instance: if a previous night's run is somehow still going, skip rather
-# than stack two agents on the same repos.
+# Single instance: a previous night's run still going means skip, never two runs on the same repos.
 exec 9>"$LOCK"
 if ! flock -n 9; then
   echo "[nightshift-cron] another run holds $LOCK — skip $(date -Iseconds)" | tee -a "$LOG" >&2
@@ -126,12 +99,10 @@ notify_operator() { # line
     || echo "[nightshift-cron] notify command failed (rc=$?) — the operator was not told" | tee -a "$LOG"
 }
 
-# The operator's rule for unattended runs: a (nearly) spent quota window pauses the night and says so
-# in one line; it never switches models (ADR 0044). NIGHTSHIFT_QUOTA_CMD is the host's check, run
-# once before the night: exit 75 (EX_TEMPFAIL) = pause, with the first line of its stdout as the
-# reason; any other exit = go. Pause is a positive signal so a check that crashes, cannot run or times
-# out lets the night run (logged): a broken check must never silently stop every night. A pause is not
-# a failure — exit 0, and its digest entry is `PAUSED`, never `ABORTED`.
+# A (nearly) spent quota window pauses the night with one line; it never switches models (ADR 0044).
+# NIGHTSHIFT_QUOTA_CMD runs once: exit 75 (EX_TEMPFAIL) = pause, first stdout line = reason; any
+# other exit = go, so a broken check never silently stops every night. A pause exits 0 and its digest
+# entry is `PAUSED`, never `ABORTED`.
 if [ -n "${NIGHTSHIFT_QUOTA_CMD:-}" ]; then
   quota_rc=0
   quota_out="$(NIGHTSHIFT_AGENT="${NIGHTSHIFT_AGENT:-$_primary}" timeout -k 5 "${NIGHTSHIFT_QUOTA_TIMEOUT:-60}" sh -c "$NIGHTSHIFT_QUOTA_CMD" </dev/null 2>>"$LOG")" \
@@ -154,15 +125,11 @@ if [ -n "${NIGHTSHIFT_QUOTA_CMD:-}" ]; then
   esac
 fi
 
-# `${…:-}` and not a bare expansion: since the launcher stopped pinning an adapter when the rulebook
-# names one, this variable is legitimately unset — and under `set -u` a bare read aborts the run
-# before it starts. The Runner announces the adapter it resolved on its own line either way.
+# `${…:-}`: NIGHTSHIFT_AGENT is legitimately unset when the rulebook names the adapter (`set -u`).
 echo "=== nightshift start $(date -Iseconds) (agent=${NIGHTSHIFT_AGENT:-from rulebook}) ===" | tee -a "$LOG"
-# Which Node the ship gates will see. Logged because the failure it prevents is silent: a gate that
-# exits 9 or 127 on a toolchain problem is reported as "the fix broke the suite".
+# Log which Node the gates see: a toolchain failure in a gate otherwise reads as a broken fix.
 if [ -n "${NIGHTSHIFT_TEST_PATH:-}" ]; then
-  # `command -v` against the list itself, not "$NIGHTSHIFT_TEST_PATH/node" — the variable is a
-  # `:`-separated list now, so indexing it as a single directory would report every node as missing.
+  # `command -v` with the list as PATH: it is `:`-separated, not one directory.
   echo "[nightshift-cron] test gates bind + prepend $NIGHTSHIFT_TEST_PATH (node $(PATH="$NIGHTSHIFT_TEST_PATH" command -v node >/dev/null 2>&1 && PATH="$NIGHTSHIFT_TEST_PATH" node -v || echo 'not runnable'), uv $(PATH="$NIGHTSHIFT_TEST_PATH" command -v uv >/dev/null 2>&1 && echo present || echo 'not found'))" | tee -a "$LOG"
 else
   echo "[nightshift-cron] no nvm toolchain found — test gates run on $(command -v node || echo 'no node at all')" | tee -a "$LOG"
@@ -197,11 +164,10 @@ trap '' TERM INT
 runner_pid=""
 wait "$tee_pid" || true
 echo "=== nightshift done rc=$rc $(date -Iseconds) ===" | tee -a "$LOG"
-# The digest is the only report. The Runner writes one on a normal end, an agent abort and a signal,
-# but not when it exits before or outside write_digest (a rulebook parse error, the split-state
-# guard, an invalid ledger, an errexit death). Record such a night here, with the marker
-# aborted_streak counts, so the morning sees that nights are being lost instead of the last good
-# digest. A digest this run already wrote (newer than its start) is left alone.
+# The digest is the only report, and the Runner writes none when it exits before or outside
+# write_digest (parse error, split-state guard, invalid ledger, errexit). Record such a night here
+# with the marker aborted_streak counts; a digest newer than this run's start is left alone.
+
 if [ "$rc" -ne 0 ] && { [ ! -f "$digest" ] || [ "$(stat -c %Y "$digest")" -lt "$run_start" ]; }; then
   mkdir -p "$(dirname "$digest")"
   {

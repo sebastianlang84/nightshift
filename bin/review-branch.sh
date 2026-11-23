@@ -1,13 +1,8 @@
 #!/usr/bin/env bash
 # nightshift branch reviewer — the reliable merge-decision routine.
 #
-# WHY THIS EXISTS
-# A `git diff <base>..<branch>` (TWO-dot) is a trap for reviewing a steward branch:
-# if <base> has ADVANCED since the branch was cut, the two-dot diff renders the base's
-# OWN new commits as if the branch had DELETED them — a tiny one-line branch can look
-# like it ripped out a whole feature (observed 2026-07-10, a false "scope explosion").
-#
-# This tool makes that failure impossible by construction: it only ever shows
+# A TWO-dot `git diff <base>..<branch>` shows commits the base gained since the branch was cut as
+# if the branch had deleted them. This tool only ever shows
 #   * the branch's OWN commits         git log  <base>..<branch>
 #   * the three-dot diff (merge-base)  git diff <base>...<branch>
 # both of which are independent of how far <base> has moved. It also reports the drift
@@ -34,9 +29,8 @@ RULEBOOK="${RULEBOOK:-$NIGHTSHIFT_HOME/rulebook.yaml}"
 
 PREFIX="nightshift/"
 declare -a REPO_PATHS=() REPO_BASES=()
-# The same normalization as the Runner and harvest: the rulebook matches paths as strings, so a
-# trailing slash, a relative path or a symlink would otherwise miss the rulebook's `base:` and
-# review a gitflow branch against main.
+# The same normalization as the Runner and harvest: the rulebook matches paths as strings, so an
+# unnormalized path would miss its `base:` and review a gitflow branch against main.
 repo_id() { realpath -m -- "$1" 2>/dev/null || printf '%s' "${1%/}"; }
 # shellcheck source=../lib/base_resolution.sh
 source "$NIGHTSHIFT_HOME/lib/base_resolution.sh"
@@ -157,15 +151,11 @@ review_branch() { # repo base branchref
   fi
   printf 'VERDICT: %s\n' "$verdict"
   printf 'next:\n'
-  # The merge command deletes the branch itself: nothing else ever does. harvest reconciles a
-  # merged branch to a `merged` verdict and stops there, and the cap counts with `--no-merged`,
-  # so a merged-but-undeleted ref is invisible to both — it simply accumulates on origin until an
-  # operator sweeps it by hand. Only the `reject` path below used to delete anything, which is why
-  # accepted branches were the ones that piled up. A merge that leaves its branch behind is not
-  # finished.
-  # The merge target is the remote-tracking ref, never the bare branch name: the Runner deletes its
-  # local nightshift/* branch after pushing, so `nightshift/<name>` does not resolve in the operator's
-  # repo, and git never looks under refs/remotes/origin/ for it. The reviewed ref is origin/<name>.
+  # The merge command deletes the branch itself, since nothing else does: harvest and the cap both
+  # ignore a merged ref, which would pile up on origin.
+  # The merge target is the remote-tracking ref: the Runner deletes its local nightshift/* branch
+  # after pushing, so the bare name does not resolve.
+
   case "$basebranch" in
     main|master)
       printf '  merge : git -C %q checkout %s && git -C %q merge --no-ff %q && git -C %q push origin %s && git -C %q push origin --delete %q\n' \

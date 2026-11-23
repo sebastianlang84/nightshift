@@ -81,7 +81,7 @@ def contains(repo, base, sha):
 
 
 def ledger():
-    # Unparsable lines are skipped and a missing ledger is empty; the locale's encoding, as before.
+    # Unparsable lines are skipped and a missing ledger is empty; read in the locale's encoding.
     return read_rows_skipping_bad(STATE_DIR / 'ledger.jsonl', encoding=None, missing_ok=True)
 
 
@@ -214,7 +214,7 @@ SETTLED_LABEL.update(wontfix='dropped', merged='merged (by patch, not ancestry)'
 
 
 def clutter(prefix, repos, rows, bases):
-    # This view historically ignores empty branch names as well as null ones.
+    # This view ignores empty branch names as well as null ones; latest_branch_verdicts keeps them.
     settled = {key: (r.get('verdict'), r.get('sha'))
                for key, r in latest_branch_verdicts(rows).items() if r.get('branch')}
     found, registered = [], set()

@@ -7,12 +7,18 @@ has shipped exactly these as findings (`risk-analysis.md` citing `nightshift.sh:
 flag moved to 186; the prototype Files table omitting `lib/extract_json.py`), which is proof the
 class is real and proof it is worth catching before a human is spent on it.
 
-Four claims are checked, all with the same shape — the doc says X exists, so X must exist:
+Five claims are checked, all with the same shape — the doc says X exists, so X must exist:
 
   1. relative markdown links            [text](docs/design/foo.md)
   2. ADR references in prose            "ADR 0022"          -> docs/adr/0022-*.md
   3. backticked in-repo paths           `bin/harvest.sh`    (source dirs only)
-  4. file:line citations                `nightshift.sh:186` -> file has >= 186 lines
+  4. file:line citations                `nightshift.sh:186` -> file has >= 186 lines (and a range
+                                        `:186-190` has >= 190)
+  5. file:line citations in comments    as 4, backticks optional, on lines whose first non-blank
+                                        is `#` in tracked *.sh / *.py files and extensionless
+                                        scripts under bin/ lib/ hooks/ tests/ .githooks/; a cited
+                                        basename that no tracked file has is a finding too
+                                        (the same lines are also checked for claim 2)
 
 Deliberately NOT checked: whether the prose is *right*. A line citation that still resolves may
 still describe the wrong code. This tool refuses only what it can refuse without a judgement call —
@@ -35,18 +41,60 @@ SOURCE_DIRS = ("bin", "lib", "prompts", "hooks", "tests", "docs")
 LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 ADR = re.compile(r"\bADR\s+(\d{4})\b")
 PATH = re.compile(r"`((?:%s)/[A-Za-z0-9_./*{},-]+)`" % "|".join(SOURCE_DIRS))
-CITE = re.compile(r"`([A-Za-z0-9_./-]+\.(?:sh|py|md|yaml|yml)):(\d+)(?:-[A-Za-z]?\d+)?`")
+SCRIPT_DIRS = ("bin", "lib", "hooks", "tests", ".githooks")
+# A cited file is `name.ext`, or an extensionless script rooted in SCRIPT_DIRS (`hooks/pre-push`).
+# Groups: file, first line, range end (absent for a single line).
+CITE_BODY = (r"([A-Za-z0-9_./-]+\.(?:sh|py|md|yaml|yml)|(?:%s)/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*)"
+             r":(\d+)(?:-[A-Za-z]?(\d+))?" % "|".join(re.escape(d) for d in SCRIPT_DIRS))
+CITE = re.compile(r"`%s`" % CITE_BODY)
+COMMENT_CITE = re.compile(r"(?<![A-Za-z0-9_./-])%s" % CITE_BODY)
 
 
-def tracked_markdown(root: Path) -> list[Path]:
-    """Every tracked .md file. Tracked, not globbed: a scratch note in the tree is not a doc."""
+def tracked(root: Path, *pathspecs: str) -> list[Path]:
+    """Tracked, not globbed: a scratch note in the tree is not a doc."""
     out = subprocess.run(
-        ["git", "-C", str(root), "ls-files", "*.md"],
+        ["git", "-C", str(root), "ls-files", "--", *pathspecs],
         capture_output=True, text=True, check=True,
     ).stdout.split()
     # Unstaged deletions are absent from the working tree but still present in the index.
     # References to deleted documents are checked in surviving documents below.
     return [root / p for p in out if (root / p).exists()]
+
+
+def tracked_scripts(root: Path) -> list[Path]:
+    """Tracked *.sh / *.py files, plus extensionless scripts under SCRIPT_DIRS."""
+    return [p for p in tracked(root, "*.sh", "*.py", *SCRIPT_DIRS)
+            if p.suffix in (".sh", ".py")
+            or (not p.suffix and p.relative_to(root).parts[0] in SCRIPT_DIRS)]
+
+
+def check_cite(root: Path, files: list[Path], where: str, name: str, nums: tuple[str, str],
+               strict: bool) -> list[str]:
+    """A file:line citation: the file must be tracked AND long enough to have every cited line.
+
+    `files` is every tracked file; resolving against it, not the tree, keeps untracked copies (a
+    sandbox, run output) from making a basename ambiguous. `strict` (source comments) also refuses
+    a bare basename that names no tracked file: a comment cites this repo, so that is a deleted or
+    renamed file. Prose may cite other projects, so there it is not our claim to check."""
+    if "/" in name:
+        matches = [p for p in files if p == root / name]
+    else:
+        matches = [p for p in files if p.name == name]
+    if not matches:
+        if strict or name.split("/")[0] in SOURCE_DIRS:
+            return [f"{where}: cites {name}:{nums[0]}, which does not exist"]
+        return []  # not a repo file (an example, another project) — not our claim to check
+    if len(matches) > 1:
+        return []  # ambiguous basename; refusing on a guess is worse than not checking
+    try:
+        count = sum(1 for _ in matches[0].open("rb"))
+    except OSError:
+        return []
+    last = max(int(n) for n in nums if n)
+    if last > count:
+        return [f"{where}: cites {name}:{'-'.join(n for n in nums if n)}, "
+                f"but that file has only {count} lines"]
+    return []
 
 
 def expand(pattern: str) -> list[str]:
@@ -71,7 +119,8 @@ def exists(root: Path, rel: str) -> bool:
 def check(root: Path) -> list[str]:
     findings: list[str] = []
     adr_dir = root / "docs" / "adr"
-    for doc in tracked_markdown(root):
+    files = tracked(root)
+    for doc in tracked(root, "*.md"):
         rel_doc = doc.relative_to(root)
         try:
             lines = doc.read_text(encoding="utf-8").splitlines()
@@ -103,28 +152,28 @@ def check(root: Path) -> list[str]:
                     if not exists(root, cand):
                         findings.append(f"{where}: names `{cand}`, which does not exist")
 
-            # 4. file:line citations — the file must exist AND be long enough to have that line.
-            for name, num in CITE.findall(line):
-                matches = [p for p in root.rglob(name.split("/")[-1]) if p.is_file()] \
-                    if "/" not in name else ([root / name] if (root / name).exists() else [])
-                matches = [p for p in matches if ".git" not in p.parts]
-                if not matches:
-                    # A citation rooted in one of this repo's source dirs claims a file here; a
-                    # missing one is a dead citation (a deleted or moved file), not an example.
-                    if "/" in name and name.split("/")[0] in SOURCE_DIRS:
-                        findings.append(f"{where}: cites {name}:{num}, which does not exist")
-                    continue  # not a repo file (an example, another project) — not our claim to check
-                if len(matches) > 1:
-                    continue  # ambiguous basename; refusing on a guess is worse than not checking
-                target = matches[0]
-                try:
-                    count = sum(1 for _ in target.open("rb"))
-                except OSError:
-                    continue
-                if int(num) > count:
-                    findings.append(
-                        f"{where}: cites {name}:{num}, but that file has only {count} lines"
-                    )
+            # 4. file:line citations.
+            for name, *nums in CITE.findall(line):
+                findings += check_cite(root, files, where, name, tuple(nums), strict=False)
+
+    # 5. file:line citations (and ADR references, claim 2) in source comments. No file is exempt:
+    # only `#` lines are read, so the examples in this checker's docstring and its test's quoted
+    # fixtures never fire, while a real citation in their comments is checked like any other.
+    for src in tracked_scripts(root):
+        rel_src = src.relative_to(root)
+        try:
+            lines = src.read_text(encoding="utf-8").splitlines()
+        except (UnicodeDecodeError, OSError):
+            continue  # not a text script; there is no comment to check
+        for n, line in enumerate(lines, 1):
+            if line.lstrip().startswith("#"):
+                for num in ADR.findall(line):
+                    if not list(adr_dir.glob(f"{num}-*.md")):
+                        findings.append(f"{rel_src}:{n}: ADR {num} referenced but "
+                                        f"docs/adr/{num}-*.md is missing")
+                for name, *nums in COMMENT_CITE.findall(line):
+                    findings += check_cite(root, files, f"{rel_src}:{n}", name, tuple(nums),
+                                           strict=True)
     return findings
 
 

@@ -6,9 +6,9 @@
 #
 # Activate:  git config core.hooksPath .githooks
 #
-# Only the doc check runs here: 0.05s, so it costs nothing on every commit. The full suite
-# (tests/*.sh, ~15s) belongs in CI and in the ADR 0022 ship gate, not in front of every `git commit`
-# — a pre-commit hook people disable because it is slow protects nothing.
+# Only the fast doc check runs here. The full suite belongs in CI and the ADR 0022 ship gate: a
+# pre-commit hook people disable because it is slow protects nothing.
+
 set -euo pipefail
 
 ROOT="$(git rev-parse --show-toplevel)"

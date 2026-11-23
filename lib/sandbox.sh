@@ -1,24 +1,13 @@
 #!/usr/bin/env bash
 # Sourced by bin/nightshift.sh after its path globals are initialized.
 # --------------------------------------------------------------- ship gate ----
-# The Review stage proves the FINDING is fixed; it does not prove nothing ELSE broke. Regressions
-# therefore shipped unnoticed unless the host repo happened to have CI — and only one of four did.
-# (Observed 2026-08-04: repo-a PR #10 dropped a dependency that looked unreferenced in src/
-# but was imported by tests across a service boundary; three tests broke, the PR shipped.)
-#
-# So the repo's own suite runs against the worktree, INSIDE the fix<->review loop rather than after
-# it: a failure is a revision request, not a death sentence. The Fix stage caused the breakage and
-# is still in the loop with budget left, so it gets the failing output back and repairs its own
-# damage (see stage_prompt). Only an item that leaves the loop still broken is refused.
-# The gate EXECUTES candidate-controlled repository content — `npm ci` alone runs preinstall /
-# prepare / pretest straight out of a package.json the Fix stage may just have written. Unsandboxed,
-# that is the most direct route there is from a prompt-injected fix to full host execution as this
-# account: SSH keys, the gh token, ~/.claude credentials, /etc secrets, the docker
-# socket (host-root equivalent), sudo. So it does not run as this account. See ADR 0026.
-#
-# bubblewrap: no daemon, no setuid, no privileged helper, one process per gate, and the filesystem
-# is an ALLOWLIST — nothing is visible unless it was bound in. Nothing else on this host removes
-# credential reach as cheaply; docker would grant the very socket that is the risk.
+# The repo's own suite runs over the worktree INSIDE the fix<->review loop: a red suite is a
+# revision request that hands Fix the failing output (stage_prompt), and only an item that leaves
+# the loop still red is refused (ADR 0022).
+# The suite executes candidate-written content (`npm ci` runs package.json lifecycle scripts), so it
+# never runs as this account: bubblewrap, whose filesystem and environment are allowlists, or not at
+# all, unless the operator sets NIGHTSHIFT_TEST_SANDBOX=none (ADR 0026). docker is no substitute:
+# its socket is host-root.
 TEST_SANDBOX="${NIGHTSHIFT_TEST_SANDBOX:-bwrap}"
 declare -a TEST_SANDBOX_ARGV=()
 
@@ -26,18 +15,15 @@ _test_robind() { # path [declared] -> append a read-only bind, refusing anything
   local p="$1" declared="${2:-}" rp
   [ -n "$p" ] || return 0
   rp="$(realpath -m -- "$p" 2>/dev/null || printf '%s' "$p")"
-  # A path someone DECLARED (NIGHTSHIFT_TEST_SANDBOX_ROBIND, rulebook test_robind) that is not there
-  # is a typo or a moved checkout, under /usr as much as anywhere. Dropped quietly, it surfaces only
-  # as a red suite — which loops back into Fix as a regression to repair, every night, for a host
-  # fault no stage can see.
+  # A missing DECLARED path (NIGHTSHIFT_TEST_SANDBOX_ROBIND, rulebook test_robind) is logged: dropped
+  # quietly it shows up only as a red suite that Fix is asked to repair.
   if [ ! -e "$rp" ]; then
     [ -n "$declared" ] && log "  test sandbox: read-only bind $p does not exist — not bound"
     return 0
   fi
   case "$rp" in /usr|/usr/*) return 0 ;; esac   # already bound whole
-  # `/`, `/home`, `$HOME` — a bind of any ancestor of $HOME hands the suite ~/.ssh and the gh token
-  # back, i.e. exactly the reach this sandbox exists to remove. Refuse it out loud; a silently
-  # widened sandbox is worse than none, because the ADR says it is closed.
+  # A bind of $HOME or any ancestor hands the suite ~/.ssh and the forge token back. Refuse it out
+  # loud: a silently widened sandbox is worse than none.
   if [ "$rp" = / ] || { [ -n "${HOME:-}" ] && { [ "$rp" = "$HOME" ] || [ "${HOME#"$rp"/}" != "$HOME" ]; }; }; then
     log "  test sandbox: REFUSING read-only bind $p — it contains \$HOME"
     return 0
@@ -60,10 +46,9 @@ build_test_sandbox() { # worktree sandbox_home net(0|1) item_dir [robind] -> fil
     --size $((16 * 1024 * 1024))   --tmpfs /run
     --ro-bind /usr /usr
   )
-  # ALWAYS its own network namespace, `test_net` or not. `--share-net` used to hand a test_net repo
-  # the HOST's namespace, which is loopback and the LAN — every other service on this machine — and
-  # not merely "the internet" (ADR 0028). Egress now leaves through a vetting proxy on a unix
-  # socket, which crosses the namespace because it is a filesystem object, not a route.
+  # ALWAYS its own network namespace, `test_net` or not: the host's would expose its loopback and
+  # LAN. A test_net repo's egress crosses through a vetting proxy's unix socket, a filesystem object
+  # rather than a route (ADR 0028).
   if [ "$net" = 1 ] && [ -n "${TEST_EGRESS_DIR:-}" ]; then
     TEST_SANDBOX_ARGV+=(
       --ro-bind "$TEST_EGRESS_DIR" /nightshift-egress
@@ -76,52 +61,35 @@ build_test_sandbox() { # worktree sandbox_home net(0|1) item_dir [robind] -> fil
     if [ -L "$p" ]; then TEST_SANDBOX_ARGV+=( --symlink "$(readlink "$p")" "$p" )
     elif [ -d "$p" ]; then TEST_SANDBOX_ARGV+=( --ro-bind "$p" "$p" ); fi
   done
-  # /etc is an ALLOWLIST and never a whole-directory bind: /etc/service-secrets and its neighbours are
-  # precisely the secrets the gate must not reach. `-try` because the set spans distributions.
-  # NOT /etc/ssl or /etc/pki wholesale: `/etc/ssl/private` is the conventional private-key location,
-  # and a boundary that holds only because that directory happens to be mode 0700 is not a boundary.
+  # /etc is bound file by file, never whole: it holds service secrets. Not /etc/ssl or /etc/pki
+  # wholesale either, since /etc/ssl/private holds private keys. `-try` because the set spans
+  # distributions.
   for p in /etc/passwd /etc/group /etc/nsswitch.conf /etc/localtime /etc/alternatives \
            /etc/ssl/certs /etc/ssl/openssl.cnf /etc/pki/tls/certs \
            /etc/ca-certificates /etc/ca-certificates.conf; do
     TEST_SANDBOX_ARGV+=( --ro-bind-try "$p" "$p" )
   done
-  # No /etc/resolv.conf, ever: the sandbox resolves nothing. It hands the proxy a NAME and the proxy
-  # resolves it on the host, which is the only place the answer can be checked against the address
-  # policy — a resolver inside would just be a second, unchecked opinion.
-  #
-  # A minimal /etc/hosts IS needed, and not for the network: it is how `localhost` resolves to the
-  # sandbox's own loopback. Without it vitest dies at startup with EAI_AGAIN before running a single
-  # test. Synthesised rather than bound from the host, whose /etc/hosts names this machine's LAN.
+  # No /etc/resolv.conf: names are resolved by the host-side proxy, the only place the answer is
+  # checked against the address policy. A synthetic /etc/hosts still maps `localhost` to the
+  # sandbox's own loopback (vitest fails without it); the host's file would name this machine's LAN.
   { echo "127.0.0.1 localhost"
     echo "::1 localhost ip6-localhost ip6-loopback"
   } > "$id/gate-hosts"
   TEST_SANDBOX_ARGV+=( --ro-bind "$id/gate-hosts" /etc/hosts )
-  # A linked worktree's `.git` is a FILE (`gitdir: <repo>/.git/worktrees/<name>`), so every git
-  # command in the gate resolves out of the worktree and into the repo — which is not bound. Without
-  # this, `git ls-files` exits 128 and any suite that consults git fails for a reason that has
-  # nothing to do with the change under test (nightshift's own `lib/check_docs.py` is one).
-  # READ-ONLY, and that is the whole point: writable, a `pretest` could plant a hook or rewrite
-  # history in the REAL repository — an escape straight past the disposable worktree.
+  # A linked worktree's `.git` points into the repo's git dir, so a suite that runs git needs it
+  # bound. READ-ONLY: writable, a `pretest` could plant a hook or rewrite refs in the real repository.
   local gitdir
   gitdir="$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
   [ -n "$gitdir" ] && _test_robind "$gitdir"
-  # (the pointer file itself is re-bound read-only further down — it must come AFTER the worktree's
-  # read-write bind, or that bind simply covers it again)
-  # The developer toolchain lives under nvm, i.e. under $HOME, which is NOT bound — so every entry
-  # of NIGHTSHIFT_TEST_PATH is bound read-only here as well as prepended to PATH below. It is read
-  # as a colon-separated PATH FRAGMENT, which is what it already was on the PATH side: the fleet
-  # needs node from nvm and `uv` from ~/.local/bin in the same gate, and binding a directory without
-  # putting it on PATH (or the reverse) leaves the tool just as unreachable.
+  # NIGHTSHIFT_TEST_PATH (a colon-separated PATH fragment, typically under $HOME) is bound read-only
+  # here AND prepended to PATH below; either half alone leaves the tool unreachable.
   local -a tcdirs=()
   IFS=: read -r -a tcdirs <<<"${NIGHTSHIFT_TEST_PATH:-}"
   for p in ${tcdirs[@]+"${tcdirs[@]}"}; do
     [ -n "$p" ] || continue
-    # node resolves its own lib/ relative to `..`, so an nvm bin dir needs its prefix bound too.
-    # Scoped to a SELF-CONTAINED node install (`bin/node` + `lib/node_modules` under one prefix),
-    # because the looser tests are both wrong here: a bare `dirname` drags in ~/.local for a
-    # ~/.local/bin entry, and `lib/node_modules` alone still matches it — that is npm's global
-    # prefix on this very host — mounting ~/.local/share into a sandbox whose entire purpose is
-    # that $HOME is not in it.
+    # node resolves its lib/ relative to `..`, so a node bin dir needs its prefix bound too. Only for
+    # a self-contained install (`node` here AND `../lib/node_modules`): either test alone also matches
+    # ~/.local/bin and would mount ~/.local into the sandbox.
     [ -x "$p/node" ] && [ -d "$(dirname -- "$p")/lib/node_modules" ] && _test_robind "$(dirname -- "$p")"
     _test_robind "$p"
   done
@@ -134,16 +102,11 @@ build_test_sandbox() { # worktree sandbox_home net(0|1) item_dir [robind] -> fil
   for p in ${extra[@]+"${extra[@]}"}; do _test_robind "$p" declared; done
   # The ONLY writable paths: the worktree (which is what is about to be committed) and a HOME.
   TEST_SANDBOX_ARGV+=( --bind "$wt" "$wt" --bind "$sbhome" "$sbhome" --chdir "$wt" )
-  # Punch the pointer file back out of that writable area — ORDER MATTERS, bwrap applies binds in
-  # sequence and the line above would otherwise cover this one. `$wt/.git` is a plain file naming
-  # the gitdir, and every git command finalize runs next (`checkout -b`, `add -A`, `commit`) happens
-  # OUTSIDE the sandbox as this account and reads whatever it names. Rewriting it to a gitdir built
-  # inside the worktree is a full escape: `core.fsmonitor` is arbitrary command execution and
-  # `hooks/pre-commit` is another. Both were verified to fire before this existed. As a mountpoint
-  # the file also cannot be unlinked or replaced.
+  # Re-bind the `.git` pointer read-only AFTER the worktree bind, which would otherwise cover it.
+  # finalize's git commands run outside the sandbox and follow it, so a rewritten pointer is a full
+  # escape (ADR 0026); as a mountpoint it also cannot be unlinked or replaced.
   [ -e "$wt/.git" ] && TEST_SANDBOX_ARGV+=( --ro-bind "$wt/.git" "$wt/.git" )
-  # --clearenv dropped everything, SSH_AUTH_SOCK / GH_TOKEN / GITHUB_TOKEN / ANTHROPIC_API_KEY /
-  # AWS_* / DOCKER_HOST included. What a suite legitimately needs is short, and it is listed here.
+  # After --clearenv, this is the whole environment; credentials stay out by construction.
   TEST_SANDBOX_ARGV+=(
     --setenv HOME "$sbhome"
     --setenv PATH "${NIGHTSHIFT_TEST_PATH:+$NIGHTSHIFT_TEST_PATH:}/usr/local/bin:/usr/bin:/bin"
@@ -154,8 +117,7 @@ build_test_sandbox() { # worktree sandbox_home net(0|1) item_dir [robind] -> fil
     --setenv USER "${USER:-nightshift}"
     --setenv NIGHTSHIFT_TEST_SANDBOX_ACTIVE 1
   )
-  # One escape hatch, host-declared by NAME: a suite that needs UV_CACHE_DIR or CARGO_HOME says so
-  # in the environment the operator controls, rather than the gate inheriting the whole session.
+  # The one escape hatch: variables the operator names in NIGHTSHIFT_TEST_ENV_PASS.
   local -a pass=()
   IFS=', ' read -r -a pass <<<"${NIGHTSHIFT_TEST_ENV_PASS:-}"
   for p in ${pass[@]+"${pass[@]}"}; do
@@ -166,12 +128,10 @@ build_test_sandbox() { # worktree sandbox_home net(0|1) item_dir [robind] -> fil
   done
 }
 
-# Runs as pid 1 of the sandbox. rlimits are set HERE and not by the Runner, because they must bound
-# the suite without bounding the Runner. `timeout` already caps wall clock; these cap what a suite
-# can do inside that window. Kept as a fixed literal: the command itself arrives via the environment
-# so nothing the rulebook wrote is ever spliced into this script.
-# A ceiling that fails to apply must not be shrugged off — the suite would then run with the limit
-# the operator thinks is in force and isn't. Exit 125 marks it as "the gate could not run".
+# Runs as pid 1 of the sandbox, so the rlimits bound the suite and not the Runner (ADR 0026). A
+# fixed literal: the command arrives via the environment, so nothing the rulebook wrote is spliced
+# into this script. A limit that fails to apply exits 125 ("the gate could not run") rather than
+# running the suite without it.
 TEST_GATE_INNER='
 set_limit() { # flag value -> apply it, or refuse to run the suite at all
   [ "${2:-0}" -gt 0 ] || return 0
@@ -212,33 +172,18 @@ fi
 exec bash -c "$NIGHTSHIFT_GATE_CMD"
 '
 
-# `$wt/.git` is a POINTER FILE in the writable worktree, and every git command finalize runs next —
-# `checkout -b`, `add -A`, `commit` — happens outside the sandbox as this account and reads whatever
-# gitdir it names. Rewriting it is therefore a full escape (`core.fsmonitor` and `hooks/pre-commit`
-# were both verified to fire). The sandbox binds the file read-only, but this records it anyway: the
-# `none` opt-out has no such protection, and a guard that only exists inside the thing it guards is
-# not a guard. Cheap enough to be unconditional.
 # Everything below defends ONE property: no git command the Runner runs against a candidate worktree
-# may execute code the candidate chose. Two mechanisms are needed because git offers two doors.
+# may execute code the candidate chose (ADR 0026). Git offers two doors, so there are two checks.
 #
-# Door 1 — the `.git` pointer. It is a plain file in the writable worktree, and both the Fix stage
-# (N1 confines it to the worktree; this file is IN the worktree) and the gate can write it. Point it
-# at a private gitdir and its `config` supplies `core.fsmonitor`, `alias`, `pager`, filter drivers —
-# all arbitrary commands, run by whichever git touches the worktree next, outside any sandbox.
+# Door 1 — the `.git` pointer, a plain file that Fix (N1 confines it to the worktree) and the gate
+# can write. Pointed at a private gitdir, its config (`core.fsmonitor`, `alias`, `pager`, filters)
+# runs commands in whichever git touches the worktree next. The sandbox's read-only bind does not
+# cover NIGHTSHIFT_TEST_SANDBOX=none or a pointer Fix wrote, so this check is unconditional.
 #
-# Compared LITERALLY against what the repo says the pointer must be. An earlier version asked git to
-# resolve the worktree and compared `--git-common-dir`, which a hostile gitdir defeats trivially: a
-# `commondir` file inside it redirects the common dir back at the real repo, so the comparison
-# passes while `$GIT_DIR` stays attacker-owned. Never ask a hostile repository to identify itself.
-#
-# The admin directory's NAME is git's to choose, not ours to predict: `worktree add` appends a digit
-# when the basename is already registered, and one stale entry from a crashed night is enough — the
-# path is gone, the entry is merely prunable, and the next worktree of that name becomes `<name>1`.
-# Deriving the expected pointer from `basename "$wt"` therefore accused a perfectly sound worktree of
-# tampering (seen live on repo-c) and refused the item, every night, until someone pruned. So the
-# expected value is read from the REPO side instead: `<admin>/gitdir` is maintained by git outside
-# the worktree, where the Fix stage cannot write (N1) and the sandbox binds read-only. That is the
-# same trust boundary as before — a fact about the repo, not a claim by the candidate.
+# Compared LITERALLY, never by asking git: a hostile gitdir's `commondir` file makes
+# `--git-common-dir` report the real repo. The expected value comes from the repo side,
+# `<admin>/gitdir`, which the candidate cannot write. The admin dir's name is git's choice (it
+# appends a digit when a stale entry holds the basename), so it is searched for, not derived.
 git_pointer_ok() { # repo worktree -> 0 if `$wt/.git` is exactly the pointer this repo recorded
   local repo="$1" wt="$2" common have admin
   common="$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
@@ -253,15 +198,11 @@ git_pointer_ok() { # repo worktree -> 0 if `$wt/.git` is exactly the pointer thi
   return 1
 }
 
-# Door 2 — `core.hooksPath`. A RELATIVE value resolves against the working directory, so a repo that
-# sets `core.hooksPath = .githooks` (nightshift's own does, and it is a `branch-fix` target) points
-# git straight at a tracked, candidate-writable directory. A green suite rewrites `.githooks/pre-commit`
-# and `finalize`'s commit executes it as this account, outside the sandbox.
-#
-# NOT simply "disable all hooks": finalize runs the target repo's hooks deliberately (ADR 0022 —
-# nightshift must not manufacture a commit the host repo would reject), and hooks that live in the
-# repo's own git dir are not candidate-controlled. Only the ones reachable INSIDE the worktree are.
-# So this neutralises exactly those, by redirecting to the git dir's own hooks, and leaves the rest.
+# Door 2 — `core.hooksPath`. A relative value (nightshift's own `.githooks`) resolves inside the
+# worktree, where the candidate can rewrite the hooks finalize's commit then runs as this account.
+# Hooks are not disabled: finalize runs the repo's own hooks deliberately, so it never makes a
+# commit the repo would reject (ADR 0022). Only a hooks path inside the worktree is redirected, to
+# the git dir's hooks.
 worktree_hook_args() { # repo worktree -> `-c core.hooksPath=…` if the repo's hooks live in the worktree
   local repo="$1" wt="$2" hp common rp
   hp="$(git -C "$wt" config --get core.hooksPath 2>/dev/null || true)"
@@ -275,9 +216,8 @@ worktree_hook_args() { # repo worktree -> `-c core.hooksPath=…` if the repo's 
   fi
 }
 
-# The single choke point. Every Runner-owned git command that touches a candidate worktree goes
-# through this first — including the Review stage's `git add -A`, which runs BEFORE the ship gate and
-# was therefore the earliest detonation point of all.
+# The single choke point: every Runner-owned git command on a candidate worktree goes through this
+# first, including the Review stage's `git add -A`, which runs before the ship gate.
 assert_worktree_git_sane() { # repo worktree -> 0 sane, 1 tampered (and says so)
   local repo="$1" wt="$2"
   git_pointer_ok "$repo" "$wt" && return 0
@@ -285,21 +225,18 @@ assert_worktree_git_sane() { # repo worktree -> 0 sane, 1 tampered (and says so)
   return 1
 }
 
-# Removes every ignored file from a worktree and reports whether anything git does not track
-# survived (ADR 0037). `-ff` also takes an ignored directory that holds its own `.git`, which a plain
-# `-f` leaves in place. A submodule path is invisible to both `clean` and `ls-files`: a worktree is
-# created with every submodule uninitialised, so such a path must still be empty — anything in it
-# was written by a stage, and the suite would run it. A failed listing counts as a survivor: this
-# check exists to fail closed.
 # A directory this account cannot read or search hides its contents from git (a warning, exit 0)
-# and from every content check, so it refuses on its own. Anything that runs in the worktree can
-# make one with a plain chmod. A failed search counts as one: this check exists to fail closed.
+# and from every content check, so it refuses on its own. A failed search counts as one (fail closed).
 has_hidden_dir() { # worktree -> 0 one exists (or the search failed), 1 none
   local found
   found="$(find "$1" -type d \( ! -readable -o ! -executable \) -print -quit 2>&1)" || return 0
   [ -n "$found" ]
 }
 
+# Removes every ignored file and fails if anything untracked survives (ADR 0037). `-ff` also takes
+# an ignored directory holding its own `.git`. A submodule path is invisible to both `clean` and
+# `ls-files` and starts uninitialised, so it must still be empty: anything in it was written by a
+# stage. A failed listing counts as a survivor (fail closed).
 purge_ignored_files() { # worktree -> 0 nothing untracked-and-ignored left, 1 otherwise
   local wt="$1" left
   ! has_hidden_dir "$wt" || return 1
@@ -353,34 +290,29 @@ print(h.hexdigest())
 ' "$wt" 2>/dev/null
 }
 
-# The ship gate's execution half (ADR 0026, ADR 0028): ONE repo command, run over the worktree in
-# the disposable bwrap sandbox with the repo's vetted egress, both torn down before it returns. The
-# gate and the dependency setup before Fix (ADR 0037) both run through here, so there is exactly one
-# sandbox for the Runner executing repository content. Output lands in `out`; the command's own
-# status is returned. GATE_UNAVAILABLE=1 (status 2) means the command never ran — no sandbox, no
-# proxy, or a sandbox that did not come up — and `out` or egress.log says which.
+# Runs ONE repo command over a worktree in the disposable bwrap sandbox with the repo's vetted
+# egress, both torn down before it returns (ADR 0026, ADR 0028). The ship gate and the red-base
+# check (ADR 0041) both run through here, so there is one sandbox for repository content. Output
+# lands in `out`; the command's status is returned. GATE_UNAVAILABLE=1 (status 2) means the command
+# never ran — no sandbox, no proxy, or a sandbox that did not come up — and `out` or egress.log says
+# which.
 GATE_UNAVAILABLE=0
 gate_exec() { # repo worktree item_dir cmd out label consequence -> the command's status
   local repo="$1" wt="$2" id="$3" tcmd="$4" out="$5" label="$6" consequence="$7" net trc=0 sbhome persist=0
   GATE_UNAVAILABLE=0
   net=$(repo_test_net "$repo")
 
-  # A test_net repo gets its egress through the vetting proxy (ADR 0028), never through the host's
-  # network namespace. Started per gate and killed after it, so nothing outlives the run it serves.
+  # The vetting proxy (ADR 0028) lives exactly as long as this one command.
   TEST_EGRESS_DIR=""; TEST_EGRESS_PORT=""
   local egress_pid=""
   if [ "$net" = 1 ] && [ "$TEST_SANDBOX" != none ]; then
     TEST_EGRESS_DIR="$(mktemp -d "$WORKTREES_DIR/gate-egress.XXXXXX")"
     chmod 700 "$TEST_EGRESS_DIR"
     TEST_EGRESS_PORT=3128
-    # `read` on the proxy's stdout: it prints one line once the socket is bound and listening. A
-    # sleep here would be a race that only shows up as a flaky "registry unreachable" at 04:00.
+    # The proxy prints one ready line once its socket listens; reading it avoids a startup race.
     exec 8< <(python3 "$NIGHTSHIFT_HOME/lib/egress_proxy.py" "$TEST_EGRESS_DIR/egress.sock" 2>>"$id/egress.log")
-    # The pid comes from the READY LINE, not from `$!`. After `exec 8< <(…)`, `$!` names the subshell
-    # bash forks for the substitution; that subshell only *becomes* python3 on a bash that
-    # exec-replaces it (5.2 does, the 5.1 on Debian 11 does not), and killing the wrong pid leaves
-    # the proxy listening after its socket directory is gone. bash does not promise otherwise, so the
-    # process reporting its own pid is the only source that is right on every version.
+    # The pid comes from that line, not `$!`: `$!` names the substitution's subshell, which only some
+    # bash versions exec-replace with python3, and killing it would leave the proxy running.
     if ! read -r -t 10 -u 8 _ready egress_pid; then
       log "  $(basename "$repo"): the egress proxy did not come up — $consequence (see $id/egress.log)"
       exec 8<&-
@@ -394,16 +326,11 @@ gate_exec() { # repo worktree item_dir cmd out label consequence -> the command'
   fi
   # Every exit from here on has to take the proxy with it, so it is torn down in one place.
   stop_egress() {
-    # Only touch fd 8 if this call actually opened it. `exec 8<&-` on a descriptor that was never
-    # opened is a redirection failure, and a failed `exec` redirection TERMINATES a non-interactive
-    # shell — `2>/dev/null || true` does not save it. That killed the whole night right after the
-    # first gate of every repo without test_net, which reads downstream as "the loop never retried".
+    # Only touch fd 8 if this call opened it: `exec 8<&-` on an unopened descriptor is a failed
+    # redirection, which terminates a non-interactive shell despite `|| true`.
     if [ -n "${egress_pid:-}" ]; then
-      # SIGINT, not SIGTERM. bash announces a process-substitution job killed by SIGTERM as a bare
-      # `Terminated` on stderr — deferred to the next command, so it lands in the night log between
-      # "test gate passed" and the push and reads like a crash in a run that succeeded. bash stays
-      # silent for SIGINT and SIGPIPE, and `lib/egress_proxy.py` already exits cleanly on
-      # KeyboardInterrupt, so the quieter signal costs nothing. Every `test_net` gate did this.
+      # SIGINT, not SIGTERM: bash reports a substitution job killed by SIGTERM as a stray
+      # `Terminated` in the night log; egress_proxy.py exits cleanly on KeyboardInterrupt.
       kill -INT "$egress_pid" 2>/dev/null || true
       exec 8<&-
     fi
@@ -412,9 +339,8 @@ gate_exec() { # repo worktree item_dir cmd out label consequence -> the command'
     return 0
   }
 
-  # A gate that cannot be sandboxed does not run. Not "runs anyway with a warning": the whole point
-  # of ADR 0026 is that executing this content as this account is the exposure, so the absence of
-  # the sandbox is a refusal to ship, not a licence to ship faster.
+  # No sandbox, no run, unless NIGHTSHIFT_TEST_SANDBOX=none opts out: executing this content as this
+  # account is the exposure (ADR 0026).
   if [ "$TEST_SANDBOX" != none ] && ! command -v bwrap >/dev/null 2>&1; then
     printf 'nightshift: bwrap is not installed, so the ship gate has no sandbox.\n%s\n' \
       "Install bubblewrap, or accept the risk explicitly with NIGHTSHIFT_TEST_SANDBOX=none." \
@@ -424,9 +350,8 @@ gate_exec() { # repo worktree item_dir cmd out label consequence -> the command'
     GATE_UNAVAILABLE=1; return 2
   fi
 
-  # HOME is disposable by default, so nothing a suite writes survives into the next night — and a
-  # poisoned dependency cache is a cross-run write channel. An operator who cannot afford a cold
-  # cache every gate can pin one with NIGHTSHIFT_TEST_SANDBOX_HOME and owns that trade.
+  # HOME is disposable by default: a persistent dependency cache is a cross-run write channel.
+  # NIGHTSHIFT_TEST_SANDBOX_HOME pins one, at the operator's risk.
   if [ -n "${NIGHTSHIFT_TEST_SANDBOX_HOME:-}" ]; then
     sbhome="$NIGHTSHIFT_TEST_SANDBOX_HOME"; persist=1; mkdir -p "$sbhome"
   else
@@ -435,24 +360,17 @@ gate_exec() { # repo worktree item_dir cmd out label consequence -> the command'
 
   # `|| trc=$?` and not `if ! …`: inside an `if !` body `$?` is the negation's 0, not the suite's.
   if [ "$TEST_SANDBOX" = none ]; then
-    # NIGHTSHIFT_TEST_PATH is the developer toolchain (node/npm/pnpm) the repo's own suite needs but
-    # that a systemd user service does not get — bin/nightshift-cron.sh explains why it is prepended
-    # HERE and nowhere else: the Runner's own unqualified jq/git/python3 calls must keep resolving to
-    # the system dirs (R10/N4), while this subprocess already runs the repo's package scripts anyway.
+    # NIGHTSHIFT_TEST_PATH is prepended only for the suite: the Runner's own unqualified commands
+    # must keep resolving to the system dirs (R10/N4; see bin/nightshift-cron.sh).
     log "  $(basename "$repo"): $label sandbox DISABLED (NIGHTSHIFT_TEST_SANDBOX=none) — it runs with this account's full reach"
     ( cd "$wt" && export PATH="${NIGHTSHIFT_TEST_PATH:+$NIGHTSHIFT_TEST_PATH:}$PATH" \
       && timeout "$TEST_TIMEOUT" bash -c "$tcmd" </dev/null ) >"$out" 2>&1 || trc=$?
   else
     build_test_sandbox "$wt" "$sbhome" "$net" "$id" "$(repo_test_robind "$repo")"
-    # Whether the sandbox was actually BUILT cannot be read off the exit status: bubblewrap exits 1
-    # for a missing bind source, a bad --chdir and an unknown option alike, and it also propagates
-    # the child's own status, so no value is unambiguous. `--json-status-fd` is: bwrap writes an
-    # `exit-code` record only once the child has actually run, so its ABSENCE means the sandbox
-    # never came up. (`child-pid` is NOT the signal — bwrap forks before it binds, so a failed setup
-    # still reports one. Measured against bwrap 0.11.0.)
+    # Whether the sandbox came up cannot be read off the exit status, which bwrap shares with the
+    # child. An `exit-code` record on --json-status-fd appears only once the child ran, so its
+    # absence means it never did (`child-pid` is written before the binds, so it proves nothing).
     : >"$id/.sandbox-status"
-    # `--chdir "$wt"` above is what puts the suite in the WORKTREE rather than the repo: the worktree
-    # is what carries the fix and what is about to be committed.
     timeout "$TEST_TIMEOUT" \
       "${TEST_SANDBOX_ARGV[@]}" \
       --json-status-fd 9 \

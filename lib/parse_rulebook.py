@@ -28,12 +28,8 @@ import re
 import sys
 from pathlib import Path
 
-# Every mapping section's key set is CLOSED: load() reads exactly
-# these keys and nothing else, so a key outside the set can only be a typo — and tolerating one is
-# silent, which is the worst way for governance to fail. `max_open_branchs: 12` leaves the ONLY
-# throughput cap at its default 2; `test-cmd:` on a repo leaves `test_cmd` empty, so that repo ships
-# UNGATED past its ADR 0022 ship gate; `ttl-days:` or a misspelled `enabled` quietly re-enables recon
-# or resets its TTL. Reject the complement instead — the standard `agent:` has always applied.
+# Every mapping section's key set is CLOSED: a key outside it can only be a typo, and tolerating one
+# silently reverts that knob to its default (a misspelled `test_cmd` would leave a repo ungated).
 LIMIT_KEYS = (
     "max_open_branches",
     "max_branches_per_run",
@@ -58,9 +54,8 @@ AGENT_KEYS = (
     "review_model",
     "advisors",
 )
-# Adapters the Runner implements (ADR 0045). `primary` and every `advisors` entry name one of these;
-# anything else — a removed adapter included — is a typo, and tolerating it would run the night on
-# something the host never asked for.
+# Adapters the Runner implements (ADR 0045). `primary` and every `advisors` entry must name one;
+# anything else, a removed adapter included, is refused.
 ADAPTERS = ("claude", "codex", "mock")
 EFFORTS = {
     "claude_effort": ("low", "medium", "high", "xhigh", "max"),
@@ -70,8 +65,7 @@ EFFORTS = {
 # every setting beneath it would silently revert to its default.
 TOP_LEVEL_KEYS = ("branch_prefix", "limits", "recon", "agent", "dimensions", "repos")
 REPO_KEYS = ("path", "mode", "base", "findings", "dimensions", "test_net", "test_robind", "protected_paths", "test_cmd")
-# The modes the Runner actually implements. A repo whose mode is not in here is a typo, not a
-# feature request — see the validation below for why that must abort rather than be skipped.
+# The modes the Runner implements; any other value aborts (see the validation in load()).
 REPO_MODES = ("findings-only", "branch-fix")
 # A dimension is serviceable when prompts/dimensions/<id>.md exists — the built-in catalog and the
 # custom lenses ADR 0010 allows alike. Any other id would be recorded as serviced with no lens prompt.
@@ -87,11 +81,9 @@ def val(raw: str) -> str:
 def quoted_val(raw: str) -> str:
     """Scalar that may be quoted, so its value may legitimately contain `#`.
 
-    `val()` splits on ` #` before it knows whether it is inside quotes, which
-    truncates `"gpt-5 #2"` to `"gpt-5`. Only a `# comment` may follow the closing
-    quote: anything else would be dropped, and `test_cmd: "cd" sub && make test`
-    would become a ship gate that runs a bare `cd` and always passes. That and an
-    unterminated quote are typos, not values — say so."""
+    Only a `# comment` may follow the closing quote: anything else would be dropped, and
+    `test_cmd: "cd" sub && make test` would become a gate that runs a bare `cd`. That and an
+    unterminated quote are refused."""
     s = raw.strip()
     if s[:1] in ("'", '"'):
         end = s.find(s[0], 1)
@@ -120,9 +112,8 @@ def put(
 ) -> None:
     """Record one `key: value` line of a mapping section, refusing anything off its key set.
 
-    A missing colon, an unknown key, or the same key twice are all misconfigs, and every one of
-    them has the same silent outcome if waved through: the knob falls back to the parser's default
-    and the night runs on governance the human did not write. Fail loudly instead."""
+    A missing colon, an unknown key or a duplicate key would otherwise leave the knob at its
+    default, so each one fails loudly."""
     k, sep, v = s.partition(":")
     key = k.strip()
     if not sep:
@@ -162,20 +153,17 @@ def load(path: str) -> dict:
             line = raw.rstrip("\n")
             if not line.strip() or line.strip().startswith("#"):
                 continue
-            # Indentation is what assigns a line to a section, and it is counted in SPACES. A
-            # tab-indented line measures as indent 0, so it would be read as a new top-level key and
-            # its section silently lost every entry. Refuse it instead of misreading it.
+            # Indentation is counted in SPACES; a tab-indented line would measure as indent 0 and
+            # silently end its section, so it is refused.
             if "\t" in line[: len(line) - len(line.lstrip())]:
                 raise SystemExit(f"indent with spaces, not tabs: {line.strip()}")
             indent = len(line) - len(line.lstrip(" "))
             s = line.strip()
-            # A section header carries no payload, so everything from the first `#` is a comment.
-            # Comparing the raw line instead silently demoted `repos: # the fleet` to "no section",
-            # which dropped every entry under it without a word.
+            # A section header carries no payload, so everything from its first `#` is a comment
+            # (`repos: # the fleet` is still the repos section).
             head = s.split("#", 1)[0].rstrip()
-            # YAML permits sequence items at the same indentation as their section key:
-            # `repos:\n- path: …`. Keep the active sequence section for that standard shape;
-            # resetting it here used to accept the file while silently emitting an empty fleet.
+            # YAML permits sequence items at the same indentation as their section key
+            # (`repos:\n- path: …`); such a line keeps the active sequence section.
             same_indent_item = (
                 indent == 0
                 and s.startswith("- ")
@@ -195,12 +183,11 @@ def load(path: str) -> dict:
                 if top_level_key == "branch_prefix":
                     prefix = quoted_val(s.split(":", 1)[1])
                 elif not head.endswith(":") or head[:-1].strip() != top_level_key:
-                    # `limits: 5`, a flow `limits: {…}` or a bare `limits` used to set no section,
-                    # so every line under it was dropped without a word — the knob silently reverted.
+                    # `limits: 5`, a flow `limits: {…}` or a bare `limits` would set no section and
+                    # silently drop every line under it.
                     raise SystemExit(f"section '{top_level_key}' must be a bare `{top_level_key}:` header")
                 else:
-                    # Dispatch on the key, not the raw header: `limits :` is the same key, and
-                    # matching the literal `limits:` left its entries unread.
+                    # Dispatch on the key, not the raw header: `limits :` is the same key.
                     section = top_level_key
             elif section == "limits":
                 put(limits, "limits", s, LIMIT_KEYS)
@@ -261,9 +248,7 @@ def load(path: str) -> dict:
             max_run_branches, 1, "limits.max_branches_per_run must be a positive integer"
         )
     lim["max_branches_per_run"] = max_run_branches
-    # A hand-set 0 would make the fix<->review loop never run — every finding then
-    # abandons silently. Require >= 1 so the misconfig fails loudly (with the runner's
-    # fail-closed parse handling) instead of doing nothing.
+    # A hand-set 0 would make the fix<->review loop never run and every finding abandon silently.
     mfi = limits.get("max_fix_iterations", "3")
     lim["max_fix_iterations"] = _int(mfi, 1, "limits.max_fix_iterations must be a positive integer")
     # These values are prompt guidance, but zero or non-numeric input still makes that guidance
@@ -278,15 +263,13 @@ def load(path: str) -> dict:
     if mrm:
         mrm = _int(mrm, 1, "limits.max_run_minutes must be a positive integer")
     lim["max_run_minutes"] = mrm
-    # Wall-clock ceiling for ONE repo's `test_cmd` (ADR 0022). A hanging suite must not eat the
-    # night, so the gate always runs under a timeout. Default 600s; a hand-set 0 would make every
-    # gated run time out instantly and silently ship nothing, so require a positive integer.
+    # Wall-clock ceiling for ONE repo's `test_cmd` (ADR 0022), so a hanging suite cannot eat the
+    # night. 0 would time out every gate and silently ship nothing.
     tts = limits.get("test_timeout_seconds", "600")
     lim["test_timeout_seconds"] = _int(tts, 1, "limits.test_timeout_seconds must be a positive integer")
     # Resource ceilings for the sandboxed gate (ADR 0026), applied as rlimits inside the sandbox.
-    # `test_memory_mb` is RLIMIT_DATA — the heap. NOT RLIMIT_AS: a WASM runtime reserves
-    # multi-GB of address space it never touches, so an address-space cap large enough for a real
-    # JS suite bounds nothing at all (measured: vitest fails at 16 GiB). 0 = no cap.
+    # `test_memory_mb` is RLIMIT_DATA, the heap, NOT RLIMIT_AS: WASM runtimes reserve address space
+    # they never touch, so any workable RLIMIT_AS bounds nothing. 0 = no cap.
     tmb = limits.get("test_memory_mb", "4096")
     lim["test_memory_mb"] = _int(tmb, 0, "limits.test_memory_mb must be a non-negative integer")
     # RLIMIT_NPROC. The kernel charges this to the ACCOUNT, not to the sandbox, so a value below the
@@ -297,18 +280,12 @@ def load(path: str) -> dict:
     # fill the filesystem — the one host-DoS route the tmpfs caps do not cover. 0 = no cap.
     tfs = limits.get("test_fsize_mb", "2048")
     lim["test_fsize_mb"] = _int(tfs, 0, "limits.test_fsize_mb must be a non-negative integer")
-    # Findings emitted per repo per pass. Default 1 keeps a rulebook that omits the key at the
-    # pre-v2 single-finding behavior; the live rulebook sets it explicitly (ADR 0011).
-    # A hand-set 0 forces n_find=0 in the Runner (MAX_FINDINGS=0 → repo_findings 0 → the
-    # `n_find -le 0` guard), so every repo without a per-repo override silently no-ops; a
-    # non-numeric value detonates later in bash integer arithmetic. Require a positive
-    # integer so the misconfig fails loudly, matching every sibling limit above.
+    # Findings emitted per repo per pass (ADR 0011); default 1. A hand-set 0 would make every repo
+    # without a per-repo override silently do nothing.
     mfp = limits.get("max_findings_per_item", "1")
     lim["max_findings_per_item"] = _int(mfp, 1, "limits.max_findings_per_item must be a positive integer")
-    # Open findings the verify phase may re-check per night — one read-only stage call each, so
-    # this is the ceiling on what closing the finding loop can cost. 0 is a legitimate value
-    # ("never spend a model on closure"); the free deterministic probe runs either way. A
-    # non-numeric value would detonate in bash arithmetic — fail loudly like every sibling.
+    # Open findings the verify phase may re-check per night, one read-only stage call each. 0 is
+    # legitimate ("never spend a model on closure"); the deterministic probe runs either way.
     mvr = limits.get("max_verifies_per_run", "5")
     lim["max_verifies_per_run"] = _int(
         mvr, 0, "limits.max_verifies_per_run must be a non-negative integer"
@@ -319,18 +296,14 @@ def load(path: str) -> dict:
     if renabled not in ("true", "false"):
         raise SystemExit("recon.enabled must be true or false")
     out["recon"] = {"enabled": renabled}
-    # A malformed ttl_days silently became 0 in bash arithmetic → the cache was never fresh →
-    # recon re-ran every pass. Require a positive integer so the misconfig fails loudly instead.
+    # A ttl_days of 0 would make the recon cache never fresh, so recon would re-run every pass.
     ttl = recon.get("ttl_days", "7")
     out["recon"]["ttl_days"] = _int(ttl, 1, "recon.ttl_days must be a positive integer")
-    # Which MODEL a stage runs on (ADR 0020). The host declares it here because stage isolation
-    # (ADR 0019) drops the CLI's `user` settings scope, so a machine-wide pin in
-    # ~/.claude/settings.json no longer reaches a stage. OMITTING the key means "let the CLI resolve
-    # its own default"; writing the key with no value is a half-finished edit, and treating that as
-    # "no model" would silently run the night on something else. Model ID *syntax* stays
-    # unvalidated — it belongs to the CLI vendor and any pattern here would go stale.
-    # `review_model` is the model the Review stage and the branch advice request instead (ADR 0044);
-    # omitted, they use the selected adapter's model.
+    # Which MODEL a stage runs on (ADR 0020); stage isolation (ADR 0019) hides a pin in
+    # ~/.claude/settings.json. Omitting the key lets the CLI choose; an empty value is a half-finished
+    # edit and is refused. Model id syntax is the vendor's and stays unvalidated.
+    # `review_model` is what Review and the branch advice request instead (ADR 0044); omitted, they
+    # use the selected adapter's model.
     agent_out: dict = {}
     out["agent"] = agent_out
     for key in ("claude_model", "codex_model", "review_model"):
@@ -345,10 +318,8 @@ def load(path: str) -> dict:
         if key in agent and effort not in choices:
             raise SystemExit(f"agent.{key}: expected one of {', '.join(choices)}, got {effort!r}")
         agent_out[key] = effort
-    # Which adapter runs the night. Omitted = whatever $NIGHTSHIFT_AGENT says, which is the
-    # pre-existing behaviour; the env var still wins when explicitly set, so a one-off hand run needs
-    # no rulebook edit. Declared here for the same reason the models are (ADR 0020): the host owns
-    # this file, and which agent ran the night is governance, not an invocation detail.
+    # Which adapter runs the night (ADR 0045). Omitted = whatever $NIGHTSHIFT_AGENT says; an
+    # explicitly set NIGHTSHIFT_AGENT still wins, so a one-off hand run needs no rulebook edit.
     primary = agent.get("primary", "")
     if "primary" in agent and not primary:
         raise SystemExit("agent.primary is empty - name an adapter, or omit the key entirely")
@@ -358,11 +329,9 @@ def load(path: str) -> dict:
             f"expected one of {', '.join(sorted(ADAPTERS))}"
         )
     agent_out["primary"] = primary
-    # Which adapters give every open branch its nightly merge/fix/reject recommendation (ADR 0038).
-    # A comma-separated scalar (block-style only, like a repo's `dimensions`). Omitted = no branch
-    # review. Each entry names an ADAPTER and is validated like `primary`; a duplicate would ask
-    # the same model twice, which is one opinion billed as two. `mock` alone may repeat: it is the
-    # test adapter, and each of its slots stands in for a distinct model.
+    # Which adapters give every open branch its nightly merge/fix/reject recommendation (ADR 0038):
+    # a comma-separated scalar; omitted = no branch review. A duplicate would be one opinion billed
+    # as two; only `mock` may repeat, since each test slot stands in for a distinct model.
     advisors_raw = agent.get("advisors", "")
     if "advisors" in agent and not advisors_raw:
         raise SystemExit("agent.advisors is empty — name one or more adapters, or omit the key entirely")
@@ -398,11 +367,8 @@ def load(path: str) -> dict:
         findings = r.get("findings", "")
         if findings:
             findings = _int(findings, 1, f"repo {path}: findings must be a positive integer")
-        # The Runner's select_order() skips any repo whose mode it does not recognise, WITHOUT a log
-        # line — so `mode: brnach-fix` silently removed the repo from every night and the operator's
-        # only clue was that it never appeared in a digest again. Closed key sets already protect
-        # every other knob from a typo (LIMIT_KEYS/RECON_KEYS/AGENT_KEYS/REPO_KEYS); the mode VALUE
-        # was the one place a typo still degraded the run quietly. Fail closed, same as the keys.
+        # The Runner's select_order() skips an unrecognised mode WITHOUT a log line, so a typo
+        # would silently drop the repo from every night. Fail closed, same as the keys.
         mode = r.get("mode", "findings-only")
         if mode not in REPO_MODES:
             raise SystemExit(
@@ -417,30 +383,24 @@ def load(path: str) -> dict:
                     f"expected a lens file in {LENS_DIR}: {', '.join(LENSES)}"
                 )
         test_cmd = r.get("test_cmd", "")
-        # ADR 0026 closes the ungated ship path that ADR 0022 §4 left open. A `branch-fix` repo
-        # pushes machine-written code that a human is invited to merge, and the Review stage only
-        # ever proves the FINDING is fixed — never that nothing else broke. Shipping with no suite
-        # at all was a silent gap: `shipping UNGATED` scrolled past in a log nobody reads at 04:00.
-        # A repo with no runnable suite is not a repo nightshift may write branches for; say so with
-        # `mode: findings-only`, which reports without ever pushing. Refuse the silence instead.
+        # No ungated ship path (ADR 0026): a `branch-fix` repo needs a suite, since Review only
+        # proves the finding is fixed. A repo without one uses `mode: findings-only`.
         if mode == "branch-fix" and not test_cmd:
             raise SystemExit(
                 f"repo {r.get('path', '')}: mode branch-fix requires a test_cmd (ADR 0026) — "
                 "give the repo its ship gate, or set mode: findings-only"
             )
-        # Whether that gate's sandbox gets network egress (ADR 0026). Default false: `npm ci` and
-        # `uv run --with-requirements` need it, most suites do not, and the flag makes the repos
-        # that do an explicit, per-repo host decision rather than a fleet-wide default.
+        # Whether that gate's sandbox gets vetted egress (ADR 0028): an explicit per-repo decision,
+        # default false.
         test_net = r.get("test_net", "false")
         if test_net not in ("true", "false"):
             raise SystemExit(
                 f"repo {r.get('path', '')}: test_net must be true or false, got {test_net!r}"
             )
-        # Extra paths bound READ-ONLY into THIS repo's gate sandbox (ADR 0026), `:`-separated like the
-        # host-wide NIGHTSHIFT_TEST_SANDBOX_ROBIND. Per repo because the usual case is one repo's
-        # dependency on a local checkout (`git+file:///…`), and the host-wide knob would show that
-        # checkout to every other repo's suite too. Absolute paths only: a relative one would resolve
-        # against whatever directory the Runner happens to be in.
+        # Extra paths bound READ-ONLY into THIS repo's gate sandbox (ADR 0026), `:`-separated like
+        # NIGHTSHIFT_TEST_SANDBOX_ROBIND; per repo so other suites do not see them. Absolute only: a
+        # relative path would resolve against the Runner's cwd.
+
         test_robind = r.get("test_robind", "")
         for p in test_robind.split(":"):
             if p and not p.startswith("/"):

@@ -12,17 +12,10 @@ ledger() {
     "$NIGHTSHIFT_HOME/lib" --ledger "$LEDGER" "$@"
 }
 
-# An aborted night exits 3 and systemd marks the unit failed (ADR 0023) — but `systemctl status`
-# reports only the LAST run, so the next night that completes wipes the outage from the one place
-# an operator would notice it without reading anything. Observed 2026-08-08..11: four consecutive
-# nights died on `Not logged in`, each exited 3, each digest said ABORTED — and the healthy night
-# of 08-12 turned the unit green again, leaving four lost nights visible only in the journal.
-# So the streak is carried forward INTO the digest: the first digest that completes after an
-# outage still names how many nights were lost and when the fleet was last actually serviced.
-#
-# Counts only nights that HAVE a digest. A missing date is a night that never started (host off,
-# timer disarmed, holiday) — indistinguishable here from a deliberate pause, and a false "nights
-# lost" on every return from a break would train the reader to skip the line.
+# An aborted night fails the unit (ADR 0023), but `systemctl status` shows only the last run, so
+# the streak of aborted nights is carried INTO the digest until a night completes and reports it.
+# Only nights with a digest count: a missing date may be a deliberate pause, and a false "nights
+# lost" after every break would train the reader to skip the line.
 aborted_streak() { # -> "<count> <newest-aborted> <oldest-aborted> <last-completed|->"; nights before $NIGHT
   local f b count=0 newest="-" oldest="-" last_ok="-"
   while IFS= read -r f; do
@@ -63,11 +56,9 @@ write_digest() { # made open status [advice]
     [ "$status" = ceiling ] && echo "- **Stopped: run ceiling reached** (\`max_branches_per_run: ${MAX_RUN_BRANCHES:-?}\`) — no further branch was opened this run; any remaining work waits for the next night."
     [ "$status" = branch_inventory_unavailable ] && echo "- **Stopped: origin branch inventory unavailable.** The open-branch cap could not be checked."
     [ "$status" = budget ] && echo "- **Stopped: time budget exhausted** (\`${MAX_RUN_SECONDS:-?}s\`) — the night ended on the spend cap, not for lack of work."
-    # An aborted night must announce itself in the ONE artifact the operator actually reads in the
-    # morning. Without this the digest of a credential outage is indistinguishable from a clean
-    # fleet: same "shipped: 0", same empty tables, no reason given.
-    # Name the adapter that DIED (run_agent records it), and give the remedy for the cause it found —
-    # an agent that could not reach its model may be logged in with its quota spent, so name both.
+    # An aborted night must say so, or its digest reads like a clean fleet. Name the agent that died
+    # (run_agent records it) and the remedy; one that could not reach its model may be logged in
+    # with its quota spent, so name both.
     if [ "$status" = agent_unavailable ]; then
       local dead="${AGENT_FATAL_AGENT:-$NIGHTSHIFT_AGENT}" remedy
       case "$AGENT_FATAL" in
@@ -94,9 +85,7 @@ write_digest() { # made open status [advice]
       runs=$(grep -c "\"night\":\"$NIGHT\"" "$RUNSLOG" || true)
       dur=$(jq -s --arg n "$NIGHT" '[.[]|select(.night==$n)|.duration_s]|add // 0' "$RUNSLOG")
       echo "- runs tonight: ${runs} stage-invocations, ${dur}s total"
-      # Stages that never finished, counted from the exit codes runs.jsonl has always recorded but
-      # nothing ever read back. They cost real tokens and produce no verdict, so the morning must see
-      # them next to the shipped count instead of having to notice their absence.
+      # Stages that never finished cost tokens and record no verdict, so they are counted here.
       local nfail
       nfail=$(jq -s --arg n "$NIGHT" '[.[]|select(.night==$n and .exit!=0)]|length' "$RUNSLOG" 2>/dev/null || echo 0)
       [ "${nfail:-0}" -gt 0 ] && echo "- **${nfail} stage-invocation(s) did not complete** — those lenses recorded no verdict and did not advance; grep the night log for \`FAILED\`."
@@ -112,10 +101,8 @@ write_digest() { # made open status [advice]
       | "- fixes that held \(.window_days) days after merge: \($r | join(" · "))"
           + (if $gone > 0 then " — \($gone) whose code was later removed are not counted" else "" end)
     ' "$SURVIVAL_SNAPSHOT" 2>/dev/null || true
-    # Harvest scoreboard (all-time, from bin/harvest verdict events): the human
-    # feedback loop made visible. A branch with no terminal verdict counts as open. The terminal
-    # set comes from lib/ledger.py (ADR 0025): resolved/wontfix are decided too, so they are
-    # counted on their own instead of as open; the merge-rate stays merged/(merged+dropped).
+    # Harvest scoreboard (all-time verdicts). The terminal set comes from lib/ledger.py (ADR 0025):
+    # resolved/wontfix count as decided, not open; the merge-rate stays merged/(merged+dropped).
     [ -f "$LEDGER" ] && ledger harvest-scoreboard 2>/dev/null || true
     # Coverage matrix (ADR 0010): days since nightshift last serviced each (repo × dimension).
     # Makes the rotation observable — a large number or — flags a long-overdue lens.
@@ -134,11 +121,9 @@ write_digest() { # made open status [advice]
         done
       }
     fi
-    # ADR 0015: rulebook-exclusion suggestions. 3 consecutive out-of-scope passes for a (repo,dim) —
-    # a full review through the lens that keeps concluding it has no surface here — is strong evidence
-    # recon's low verdict is right. Recon can't exclude (it only reprioritizes); the human owns the
-    # rulebook, so surface a suggestion rather than acting. Driven by Explore's own conclusion, not by
-    # recon repeating itself (which would be a circular doom loop).
+    # ADR 0015: rulebook-exclusion suggestions after 3 consecutive out-of-scope Explore passes for a
+    # (repo, dim). Only suggested: the human owns the rulebook. Driven by Explore's conclusion, never
+    # by recon repeating itself.
     [ -f "$LEDGER" ] && ledger exclusion-suggestions 2>/dev/null || true
     # ADR 0039: "nothing found" is a result, not a failure. Show how often each lens reports it, so a
     # lens that never comes back empty is visible as one that may be manufacturing findings. A pass is
@@ -160,18 +145,12 @@ write_digest() { # made open status [advice]
       done
       [ -n "$contra" ] && printf '\n## Rulebook/recon contradictions (ADR 0015)\n%s' "$contra"
     fi
-    # The merge-rate scoreboard: the tuning signal — which lenses (ADR 0010 Phase 4) and which KINDS
-    # of change humans actually merge. Join the latest verdict per repo+branch back to the shipped row and
-    # slice it by dimension, verifiability, proof, and finding type. Empty slices are omitted.
-    # One parameterised `rate` for all four slices, so the four cannot drift apart.
+    # Merge rate by dimension, verifiability, proof and finding type (ADR 0010): which lenses and
+    # kinds of change humans merge. Empty slices are omitted.
     [ -f "$LEDGER" ] && ledger merge-rate 2>/dev/null || true
     echo
-    # Backpressure ADDS a banner; it never REPLACES the body. Hitting the open-branch cap is the
-    # normal end of a productive night (default cap 2, and the cap is only reached BY shipping), so
-    # this is exactly when the human most needs the sections below: the banner says "go harvest
-    # branches", and `## Shipped` is what names them. Suppressing the body here also broke ADR
-    # 0004's digest contract (report shipped AND considered-but-abandoned) and contradicted this
-    # same file's own `shipped this run: N` header line.
+    # Backpressure ADDS a banner and never replaces the body: at the cap the human needs `## Shipped`
+    # to know which branches to harvest (ADR 0004's digest contract).
     if [ "$status" = "backpressure" ]; then
       echo "**FULL STOP — open-branch cap reached.** Harvest (merge/delete) some \`${BRANCH_PREFIX}\` branches to resume."
       echo
@@ -185,9 +164,9 @@ write_digest() { # made open status [advice]
     echo "## Considered but not shipped"
     [ -f "$LEDGER" ] && ledger night-section considered "$NIGHT" 2>/dev/null || true
     echo
-    # What the agents said about the HARNESS rather than about the code (collect_agent_note). Only
-    # tonight's notes; the file keeps every one. Shown to the human and to nobody else — these are
-    # never read back into a stage, for the reason collect_agent_note gives.
+    # Tonight's agent notes about the HARNESS (collect_agent_note). Shown to the human only, never
+    # read back into a stage.
+
     if [ -f "$AGENT_NOTE_FILE" ] && grep -q "^## $NIGHT · " "$AGENT_NOTE_FILE" 2>/dev/null; then
       echo "## Notes from the agents (about the harness, not the code)"
       # From the first heading of tonight to the last line before the next night's heading.

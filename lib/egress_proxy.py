@@ -205,9 +205,8 @@ def dispatch(conn: socket.socket, slots: threading.BoundedSemaphore) -> bool:
 
 
 def main(sock_path: str) -> None:
-    # The Runner stops this proxy with SIGINT. A process started from a shell that ignores SIGINT
-    # inherits SIG_IGN, and Python then installs no KeyboardInterrupt handler: the kill does nothing
-    # and the proxy outlives its gate (seen on GitHub's ubuntu-26.04 runner). Take the signal back.
+    # The Runner stops this proxy with SIGINT. Started from a shell that ignores SIGINT, Python
+    # inherits SIG_IGN and installs no handler, so the kill would do nothing. Take the signal back.
     signal.signal(signal.SIGINT, signal.default_int_handler)
     if os.path.exists(sock_path):
         os.unlink(sock_path)
@@ -217,12 +216,10 @@ def main(sock_path: str) -> None:
     os.chmod(sock_path, 0o600)
     srv.listen(64)
     log(f"listening on {sock_path} (CONNECT to public {ALLOWED_PORTS} only)")
-    # Announce readiness on stdout so the Runner can wait for it instead of sleeping and hoping.
-    # The pid rides along because the Runner cannot derive it: `$!` after `exec 8< <(python3 ...)`
-    # names the subshell bash forks for the substitution, and that subshell only *becomes* this
-    # process on a bash that exec-replaces it (5.2 does, the 5.1 on Debian 11 does not). Killing
-    # `$!` there leaves this proxy alive with its socket directory already deleted -- a listener
-    # outliving the gate it was built for, which tests/test-gate-egress.sh is there to catch.
+    # Announce readiness on stdout so the Runner can wait for it. The pid rides along because `$!`
+    # after `exec 8< <(python3 ...)` may name bash's substitution subshell, not this process
+    # (gate_exec in lib/sandbox.sh).
+
     print(f"ready {os.getpid()}", flush=True)
     slots = threading.BoundedSemaphore(MAX_ACTIVE_CONNECTIONS)
     while True:

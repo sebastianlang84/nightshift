@@ -9,10 +9,8 @@ set -euo pipefail
 HOME_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SB="${1:-$HOME_DIR/sandbox}"
 
-# A caller-named sandbox (schedule.sh dry-run passes a fresh mktemp dir) meets an `rm -rf` two lines
-# down, so a mistyped path would delete an operator's directory. The default path keeps its old
-# behaviour — it is this script's own dir and gets rebuilt on every run — but an explicit one may
-# only be absolute and empty/absent.
+# A caller-named sandbox meets an `rm -rf` below, so it must be absolute and empty or absent; only
+# the default path, this script's own dir, is rebuilt unconditionally.
 if [ "$#" -gt 0 ]; then
   case "$SB" in /*) ;; *) echo "sandbox dir must be an absolute path: $SB" >&2; exit 2 ;; esac
   if [ -n "$(ls -A "$SB" 2>/dev/null)" ]; then
@@ -41,10 +39,8 @@ def greet(name):
     return "hello " + name
 EOF
 
-# The gate below imports this module, and CPython writes __pycache__ next to it. Un-ignored, that
-# counts as the suite modifying the worktree, and ADR 0027 refuses to ship a tree the suite altered
-# after review saw it — so the dry-run would exercise everything except the push. Every real repo in
-# the fleet already ignores this; the demo project has to as well, or it teaches the wrong shape.
+# The gate imports this module, and an un-ignored __pycache__ would count as the suite altering the
+# reviewed tree, which ADR 0027 refuses to ship: the dry-run would never reach the push.
 cat > .gitignore <<'EOF'
 __pycache__/
 EOF

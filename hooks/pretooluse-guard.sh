@@ -17,11 +17,9 @@ set -euo pipefail
 input="$(cat)"
 
 deny() {
-  # Block the tool call with a reason. The reason carries an agent-supplied value — the
-  # Layer 2(b) call site embeds the resolved write target — so it MUST be JSON-escaped:
-  # interpolating a path containing a double quote, a backslash or a control character
-  # into a hand-built string literal emits INVALID JSON from the one code path whose job
-  # is to block the call. jq -nc --arg escapes, like every other JSON emitter in the repo.
+  # Block the tool call with a reason. The reason can carry an agent-supplied path, so it MUST be
+  # JSON-escaped (jq --arg): a quote or backslash in a hand-built literal would emit invalid JSON
+  # from the one path whose job is to block.
   local out
   if out="$(jq -nc --arg reason "nightshift: $1" \
       '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$reason}}' \
@@ -52,15 +50,11 @@ if [ -n "$cmd" ]; then
     # string in a command is safe.
     *GIT_CONFIG_COUNT*|*GIT_CONFIG_KEY*|*GIT_CONFIG_VALUE*|*GIT_CONFIG_GLOBAL*|*GIT_CONFIG_SYSTEM*)
                                deny "setting GIT_CONFIG_* would override the injected core.hooksPath (Layer 1 confinement)" ;;
-    # The patterns above stop the hook being turned OFF; this one stops it being told to
-    # allow MORE. hooks/pre-push builds its allowed namespace from the environment
-    # (refs/heads/${NIGHTSHIFT_BRANCH_PREFIX:-nightshift/}) and accepts any ref with that
-    # prefix, so `NIGHTSHIFT_BRANCH_PREFIX=m git push origin HEAD:main` leaves the hook
-    # installed and running while making refs/heads/main match — a full bypass. Same
-    # reasoning as GIT_CONFIG_* above: the Runner exports this as process env
-    # (nightshift.sh), never as an agent command, so denying the string in a command is
-    # safe. Like core.hooksPath, a command that merely mentions the name is denied too —
-    # a nuisance false deny beats a false allow on the branch-only guarantee.
+    # The patterns above stop the hook being turned OFF; this one stops it being told to allow
+    # MORE: hooks/pre-push takes its namespace from NIGHTSHIFT_BRANCH_PREFIX, so `=m` would make
+    # refs/heads/main match. The Runner sets it as process env, never in a command, so merely
+    # mentioning the name is denied: a false deny beats a false allow.
+
     *NIGHTSHIFT_BRANCH_PREFIX*)
                                deny "setting NIGHTSHIFT_BRANCH_PREFIX would widen the branch namespace pre-push allows (Layer 1 confinement)" ;;
   esac

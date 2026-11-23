@@ -62,15 +62,12 @@ def scan(text, start, repair=False):
                 break                      # a closer with nothing open: not our object
             if (len(stack) == 1 and c != CLOSER[stack[0]]
                     and text[i + 1 :].lstrip().startswith(",")):
-                # An outer mismatch is complete only when it really ends the candidate.
-                # `{"a":1],"b":2}` is not a misspelled final closer: returning at `]` would
-                # silently discard the rest of the object and manufacture valid JSON, so no
-                # repair is attempted. Nor may the scan pop the outer opener and go on: with
-                # the stack empty, the next balanced pair (`"c":{…}`) would end the candidate
-                # inside the object and hand the search a nested fragment. The opener stays
-                # open, the candidate ends at its real closer, and the stray closer keeps it
-                # from parsing — so a verdict after it (prose like `{x in (0,1], y}`) is
-                # still found.
+                # An outer mismatch followed by more members (`{"a":1],"b":2}`) is not a
+                # misspelled final closer: repairing it would discard the rest and manufacture
+                # valid JSON, and popping the opener would let a nested pair end the candidate.
+                # The opener stays open and the stray closer keeps the candidate from parsing,
+                # so a verdict after it is still found.
+
                 if repair:
                     return None, (swaps, commas), i
                 out.append(c)

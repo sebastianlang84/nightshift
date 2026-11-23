@@ -38,7 +38,7 @@ EOF
 
 # Fake only the first-party CLI boundary. Runner, recon, worktree, git, and ledger paths stay real.
 # The fake asserts the per-stage CAPABILITY profile (--tools) and the runner-owned flags, then emits
-# the two DIFFERENT --output-format json shapes claude_run must normalise (bin/nightshift.sh:461-468):
+# the two DIFFERENT --output-format json shapes claude_run (lib/adapters.sh) must normalise:
 # explore returns the ARRAY-of-events shape (a rate_limit_event ahead of the result object) — the
 # documented silent-failure trap; the other stages return the top-level result-object shape. If the
 # array normalisation regresses, explore.out is empty -> no finding -> no branch -> this test fails.
