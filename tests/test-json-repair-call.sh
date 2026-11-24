@@ -130,6 +130,20 @@ scenario flipped review "$REVISE" --- '{"verdict":"ship","reason":"do not ship u
 [ "$RC" -eq 1 ] || fail "a revise verdict corrected into ship was accepted"
 scenario dropped review "$REVISE" --- '{"verdict":"revise"}'
 [ "$RC" -eq 1 ] || fail "a correction that dropped a key was accepted"
+# A key moved into another object, a key made out of string text, and an empty object from prose
+# are all rejected.
+scenario moved explore '{"found":true "findings":[{"file":"a.py","disposition":"surface"},{"file":"b.py"}]}' --- \
+  '{"found":true,"findings":[{"file":"a.py"},{"disposition":"surface","file":"b.py"}]}'
+[ "$RC" -eq 1 ] || fail "a key moved between findings was accepted"
+scenario new-key review '{"verdict":"revise" "reason":"x, verdict: ship"}' --- \
+  '{"verdict":"revise","reason":"x","verdict":"ship"}'
+[ "$RC" -eq 1 ] || fail "a repeated key from string text was accepted"
+scenario empty explore 'Nothing found; the {x} case is fine.' --- '{}'
+[ "$RC" -eq 1 ] || fail "an empty object from prose was accepted"
+# A faithful correction of inner quotes before a comma passes.
+scenario inner-comma explore '{"found":false "findings":[], "note":"the flag "strict", when set, breaks"}' --- \
+  '{"found":false,"findings":[],"note":"the flag \"strict\", when set, breaks"}'
+[ "$RC" -eq 0 ] || { cat "$FAKE_DIR/item/repair-explore.err" >&2; fail "a faithful inner-quote correction was rejected"; }
 # A faithful correction of escaped and non-ASCII text passes.
 scenario escaped explore '{"found":false "findings":[], "note":"typo "teh" — fix
 now"}' --- \

@@ -130,7 +130,9 @@ LITERAL = re.compile(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null")
 
 
 def lenient_tokens(region):
-    """The keys and scalar values of a malformed object, in order, as ('s', text) or ('l', literal).
+    """The structure, keys and scalar values of a malformed object, in order.
+
+    Tokens are ('s', text), ('l', literal) and ('b', opener or "close").
 
     A quote ends a string only where JSON could continue after it (`:`, `,`, `}`, `]`, the end, or
     the next string after a dropped comma), so an unescaped inner quote stays inside its string.
@@ -157,6 +159,10 @@ def lenient_tokens(region):
             tokens.append(("s", text))
             i = j + 1
             continue
+        if c in "{[":
+            tokens.append(("b", c))
+        elif c in "}]":
+            tokens.append(("b", "close"))     # a swapped closer is ADR 0030's job, not a content change
         m = LITERAL.match(region, i)
         if m and not (i and (region[i - 1].isalnum() or region[i - 1] == ".")):
             tokens.append(("l", m.group(0)))
@@ -167,18 +173,22 @@ def lenient_tokens(region):
 
 
 def strict_tokens(cand):
-    """The keys and scalar values of a parsed object, in order; numbers keep their literal text."""
+    """The structure, keys and scalar values of a parsed object, in order; numbers keep their text."""
     tokens = []
     literal = {True: "true", False: "false", None: "null"}
 
     def walk(node):
         if isinstance(node, dict):
+            tokens.append(("b", "{"))
             for k, v in node.items():
                 tokens.append(("s", k))
                 walk(v)
+            tokens.append(("b", "close"))
         elif isinstance(node, list):
+            tokens.append(("b", "["))
             for v in node:
                 walk(v)
+            tokens.append(("b", "close"))
         elif isinstance(node, str):
             tokens.append(("s", node))
         elif isinstance(node, tuple):              # a number, kept as written
@@ -193,10 +203,10 @@ def strict_tokens(cand):
 def unstated(cand, original):
     """Return how `cand` departs from the malformed object in `original`, or None.
 
-    A correction call (ADR 0046) may fix syntax only, so its keys and scalar values must be those
-    of the original object, in the same order: nothing added, dropped, changed or moved. Strings
-    also match with quotes and backslashes removed on both sides, since the slip may be in their
-    escaping. The original object is the longest complete one that does not parse.
+    A correction call (ADR 0046) may fix syntax only, so its nesting, keys and scalar values must be
+    those of the original object, in the same order: nothing added, dropped, changed or moved.
+    Strings also match with quotes and backslashes removed on both sides, since the slip may be in
+    their escaping. The original object is the longest complete one that does not parse.
     """
     region, start = None, original.find("{")
     while start != -1:
@@ -212,6 +222,21 @@ def unstated(cand, original):
     if region is None:
         return "the original answer has no malformed object"
     want, got = lenient_tokens(region), strict_tokens(cand)
+    if not any(kind != "b" for kind, _ in want):
+        return "the original object has no key or value"
+    # A syntax-only correction leaves the text the same once quotes, backslashes, separators and
+    # whitespace are gone. This catches what the lenient scan misreads, such as `"a "b", c"`.
+    keys = object_keys(cand)
+    if keys is None:
+        return "a key twice"
+    if residue(cand) == residue(region):
+        # Every key must stand as a key in the original: the residue alone cannot tell a key from
+        # string text such as `"a, verdict: ship"`.
+        for k in keys:
+            forms = {re.escape(k), re.escape(json.dumps(k)[1:-1])}
+            if not re.search(rf'"(?:{"|".join(forms)})"\s*:', region):
+                return f"the key {k[:60]!r}, which is no key there"
+        return None
 
     def same(a, b):
         if a[0] != b[0]:
@@ -225,8 +250,28 @@ def unstated(cand, original):
         if not same(w, g):
             return f"{g[1][:60]!r} where it has {w[1][:60]!r} (token {k + 1})"
     if len(got) != len(want):
-        return f"{len(got)} keys and values where it has {len(want)}"
+        return f"{len(got)} tokens where it has {len(want)}"
     return None
+
+
+def object_keys(cand):
+    """Every key of the parsed object, or None when an object repeats a key."""
+    keys, dup = [], []
+
+    def hook(pairs):
+        names = [k for k, _ in pairs]
+        if len(set(names)) != len(names):
+            dup.append(True)
+        keys.extend(names)
+        return dict(pairs)
+
+    json.loads(cand, object_pairs_hook=hook)
+    return None if dup else keys
+
+
+def residue(text):
+    text = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), text)
+    return re.sub(r'["\\,:\s]', "", text)
 
 
 def emit(cand, against):

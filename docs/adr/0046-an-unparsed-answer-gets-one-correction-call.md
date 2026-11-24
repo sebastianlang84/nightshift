@@ -39,11 +39,13 @@ and the answer in a fence it cannot close. It asks for the same object with corr
 only, and for `NO_JSON` when the answer holds no stage object, is truncated or is ambiguous.
 
 The reply goes through the same extraction into the stage's own artifact, with one extra check:
-`extract_json.py --against <stage>.out` compares the keys and scalar values of the corrected object,
-in order, with those of the longest malformed object in the original answer. A lenient scan reads
-the original; numbers keep their literal text, and strings also match with quotes and backslashes
-removed, since the slip may be in their escaping. Any added, dropped, changed or moved key or value
-rejects the correction. Codex gets `--skip-git-repo-check`, because the directory is no repository.
+`extract_json.py --against <stage>.out` compares the nesting, keys and scalar values of the
+corrected object, in order, with those of the longest malformed object in the original answer. A
+lenient scan reads the original; numbers keep their literal text, and strings also match with
+quotes and backslashes removed. Where the scan misreads an unescaped inner quote, the texts may
+instead match once quotes, backslashes, separators and whitespace are removed; then every key must
+stand as a key in the original. A repeated key, an original without keys, or any added, dropped,
+changed or moved token rejects the correction. Codex gets `--skip-git-repo-check`, because the directory is no repository.
 Validity rules do not change: the caller's checks read the
 artifact as before. A failed correction leaves the stage failed with its original status. The
 correction gets no retry, neither for an empty reply nor for another parse failure. A wall on the
@@ -55,9 +57,8 @@ correction call counts in the wall streak but does not mark the stage itself as 
 - **Positive:** both calls are rows in `runs.jsonl`. The digest counts correction calls and how
   many parsed, so their worth can be measured.
 - **Positive:** the digest no longer counts a corrected stage as lost, and counts a failed one once.
-- **Negative:** the check compares keys and values, not nesting. A correction could still move a
-  value into another object; the caller's checks still apply. A lenient scan can also misread an
-  unusual slip and reject an honest correction, which only fails the stage as before. The artifact
+- **Negative:** the check is a heuristic over malformed text. It can reject an honest correction,
+  which only fails the stage as before; the caller's checks still apply after it accepts one. The artifact
   is no longer byte-for-byte what the stage model wrote; the original answer stays in `<stage>.out`.
 - **Unchanged:** an empty answer, a refusing adapter, a spent quota and a bad credential behave as
   before.
