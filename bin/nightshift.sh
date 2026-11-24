@@ -386,7 +386,7 @@ case "$EMPTY_ANSWER_RETRIES" in
 esac
 
 # An answer that arrived and did not parse gets ONE correction call (ADR 0046). The answer is sent
-# back whole, so a larger one is refused rather than sent; 0 disables the call.
+# back whole, so a larger one is not sent; 0 disables the call.
 JSON_REPAIR_MAX_BYTES="${NIGHTSHIFT_JSON_REPAIR_MAX_BYTES:-65536}"
 case "$JSON_REPAIR_MAX_BYTES" in
   ''|*[!0-9]*) JSON_REPAIR_MAX_BYTES=65536 ;;
@@ -412,10 +412,14 @@ stage_answer_empty() { # answer_file
   ! grep -q '[^[:space:]]' "$1" 2>/dev/null
 }
 
-# A correction call is worth its cost only for a JSON stage whose answer has an object to correct.
-stage_answer_repairable() { # stage answer_file
+# A correction call is worth its cost only for a JSON stage whose answer holds a complete object.
+# An object that never closes is a truncated answer, and completing it would invent its end (ADR
+# 0030); extract_json.py names that reason first.
+stage_answer_repairable() { # stage item_dir
+  local reason
   case "$1" in explore|review|recon|advise|verify) ;; *) return 1 ;; esac
-  grep -q '{' "$2" 2>/dev/null
+  reason="$(grep -m1 '^no parseable JSON from stage' "$2/$1.err" 2>/dev/null || true)"
+  case "$reason" in *"does not parse:"*) return 0 ;; *) return 1 ;; esac
 }
 
 review_artifact_usable() { # item_dir -> a reviewer actually chose one documented verdict
@@ -552,11 +556,13 @@ run_agent() { # stage workdir item_dir [attempt]
     # An answer that ARRIVED and did not parse (ADR 0046): one call without tools gets the parse
     # error and the answer and must return the same object as valid JSON. Its output goes through
     # the same extraction into the same artifact; the caller's checks are unchanged. A failed call
-    # leaves the stage failed with its original status.
+    # leaves the stage failed with its original status. A stage counted as a wall gets no call: a
+    # second call into the same wall would end the night (ADR 0023).
     if [ -z "$AGENT_FATAL" ] && [ "$status" -eq 1 ] && [ -z "${_run_agent_repair:-}" ] \
-       && [ "$AGENT_UNPARSED_ANSWER" = 1 ] && [ "$JSON_REPAIR_MAX_BYTES" -gt 0 ] \
-       && stage_answer_repairable "$stage" "$item_dir/$stage.out"; then
-      local size walled repair_status=0
+       && [ "$AGENT_UNPARSED_ANSWER" = 1 ] && [ "$AGENT_LAST_WALLED" = 0 ] \
+       && [ "$JSON_REPAIR_MAX_BYTES" -gt 0 ] \
+       && stage_answer_repairable "$stage" "$item_dir"; then
+      local size walled repair_cwd repair_status=0
       size=$(wc -c < "$item_dir/$stage.out")
       if [ "$size" -gt "$JSON_REPAIR_MAX_BYTES" ]; then
         log "  stage $stage: the answer did not parse and is $size bytes, above the correction limit of $JSON_REPAIR_MAX_BYTES — not sent"
@@ -571,7 +577,16 @@ run_agent() { # stage workdir item_dir [attempt]
         log "  stage $stage: the answer did not parse — one correction call asks for it as valid JSON"
         walled=$AGENT_LAST_WALLED
         local _run_agent_repair=1
-        run_agent "repair-$stage" "$workdir" "$item_dir" || repair_status=$?
+        # An empty cwd outside $HOME, like the worktrees: the call sees neither the repo nor its
+        # instruction files.
+        if mkdir -p "$WORKTREES_DIR" 2>/dev/null \
+           && repair_cwd="$(mktemp -d "$WORKTREES_DIR/.repair.XXXXXXXX")"; then
+          run_agent "repair-$stage" "$repair_cwd" "$item_dir" || repair_status=$?
+          rm -rf -- "$repair_cwd"
+        else
+          log "  stage $stage: no empty directory for the correction call — not sent"
+          repair_status=1
+        fi
         # The stage itself reached its model; a wall on the correction call stays in the streak only.
         AGENT_LAST_WALLED=$walled
         if [ "$repair_status" -eq 0 ]; then

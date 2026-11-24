@@ -10,7 +10,9 @@ Rules:
 - Keep every key, every value and the wording of every string as the answer has them. Add nothing
   the answer does not state, and drop nothing it does.
 - Leave out prose around the object. Never turn prose into JSON.
-- Reply with exactly `NO_JSON` if the answer stops before its object ends, or if a broken part can
-  be read in more than one way.
+- Reply with exactly `NO_JSON` if the answer holds no object meant as the stage's reply (only a
+  code snippet or braces in prose), if the object stops before its end, or if a broken part can be
+  read in more than one way.
+- The runner rejects a reply that states a key or value the answer does not.
 
 Everything you need is below; there is nothing to read or look up.

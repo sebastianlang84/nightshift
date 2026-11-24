@@ -86,15 +86,17 @@ write_digest() { # made open status [advice]
       dur=$(jq -s --arg n "$NIGHT" '[.[]|select(.night==$n)|.duration_s]|add // 0' "$RUNSLOG")
       echo "- runs tonight: ${runs} stage-invocations, ${dur}s total"
       # Stages that never finished cost tokens and record no verdict, so they are counted here.
-      # A `repair-<stage>` row is the one JSON correction call for an unparsed answer (ADR 0046). A
-      # corrected answer did record its verdict, so its stage's failed row is not counted as lost.
+      # A `repair-<stage>` row is the one JSON correction call for an unparsed answer (ADR 0046). It
+      # is not counted on its own, and a correction that parsed takes its stage off the count; the
+      # caller's checks still judge that artifact, as they judge any stage that parsed.
       local nfail nrep nrec
-      nfail=$(jq -s --arg n "$NIGHT" '[.[]|select(.night==$n and .exit!=0)]|length' "$RUNSLOG" 2>/dev/null || echo 0)
+      nfail=$(jq -s --arg n "$NIGHT" '[.[]|select(.night==$n and .exit!=0
+        and (((.stage // "") | tostring | startswith("repair-")) | not))]|length' "$RUNSLOG" 2>/dev/null || echo 0)
       read -r nrep nrec <<< "$(jq -rs --arg n "$NIGHT" \
         '[.[]|select(.night==$n and ((.stage // "") | tostring | startswith("repair-")))]
          | "\(length) \(map(select(.exit==0))|length)"' "$RUNSLOG" 2>/dev/null || echo "0 0")"
       nrep=${nrep:-0} nrec=${nrec:-0}
-      [ "$nrep" -gt 0 ] && echo "- JSON correction calls: ${nrec} of ${nrep} unparsed answers became valid JSON"
+      [ "$nrep" -gt 0 ] && echo "- JSON correction calls: ${nrec} of ${nrep} unparsed answers parsed after one correction"
       nfail=$(( ${nfail:-0} - nrec ))
       [ "${nfail:-0}" -gt 0 ] && echo "- **${nfail} stage-invocation(s) did not complete** — those lenses recorded no verdict and did not advance; grep the night log for \`FAILED\`."
     fi

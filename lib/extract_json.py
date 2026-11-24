@@ -16,6 +16,7 @@ inside the unfinished one, and returning it would answer the stage with a
 fragment of a reply the model never completed.
 """
 import json
+import re
 import sys
 
 # A repaired candidate is only trustworthy while the damage is a slip. Past a
@@ -124,29 +125,152 @@ def repair_syntax(text, start):
     return cand, fixes
 
 
+ESCAPE = re.compile(r'\\(["\\/bfnrt]|u[0-9a-fA-F]{4})')
+LITERAL = re.compile(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null")
+
+
+def lenient_tokens(region):
+    """The keys and scalar values of a malformed object, in order, as ('s', text) or ('l', literal).
+
+    A quote ends a string only where JSON could continue after it (`:`, `,`, `}`, `]`, the end, or
+    the next string after a dropped comma), so an unescaped inner quote stays inside its string.
+    """
+    tokens, i, n = [], 0, len(region)
+    while i < n:
+        c = region[i]
+        if c == '"':
+            j, raw = i + 1, []
+            while j < n:
+                if region[j] == "\\" and j + 1 < n:
+                    raw.append(region[j:j + 2])
+                    j += 2
+                    continue
+                if region[j] == '"' and region[j + 1:].lstrip()[:1] in ("", ":", ",", "}", "]", '"'):
+                    break
+                raw.append(region[j])
+                j += 1
+            raw = "".join(raw)
+            try:
+                text = json.loads(f'"{raw}"')
+            except Exception:
+                text = ESCAPE.sub(lambda m: json.loads(f'"{m.group(0)}"'), raw)
+            tokens.append(("s", text))
+            i = j + 1
+            continue
+        m = LITERAL.match(region, i)
+        if m and not (i and (region[i - 1].isalnum() or region[i - 1] == ".")):
+            tokens.append(("l", m.group(0)))
+            i = m.end()
+            continue
+        i += 1
+    return tokens
+
+
+def strict_tokens(cand):
+    """The keys and scalar values of a parsed object, in order; numbers keep their literal text."""
+    tokens = []
+    literal = {True: "true", False: "false", None: "null"}
+
+    def walk(node):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                tokens.append(("s", k))
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+        elif isinstance(node, str):
+            tokens.append(("s", node))
+        elif isinstance(node, tuple):              # a number, kept as written
+            tokens.append(("l", node[0]))
+        else:
+            tokens.append(("l", literal[node]))
+
+    walk(json.loads(cand, parse_int=lambda t: (t,), parse_float=lambda t: (t,)))
+    return tokens
+
+
+def unstated(cand, original):
+    """Return how `cand` departs from the malformed object in `original`, or None.
+
+    A correction call (ADR 0046) may fix syntax only, so its keys and scalar values must be those
+    of the original object, in the same order: nothing added, dropped, changed or moved. Strings
+    also match with quotes and backslashes removed on both sides, since the slip may be in their
+    escaping. The original object is the longest complete one that does not parse.
+    """
+    region, start = None, original.find("{")
+    while start != -1:
+        obj, _, end = scan(original, start)
+        if obj is None:
+            break
+        try:
+            json.loads(obj)
+        except Exception:
+            if region is None or len(obj) > len(region):
+                region = obj
+        start = original.find("{", end + 1)
+    if region is None:
+        return "the original answer has no malformed object"
+    want, got = lenient_tokens(region), strict_tokens(cand)
+
+    def same(a, b):
+        if a[0] != b[0]:
+            return False
+        if a[1] == b[1]:
+            return True
+        strip = str.maketrans("", "", '"\\')
+        return a[0] == "s" and a[1].translate(strip) == b[1].translate(strip)
+
+    for k, (w, g) in enumerate(zip(want, got)):
+        if not same(w, g):
+            return f"{g[1][:60]!r} where it has {w[1][:60]!r} (token {k + 1})"
+    if len(got) != len(want):
+        return f"{len(got)} keys and values where it has {len(want)}"
+    return None
+
+
+def emit(cand, against):
+    if against is not None:
+        missing = unstated(cand, against)
+        if missing:
+            print(f"no parseable JSON from stage: the correction departs from the original answer: "
+                  f"{missing}", file=sys.stderr)
+            raise SystemExit(1)
+    sys.stdout.write(cand)
+
+
 def main() -> None:
+    # --against FILE: the stdin is a correction of FILE's answer (ADR 0046); its keys and values must
+    # be those of FILE's malformed object.
+    against = None
+    if sys.argv[1:2] == ["--against"] and len(sys.argv) == 3:
+        with open(sys.argv[2], encoding="utf-8", errors="replace") as f:
+            against = f.read()
     text = sys.stdin.read()
     start = text.find("{")
     malformed = []
-    # Why the first candidate failed, for the night log and for the Runner's one correction call
-    # (ADR 0046), which needs to know what to correct.
-    reason = "the answer holds no JSON object" if start == -1 else None
+    # Why extraction failed, for the night log and for the Runner's one correction call (ADR 0046).
+    # An object that never closes outranks every other reason: the Runner sends no truncated answer.
+    # Otherwise the longest malformed object is named, since that is the verdict, not a `${HOME}`.
+    reason, longest = "the answer holds no JSON object", -1
     while start != -1:
         cand, _, end = scan(text, start)
         if cand is None:
-            reason = reason or f"the object at character {start} never closes"
+            reason = f"the object at character {start} never closes"
             break                          # nothing from here on ever closes
         try:
             json.loads(cand)
         except Exception as exc:
-            reason = reason or f"the object at character {start} does not parse: {exc}"
+            if end - start > longest:
+                longest = end - start
+                reason = f"the object at character {start} does not parse: {exc}"
             # The outer candidate is complete but malformed. Its nested objects are not
             # independent stage verdicts; accepting one changes the schema and launders
             # a partial answer. Remember it for the repair pass, then resume only AFTER it.
             malformed.append(start)
             start = text.find("{", end + 1)
             continue
-        sys.stdout.write(cand)
+        emit(cand, against)
         return
 
     # Every malformed candidate gets its turn, in order. Prose before the verdict can
@@ -165,7 +289,7 @@ def main() -> None:
                 edits.append(f"dropped {commas} trailing comma(s)")
             print(f"json-repair: {' and '.join(edits)} to parse the stage object",
                   file=sys.stderr)
-            sys.stdout.write(cand)
+            emit(cand, against)
             return
 
     print(f"no parseable JSON from stage: {reason}", file=sys.stderr)

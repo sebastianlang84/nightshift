@@ -245,6 +245,9 @@ materialize_stage_output() { # stage item_dir
   artifact="$(stage_artifact "$stage")"
   case "$stage" in
     fix) cp "$id/$stage.out" "$id/$artifact" || rc=$? ;;
+    # A correction must state nothing its stage's answer does not (ADR 0046).
+    repair-*) python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" --against "$id/${stage#repair-}.out" \
+                < "$id/$stage.out" > "$id/$artifact" 2>>"$id/$stage.err" || rc=$? ;;
     *) [ -z "$artifact" ] \
          || python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/$artifact" 2>>"$id/$stage.err" \
          || rc=$? ;;
@@ -264,9 +267,10 @@ AGENT_UNPARSED_ANSWER=0
 # The review override belongs to the primary adapter. An advisor from the other
 # vendor uses its own work model. advise_branches keeps night_agent across its
 # temporary rebinding of NIGHTSHIFT_AGENT for each advisor.
+# A correction call (`repair-<stage>`) runs on its stage's model.
 stage_model() { # stage [adapter]
   local adapter="${2:-$NIGHTSHIFT_AGENT}" review="${NIGHTSHIFT_REVIEW_MODEL-${RB_REVIEW_MODEL:-}}"
-  case "$1" in
+  case "${1#repair-}" in
     review|advise)
       if [ "$adapter" = "${night_agent:-${NIGHTSHIFT_AGENT:-$adapter}}" ] && [ -n "$review" ]; then
         printf '%s' "$review"
@@ -406,6 +410,8 @@ codex_run() { # stage workdir item_dir
     *)   sandbox=read-only ;;
   esac
   args+=(--sandbox "$sandbox")
+  # A correction call runs in an empty directory, not a repository (ADR 0046).
+  case "$stage" in repair-*) args+=(--skip-git-repo-check) ;; esac
   [ "$stage" != fix ] || args+=(-c 'sandbox_workspace_write.network_access=false'
     -c 'sandbox_workspace_write.exclude_slash_tmp=true' -c 'sandbox_workspace_write.exclude_tmpdir_env_var=true')
   # Same precedence as the claude half: env if SET (empty = pass no --model), else the rulebook's

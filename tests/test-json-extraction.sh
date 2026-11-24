@@ -149,4 +149,17 @@ jq -e '.note == "a, b,"' "$TMP/instr" >/dev/null || {
   echo "test-json-extraction: repair reached inside a string literal" >&2; exit 1;
 }
 
+# The reason names what the Runner's correction call needs (ADR 0046): the verdict, not a brace pair
+# in the prose before it, and a truncated object ahead of any malformed one.
+printf 'Use ${HOME} here. {"found":false "findings":[]}' |
+  python3 "$ROOT/lib/extract_json.py" > /dev/null 2> "$TMP/err" && exit 1
+grep -q 'the object at character 18 does not parse' "$TMP/err" || {
+  echo "test-json-extraction: the reason does not name the verdict" >&2; cat "$TMP/err" >&2; exit 1;
+}
+printf '{"a" 1} then {"found":false' |
+  python3 "$ROOT/lib/extract_json.py" > /dev/null 2> "$TMP/err" && exit 1
+grep -q 'never closes' "$TMP/err" || {
+  echo "test-json-extraction: a truncated object is not named first" >&2; cat "$TMP/err" >&2; exit 1;
+}
+
 echo "test-json-extraction: ok"
