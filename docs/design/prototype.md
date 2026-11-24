@@ -127,6 +127,7 @@ finding, needs a night against a clean repo.
 | `lib/probe_findings.py` | finding freshness probe (ADR 0021), writes `state/findings-probe.json` |
 | `lib/ledger.py` | the ledger's only reader and writer: verdict sets, append-order rules, one command per question |
 | `prompts/{recon,explore,fix,review,verify,advise}.md` | provider-neutral stage prompts |
+| `prompts/repair.md` | the one JSON correction call for an unparsed stage answer (ADR 0046) |
 | `prompts/dimensions/*.md` | one lens per review dimension, selected by recon |
 | `rulebook.example.yaml` | the governance template |
 

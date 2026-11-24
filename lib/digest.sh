@@ -86,8 +86,16 @@ write_digest() { # made open status [advice]
       dur=$(jq -s --arg n "$NIGHT" '[.[]|select(.night==$n)|.duration_s]|add // 0' "$RUNSLOG")
       echo "- runs tonight: ${runs} stage-invocations, ${dur}s total"
       # Stages that never finished cost tokens and record no verdict, so they are counted here.
-      local nfail
+      # A `repair-<stage>` row is the one JSON correction call for an unparsed answer (ADR 0046). A
+      # corrected answer did record its verdict, so its stage's failed row is not counted as lost.
+      local nfail nrep nrec
       nfail=$(jq -s --arg n "$NIGHT" '[.[]|select(.night==$n and .exit!=0)]|length' "$RUNSLOG" 2>/dev/null || echo 0)
+      read -r nrep nrec <<< "$(jq -rs --arg n "$NIGHT" \
+        '[.[]|select(.night==$n and ((.stage // "") | tostring | startswith("repair-")))]
+         | "\(length) \(map(select(.exit==0))|length)"' "$RUNSLOG" 2>/dev/null || echo "0 0")"
+      nrep=${nrep:-0} nrec=${nrec:-0}
+      [ "$nrep" -gt 0 ] && echo "- JSON correction calls: ${nrec} of ${nrep} unparsed answers became valid JSON"
+      nfail=$(( ${nfail:-0} - nrec ))
       [ "${nfail:-0}" -gt 0 ] && echo "- **${nfail} stage-invocation(s) did not complete** — those lenses recorded no verdict and did not advance; grep the night log for \`FAILED\`."
     fi
     # Whether merged fixes held 30 days later (ADR 0043), from the snapshot harvest refreshed at the

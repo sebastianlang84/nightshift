@@ -128,13 +128,18 @@ def main() -> None:
     text = sys.stdin.read()
     start = text.find("{")
     malformed = []
+    # Why the first candidate failed, for the night log and for the Runner's one correction call
+    # (ADR 0046), which needs to know what to correct.
+    reason = "the answer holds no JSON object" if start == -1 else None
     while start != -1:
         cand, _, end = scan(text, start)
         if cand is None:
+            reason = reason or f"the object at character {start} never closes"
             break                          # nothing from here on ever closes
         try:
             json.loads(cand)
-        except Exception:
+        except Exception as exc:
+            reason = reason or f"the object at character {start} does not parse: {exc}"
             # The outer candidate is complete but malformed. Its nested objects are not
             # independent stage verdicts; accepting one changes the schema and launders
             # a partial answer. Remember it for the repair pass, then resume only AFTER it.
@@ -163,7 +168,7 @@ def main() -> None:
             sys.stdout.write(cand)
             return
 
-    print("no parseable JSON from stage", file=sys.stderr)
+    print(f"no parseable JSON from stage: {reason}", file=sys.stderr)
     raise SystemExit(1)
 
 

@@ -127,6 +127,7 @@ environment override selects the CLI default. An empty review override selects t
 | `NIGHTSHIFT_CLAUDE_FLAGS` | claude | `--dangerously-skip-permissions --max-turns 60` |
 | `NIGHTSHIFT_CLAUDE_SETTING_SOURCES` | claude | `--setting-sources local` keeps the repo's `CLAUDE.md` and skips project hooks. Supply a comma-separated list of `user`, `project`, and `local`, or an exactly empty value to omit the flag and load all scopes. See the [validation rules](design/hook-spec.md#stage-isolation--the-operators-personal-config-is-not-stage-context). |
 | `NIGHTSHIFT_EMPTY_ANSWER_RETRIES` | all | `1` — a stage whose model returned nothing is retried once (ADR 0034); `0` disables it |
+| `NIGHTSHIFT_JSON_REPAIR_MAX_BYTES` | claude, codex | `65536` — an unparsed answer up to this size gets one correction call (ADR 0046); a larger one is not sent; `0` disables the call |
 | `NIGHTSHIFT_TEST_TIMEOUT` | all | the rulebook's `limits.test_timeout_seconds`, else 600s per `test_cmd` |
 | `NIGHTSHIFT_TEST_PATH` | all | nothing is prepended, so a `test_cmd` sees only `/usr/local/bin:/usr/bin:/bin` |
 | `NIGHTSHIFT_TEST_SANDBOX` | all | `bwrap` — the gate is sandboxed (ADR 0026); `none` disables it, loudly, per gate |
@@ -151,10 +152,16 @@ at all, point `NIGHTSHIFT_QUOTA_CMD` at a check that exits 75 when the night sho
 A provider sometimes accepts a turn, bills it, and returns an empty answer. That is not a verdict
 about the repository, so `run_agent` calls the stage again — once, and only when the answer file is
 empty, the stage failed with status 1, and no credential or quota verdict already stands
-([ADR 0034](adr/0034-an-empty-answer-is-not-a-verdict.md)). An answer that arrived and merely did
-not parse is left alone, as is an adapter that refused to run (status 2). Both attempts become
-`runs.jsonl` rows and the empty attempt's stream is kept in the item directory as
-`.raw_<stage>.empty-answer-1`.
+([ADR 0034](adr/0034-an-empty-answer-is-not-a-verdict.md)). An adapter that refused to run
+(status 2) is left alone. Both attempts become `runs.jsonl` rows and the empty attempt's stream is
+kept in the item directory as `.raw_<stage>.empty-answer-1`.
+
+An answer that arrived and did not parse gets one correction call instead
+([ADR 0046](adr/0046-an-unparsed-answer-gets-one-correction-call.md)). The call runs on the same
+adapter and model without tools. It receives only the parse error and the answer. Its reply goes
+through the same extraction into the stage's artifact. The stage's own row and a
+`repair-<stage>` row reach `runs.jsonl`, and the digest counts how many corrections parsed. A
+correction that fails leaves the stage failed, as before.
 
 ### The ship gate runs in a sandbox — and refuses to run without one
 

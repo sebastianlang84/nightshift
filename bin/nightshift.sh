@@ -385,17 +385,17 @@ case "$EMPTY_ANSWER_RETRIES" in
   ''|*[!0-9]*) EMPTY_ANSWER_RETRIES=1 ;;
 esac
 
+# An answer that arrived and did not parse gets ONE correction call (ADR 0046). The answer is sent
+# back whole, so a larger one is refused rather than sent; 0 disables the call.
+JSON_REPAIR_MAX_BYTES="${NIGHTSHIFT_JSON_REPAIR_MAX_BYTES:-65536}"
+case "$JSON_REPAIR_MAX_BYTES" in
+  ''|*[!0-9]*) JSON_REPAIR_MAX_BYTES=65536 ;;
+esac
+
 clear_stage_artifacts() { # stage item_dir — an iteration may never read the previous one's result
-  local stage="$1" id="$2" artifact=""
-  case "$stage" in
-    explore) artifact="$id/finding.json" ;;
-    fix)     artifact="$id/worknote.md" ;;
-    review)  artifact="$id/review.md" ;;
-    recon)   artifact="$id/recon.json" ;;
-    advise)  artifact="$id/advice.json" ;;
-    verify)  artifact="$id/verify.json" ;;
-  esac
-  rm -f "$id/$stage.out" "$id/.raw_$stage" "$id/$stage.err" "$id/.usage_$stage" ${artifact:+"$artifact"}
+  local stage="$1" id="$2" artifact
+  artifact="$(stage_artifact "$stage")"
+  rm -f "$id/$stage.out" "$id/.raw_$stage" "$id/$stage.err" "$id/.usage_$stage" ${artifact:+"$id/$artifact"}
 }
 
 preserve_stage_attempt() { # stage item_dir label — keep one attempt's evidence past the next one
@@ -410,6 +410,12 @@ preserve_stage_attempt() { # stage item_dir label — keep one attempt's evidenc
 stage_answer_empty() { # answer_file
   [ -f "$1" ] || return 1
   ! grep -q '[^[:space:]]' "$1" 2>/dev/null
+}
+
+# A correction call is worth its cost only for a JSON stage whose answer has an object to correct.
+stage_answer_repairable() { # stage answer_file
+  case "$1" in explore|review|recon|advise|verify) ;; *) return 1 ;; esac
+  grep -q '{' "$2" 2>/dev/null
 }
 
 review_artifact_usable() { # item_dir -> a reviewer actually chose one documented verdict
@@ -473,6 +479,7 @@ run_agent() { # stage workdir item_dir [attempt]
   [ -n "${_run_agent_retry:-}" ] || AGENT_LAST_WALLED=0
   local _run_agent_retry=1
   clear_stage_artifacts "$stage" "$item_dir"
+  AGENT_UNPARSED_ANSWER=0
   start=$(date +%s)
   case "$NIGHTSHIFT_AGENT" in
     mock)   "mock_$stage" "$workdir" "$item_dir" || status=$? ;;
@@ -526,7 +533,7 @@ run_agent() { # stage workdir item_dir [attempt]
     fi
     # An EMPTY answer is not a verdict (ADR 0034): retry it. Only on status 1, the parse/answer
     # failure; status 2 is a configuration refusal that an identical call can only repeat.
-    if [ -z "$AGENT_FATAL" ] && [ "$status" -eq 1 ] \
+    if [ -z "$AGENT_FATAL" ] && [ "$status" -eq 1 ] && [ -z "${_run_agent_repair:-}" ] \
        && [ "$attempt" -le "$EMPTY_ANSWER_RETRIES" ] \
        && stage_answer_empty "$item_dir/$stage.out"; then
       if [ "$attempt_agent" != mock ] && [ -s "$item_dir/.usage_$stage" ]; then
@@ -541,6 +548,39 @@ run_agent() { # stage workdir item_dir [attempt]
       log "  stage $stage: the model returned an empty answer — retrying (attempt $((attempt + 1)) of $((EMPTY_ANSWER_RETRIES + 1)))"
       run_agent "$stage" "$workdir" "$item_dir" "$((attempt + 1))"
       return $?
+    fi
+    # An answer that ARRIVED and did not parse (ADR 0046): one call without tools gets the parse
+    # error and the answer and must return the same object as valid JSON. Its output goes through
+    # the same extraction into the same artifact; the caller's checks are unchanged. A failed call
+    # leaves the stage failed with its original status.
+    if [ -z "$AGENT_FATAL" ] && [ "$status" -eq 1 ] && [ -z "${_run_agent_repair:-}" ] \
+       && [ "$AGENT_UNPARSED_ANSWER" = 1 ] && [ "$JSON_REPAIR_MAX_BYTES" -gt 0 ] \
+       && stage_answer_repairable "$stage" "$item_dir/$stage.out"; then
+      local size walled repair_status=0
+      size=$(wc -c < "$item_dir/$stage.out")
+      if [ "$size" -gt "$JSON_REPAIR_MAX_BYTES" ]; then
+        log "  stage $stage: the answer did not parse and is $size bytes, above the correction limit of $JSON_REPAIR_MAX_BYTES — not sent"
+      else
+        if [ -s "$item_dir/.usage_$stage" ]; then
+          usage=$(jq -c 'if type=="object" then . else {} end' "$item_dir/.usage_$stage" 2>/dev/null || true)
+          [ -n "$usage" ] || usage='{}'
+        fi
+        end=$(date +%s)
+        append_run "$stage" "$attempt_agent" "$start" "$((end - start))" "$status" \
+          "$(basename "$item_dir")" "$usage"
+        log "  stage $stage: the answer did not parse — one correction call asks for it as valid JSON"
+        walled=$AGENT_LAST_WALLED
+        local _run_agent_repair=1
+        run_agent "repair-$stage" "$workdir" "$item_dir" || repair_status=$?
+        # The stage itself reached its model; a wall on the correction call stays in the streak only.
+        AGENT_LAST_WALLED=$walled
+        if [ "$repair_status" -eq 0 ]; then
+          log "  stage $stage: the corrected answer parsed"
+          return 0
+        fi
+        log "  stage $stage: the corrected answer did not parse either — the stage failed"
+        return "$status"
+      fi
     fi
   fi
   # Each real adapter drops ONE compact JSON object per stage (model_id + token/cost counters).
@@ -599,6 +639,19 @@ fence_safe() { # stdin -> stdout
 
 stage_prompt() { # stage workdir item_dir -> prompt on stdout
   local stage="$1" wd="$2" id="$3" prompt
+  case "$stage" in repair-*)
+    # The correction call sees only the parse error and the answer (ADR 0046), never the repo. The
+    # fence is one backtick longer than any run in the answer, so the answer cannot close it.
+    local base="${stage#repair-}" reason fence
+    reason="$(grep -m1 '^no parseable JSON from stage' "$id/$base.err" 2>/dev/null || true)"
+    fence="$(grep -o '`\+' "$id/$base.out" 2>/dev/null | awk '{ if (length > m) m = length } END { print m + 0 }')"
+    [ "$fence" -ge 3 ] || fence=2
+    fence="$(printf '%*s' "$((fence + 1))" '' | tr ' ' '`')"
+    printf '%s\n\n## Parse error\n%s\n\n## The answer\n%s\n%s\n%s\n' \
+      "$(cat "$NIGHTSHIFT_HOME/prompts/repair.md")" "${reason:-no parseable JSON from stage}" \
+      "$fence" "$(cat "$id/$base.out")" "$fence"
+    return 0 ;;
+  esac
   prompt="$(cat "$NIGHTSHIFT_HOME/prompts/$stage.md")
 
 ## Context

@@ -224,27 +224,42 @@ mock_recon() { # workdir item_dir — deterministic yield straight from recon_si
     }, notes:"mock recon (deterministic yield mapping from filesystem signals)"}' > "$id/recon.json"
 }
 
+# The machine artifact each stage's answer becomes. A JSON correction call (`repair-<stage>`, ADR
+# 0046) writes the artifact of the stage whose answer it corrects.
+stage_artifact() { # stage -> artifact file name, "" for none
+  case "${1#repair-}" in
+    explore) printf finding.json ;;
+    fix)     printf worknote.md ;;
+    review)  printf review.md ;;
+    recon)   printf recon.json ;;
+    advise)  printf advice.json ;;
+    verify)  printf verify.json ;;
+  esac
+}
+
 # Convert a stage's textual answer into its machine artifact. Invalid output must propagate a
 # non-zero status to run_agent: inventing `found:false` here would make the Runner advance coverage
 # for a review the model never completed.
 materialize_stage_output() { # stage item_dir
-  local stage="$1" id="$2"
+  local stage="$1" id="$2" artifact rc=0
+  artifact="$(stage_artifact "$stage")"
   case "$stage" in
-    explore) python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/finding.json" 2>>"$id/$stage.err" ;;
-    fix)     cp "$id/$stage.out" "$id/worknote.md" ;;
-    review)  python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/review.md" 2>>"$id/$stage.err" ;;
-    recon)   python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/recon.json" 2>>"$id/$stage.err" ;;
-    advise)  python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/advice.json" 2>>"$id/$stage.err" ;;
-    verify)  python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/verify.json" 2>>"$id/$stage.err" ;;
+    fix) cp "$id/$stage.out" "$id/$artifact" || rc=$? ;;
+    *) [ -z "$artifact" ] \
+         || python3 "$NIGHTSHIFT_HOME/lib/extract_json.py" < "$id/$stage.out" > "$id/$artifact" 2>>"$id/$stage.err" \
+         || rc=$? ;;
   esac
   # A repaired verdict parses, so run_agent never prints its stderr; log the repair here, since the
   # artifact is not byte-for-byte what the model wrote (ADR 0030).
-  local rc=$?
   if [ -s "$id/$stage.err" ] && grep -q '^json-repair:' "$id/$stage.err" 2>/dev/null; then
     log "  stage $stage: $(grep -m1 '^json-repair:' "$id/$stage.err")"
   fi
   return $rc
 }
+
+# Set by an adapter when the CLI completed and its answer did not become the stage's artifact; only
+# then may run_agent spend a correction call on it (ADR 0046).
+AGENT_UNPARSED_ANSWER=0
 
 # The review override belongs to the primary adapter. An advisor from the other
 # vendor uses its own work model. advise_branches keeps night_agent across its
@@ -323,9 +338,11 @@ claude_run() { # stage workdir item_dir
   # --dangerously-skip-permissions. Read-only stages get Read/Grep/Glob; fix adds Write/Edit but
   # still no Bash, so it cannot run git or commands.
   local tools
+  # A JSON correction call gets no tools: everything it needs is in its prompt (ADR 0046).
   case "$stage" in
-    fix) tools="${NIGHTSHIFT_FIX_TOOLS:-Read,Grep,Glob,Write,Edit}" ;;
-    *)   tools="${NIGHTSHIFT_READONLY_TOOLS:-Read,Grep,Glob}" ;;
+    fix)      tools="${NIGHTSHIFT_FIX_TOOLS:-Read,Grep,Glob,Write,Edit}" ;;
+    repair-*) tools="" ;;
+    *)        tools="${NIGHTSHIFT_READONLY_TOOLS:-Read,Grep,Glob}" ;;
   esac
   prompt="$(stage_prompt "$stage" "$wd" "$id")"
   # Layer 1 for the agent: inject core.hooksPath via env so EVERY git the agent runs is
@@ -370,6 +387,7 @@ claude_run() { # stage workdir item_dir
       model_cost_usd:        ($top.value.costUSD // null)
     }' > "$id/.usage_$stage" 2>/dev/null || true
   materialize_stage_output "$stage" "$id" || parse_rc=$?
+  [ "$rc" -ne 0 ] || [ "$parse_rc" -eq 0 ] || AGENT_UNPARSED_ANSWER=1
   # Preserve the CLI's own nonzero status, but only AFTER materializing any valid partial result it
   # returned. main() can then keep a grounded finding while still logging that Explore hit a limit.
   [ "$rc" -eq 0 ] || return "$rc"
@@ -440,6 +458,7 @@ codex_run() { # stage workdir item_dir
       model_cost_usd:        null }' \
     "$events" > "$id/.usage_$stage" 2>/dev/null || true
   materialize_stage_output "$stage" "$id" || parse_rc=$?
+  [ "$rc" -ne 0 ] || [ "$parse_rc" -eq 0 ] || AGENT_UNPARSED_ANSWER=1
   [ "$rc" -eq 0 ] || return "$rc"
   return "$parse_rc"
 }
